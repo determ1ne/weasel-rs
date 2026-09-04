@@ -1,0 +1,70 @@
+use std::path::PathBuf;
+#[path = "../build_support/icon.rs"]
+mod icon;
+
+fn main() {
+    icon::embed();
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is not set"));
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("broker.manifest");
+    windows_bindgen::builder()
+        .output(out.join("bindings.rs"))
+        .input_default()
+        .filters([
+            "Windows.Win32.ShellExecuteW",
+            "Windows.Win32.SW_SHOWNORMAL",
+            "Windows.Win32.CoInitializeEx",
+            "Windows.Win32.CoUninitialize",
+            "Windows.Win32.COINIT_APARTMENTTHREADED",
+            "Windows.Win32.AllocConsole",
+            "Windows.Win32.CREATE_NO_WINDOW",
+            "Windows.Win32.RegisterClassW",
+            "Windows.Win32.RegisterWindowMessageW",
+            "Windows.Win32.CreateWindowExW",
+            "Windows.Win32.DefWindowProcW",
+            "Windows.Win32.DestroyWindow",
+            "Windows.Win32.DestroyMenu",
+            "Windows.Win32.GetMessageW",
+            "Windows.Win32.TranslateMessage",
+            "Windows.Win32.DispatchMessageW",
+            "Windows.Win32.PostQuitMessage",
+            "Windows.Win32.PostMessageW",
+            "Windows.Win32.WM_NULL",
+            "Windows.Win32.TPM_RETURNCMD",
+            "Windows.Win32.TPM_NONOTIFY",
+            "Windows.Win32.MF_GRAYED",
+            "Windows.Win32.MB_SETFOREGROUND",
+            "Windows.Win32.CreatePopupMenu",
+            "Windows.Win32.AppendMenuW",
+            "Windows.Win32.TrackPopupMenu",
+            "Windows.Win32.SetForegroundWindow",
+            "Windows.Win32.GetCursorPos",
+            "Windows.Win32.MessageBoxW",
+            "Windows.Win32.LoadIconW",
+            "Windows.Win32.GetModuleHandleW",
+            "Windows.Win32.Shell_NotifyIconW",
+            "Windows.Win32.WM_APP",
+            "Windows.Win32.WM_COMMAND",
+            "Windows.Win32.WM_DESTROY",
+            "Windows.Win32.WM_RBUTTONUP",
+            "Windows.Win32.NIM_ADD",
+            "Windows.Win32.NIM_DELETE",
+            "Windows.Win32.NIF_MESSAGE",
+            "Windows.Win32.NIF_ICON",
+            "Windows.Win32.NIF_TIP",
+            "Windows.Win32.MF_STRING",
+            "Windows.Win32.MF_SEPARATOR",
+            "Windows.Win32.TPM_RIGHTBUTTON",
+            "Windows.Win32.MB_OK",
+            "Windows.Win32.MB_ICONERROR",
+            "Windows.Win32.MB_ICONINFORMATION",
+        ])
+        .flat()
+        .write();
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rustc-link-arg-bin=weasel-broker=/MANIFEST:EMBED");
+    println!(
+        "cargo:rustc-link-arg-bin=weasel-broker=/MANIFESTINPUT:{}",
+        manifest.display()
+    );
+}

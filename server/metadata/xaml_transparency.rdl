@@ -1,0 +1,12 @@
+// Documented Windows.UI.Xaml interop interface, absent from default metadata.
+#[winrt]
+mod Windows {
+    mod UI {
+        mod Xaml {
+            #[guid(0x06636c29_5a17_458d_8ea2_2422d997a922)]
+            interface IXamlSourceTransparency {
+                IsBackgroundTransparent: bool;
+            }
+        }
+    }
+}

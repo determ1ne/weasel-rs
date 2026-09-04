@@ -1,0 +1,24 @@
+[package]
+name = "weasel-common"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+prost = "0.14"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+
+windows-core = "0.100.0"
+windows-strings = "0.100.0"
+
+[build-dependencies]
+windows-bindgen = "0.100.0"
+prost-build = "0.14"
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "time"] }

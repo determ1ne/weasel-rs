@@ -1,0 +1,9 @@
+// Named GROUP_ICON resources are sorted lexically in the PE resource table.
+// Keep the branding icon first: RegisterProfile uses index 0.
+BRAND ICON WEASEL_ICON_PATH
+EN_DARK ICON EN_DARK_PATH
+EN_LIGHT ICON EN_LIGHT_PATH
+ERROR_DARK ICON ERROR_DARK_PATH
+ERROR_LIGHT ICON ERROR_LIGHT_PATH
+ZH_DARK ICON ZH_DARK_PATH
+ZH_LIGHT ICON ZH_LIGHT_PATH

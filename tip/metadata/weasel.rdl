@@ -1,0 +1,12 @@
+// Hand-authored weasel-rs metadata.
+//
+// This file intentionally does not place project-owned values in the Windows
+// namespace. It is compiled as a separate metadata input and flattened by
+// build.rs together with the official Windows metadata.
+
+mod Weasel {
+    const CLSID_WEASEL_TIP: GUID =
+        0x16a7aea9_9ee6_4540_8020_e384c0489bb1;
+    const GUID_WEASEL_DISPLAY_ATTRIBUTE: GUID =
+        0xe663f448_0bed_4aea_9c88_36df372fca95;
+}

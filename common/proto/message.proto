@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+package weasel.message;
+
+// stdout transport of --deploy-ui. A frame is u32 LE length + DeployEvent.
+message DeployEvent {
+  oneof payload {
+    DeployLog log = 1;
+    DeployComplete complete = 2;
+  }
+}
+message DeployLog {
+  string stream = 1;
+  string text = 2;
+}
+message DeployComplete {
+  bool success = 1;
+  optional int32 exit_code = 2;
+  string message = 3;
+}
+
+message Ping {
+  string text = 1;
+}
+
+message LogEvent {
+  string level = 1;
+  string text = 2;
+}
+
+// Input context identity, pipe connection epoch and document-state generation.
+message ContextToken {
+  uint64 context_id = 1;
+  uint64 connection_epoch = 2;
+  uint64 generation = 3;
+}
+
+enum ContextAction {
+  CONTEXT_ACTION_UNSPECIFIED = 0;
+  CONTEXT_ACTION_FOCUS = 1;
+  CONTEXT_ACTION_BLUR = 2;
+  CONTEXT_ACTION_CANCEL = 3;
+  CONTEXT_ACTION_SUBMIT = 4;
+  // Host already owns the finalized text; do not insert an engine commit again.
+  CONTEXT_ACTION_HOST_TERMINATED = 5;
+  CONTEXT_ACTION_TOGGLE_ASCII = 6;
+}
+
+message ContextCommand {
+  ContextToken token = 1;
+  ContextAction action = 2;
+}
+
+message Candidate {
+  string text = 1;
+  string comment = 2;
+}
+
+message Shutdown {
+  string reason = 1;
+}
+
+message ShutdownResponse {
+  bool accepted = 1;
+  string message = 2;
+}
+
+message RenderRect {
+  int32 left = 1;
+  int32 top = 2;
+  int32 right = 3;
+  int32 bottom = 4;
+  bool valid = 5;
+}
+
+message RenderItem {
+  string primary_text = 1;
+  string secondary_text = 2;
+  bool enabled = 3;
+  string kind = 4;
+}
+
+message RenderSnapshot {
+  uint64 session_id = 1;
+  uint64 revision = 2;
+  bool visible = 3;
+  RenderRect anchor = 4;
+  repeated RenderItem items = 5;
+  uint32 selected_index = 6;
+  uint32 page_start = 7;
+  // Absent when the engine only exposes page-local candidates.
+  optional uint32 total_item_count = 8;
+  bool can_page_previous = 9;
+  bool can_page_next = 10;
+  ContextToken token = 11;
+  // Global presentation order within one server/renderer connection owner.
+  // Independent of per-input revision: focus, hide and layout also advance it.
+  uint64 sequence = 12;
+}
+
+enum RendererEventAction {
+  RENDERER_EVENT_ACTION_UNSPECIFIED = 0;
+  RENDERER_EVENT_ACTION_ITEM_INVOKED = 1;
+  RENDERER_EVENT_ACTION_NAVIGATE_PREVIOUS = 2;
+  RENDERER_EVENT_ACTION_NAVIGATE_NEXT = 3;
+  RENDERER_EVENT_ACTION_DISMISS = 4;
+  RENDERER_EVENT_ACTION_OPEN_EMOJI_PANEL = 5;
+}
+
+message RendererEvent {
+  uint64 session_id = 1;
+  RendererEventAction action = 2;
+  uint32 item_index = 3;
+  ContextToken token = 4;
+  uint64 revision = 5;
+}
+
+message LayoutUpdate {
+  uint64 session_id = 1;
+  RenderRect anchor = 2;
+  ContextToken token = 3;
+}

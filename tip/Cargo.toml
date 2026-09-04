@@ -1,0 +1,21 @@
+[package]
+name = "weasel-tip"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+weasel-common = { path = "../common" }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+windows-core = "0.100.0"
+
+windows-strings = "0.100.0"
+windows-registry = "0.100.0"
+
+[build-dependencies]
+embed-resource = "3"
+windows-bindgen = "0.100.0"
+windows-rdl = "0.100.0"

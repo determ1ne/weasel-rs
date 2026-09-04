@@ -1,0 +1,128 @@
+<!-- Button visual states adapted from Microsoft UI XAML CommonStyles/Button_themeresources.xaml.
+     Copyright (c) Microsoft Corporation. MIT License; see styles-LICENSE.txt.
+     Windows.UI.Xaml only: no AnimatedIcon or WinUI-only BrushTransition. -->
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Name="Root" Background="Transparent" Padding="24">
+  <Grid.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Default">
+          <SolidColorBrush x:Key="ButtonFill" Color="#0FFFFFFF"/>
+          <SolidColorBrush x:Key="ButtonHover" Color="#15FFFFFF"/>
+          <SolidColorBrush x:Key="ButtonPressed" Color="#08FFFFFF"/>
+          <SolidColorBrush x:Key="ButtonText" Color="#FFFFFFFF"/>
+          <SolidColorBrush x:Key="ButtonDim" Color="#9EFFFFFF"/>
+          <SolidColorBrush x:Key="ButtonStroke" Color="#18FFFFFF"/>
+          <SolidColorBrush x:Key="LogFill" Color="#16000000"/>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Light">
+          <SolidColorBrush x:Key="ButtonFill" Color="#B3FFFFFF"/>
+          <SolidColorBrush x:Key="ButtonHover" Color="#80FFFFFF"/>
+          <SolidColorBrush x:Key="ButtonPressed" Color="#4DFFFFFF"/>
+          <SolidColorBrush x:Key="ButtonText" Color="#E4000000"/>
+          <SolidColorBrush x:Key="ButtonDim" Color="#72000000"/>
+          <SolidColorBrush x:Key="ButtonStroke" Color="#0F000000"/>
+          <SolidColorBrush x:Key="LogFill" Color="#40FFFFFF"/>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="HighContrast">
+          <SolidColorBrush x:Key="ButtonFill" Color="{ThemeResource SystemColorButtonFaceColor}"/>
+          <SolidColorBrush x:Key="ButtonHover" Color="{ThemeResource SystemColorHighlightColor}"/>
+          <SolidColorBrush x:Key="ButtonPressed" Color="{ThemeResource SystemColorHighlightColor}"/>
+          <SolidColorBrush x:Key="ButtonText" Color="{ThemeResource SystemColorButtonTextColor}"/>
+          <SolidColorBrush x:Key="ButtonDim" Color="{ThemeResource SystemColorGrayTextColor}"/>
+          <SolidColorBrush x:Key="ButtonStroke" Color="{ThemeResource SystemColorButtonTextColor}"/>
+          <SolidColorBrush x:Key="LogFill" Color="{ThemeResource SystemColorWindowColor}"/>
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+      <Style x:Key="FluentButton" TargetType="Button">
+        <Setter Property="Background" Value="{ThemeResource ButtonFill}"/>
+        <Setter Property="Foreground" Value="{ThemeResource ButtonText}"/>
+        <Setter Property="BorderBrush" Value="{ThemeResource ButtonStroke}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Padding" Value="11,5,11,6"/>
+        <Setter Property="FontSize" Value="14"/>
+        <Setter Property="UseSystemFocusVisuals" Value="True"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Button">
+              <Border x:Name="Surface" CornerRadius="4" Background="{TemplateBinding Background}"
+                      BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
+                <VisualStateManager.VisualStateGroups>
+                  <VisualStateGroup x:Name="CommonStates">
+                    <VisualState x:Name="Normal"/>
+                    <VisualState x:Name="PointerOver"><VisualState.Setters>
+                      <Setter Target="Surface.Background" Value="{ThemeResource ButtonHover}"/>
+                    </VisualState.Setters></VisualState>
+                    <VisualState x:Name="Pressed"><VisualState.Setters>
+                      <Setter Target="Surface.Background" Value="{ThemeResource ButtonPressed}"/>
+                      <Setter Target="Content.Foreground" Value="{ThemeResource ButtonDim}"/>
+                    </VisualState.Setters></VisualState>
+                    <VisualState x:Name="Disabled"><VisualState.Setters>
+                      <Setter Target="Content.Foreground" Value="{ThemeResource ButtonDim}"/>
+                    </VisualState.Setters></VisualState>
+                  </VisualStateGroup>
+                </VisualStateManager.VisualStateGroups>
+                <ContentPresenter x:Name="Content" Content="{TemplateBinding Content}" Padding="{TemplateBinding Padding}"
+                  Foreground="{TemplateBinding Foreground}" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
+              </Border>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <!-- Adapted from WinUI ProgressBar.xaml's two-indicator, 2-second
+           indeterminate animation. Use stock XAML shapes instead of WinUI
+           ProgressBar.TemplateSettings, which Windows.UI.Xaml does not share. -->
+      <Style x:Key="FluentProgress" TargetType="ProgressBar">
+        <Setter Property="Foreground" Value="{ThemeResource SystemControlHighlightAccentBrush}"/>
+        <Setter Property="IsTabStop" Value="False"/>
+        <Setter Property="Template"><Setter.Value>
+          <ControlTemplate TargetType="ProgressBar">
+            <Grid x:Name="Track" Height="4">
+              <Grid.Clip><RectangleGeometry Rect="0,0,1,4"><RectangleGeometry.Transform>
+                <ScaleTransform ScaleX="{Binding ActualWidth, ElementName=Track}"/>
+              </RectangleGeometry.Transform></RectangleGeometry></Grid.Clip>
+              <VisualStateManager.VisualStateGroups>
+                <VisualStateGroup x:Name="CommonStates">
+                  <VisualState x:Name="Determinate"/>
+                  <VisualState x:Name="Indeterminate">
+                    <Storyboard RepeatBehavior="Forever">
+                      <DoubleAnimationUsingKeyFrames Storyboard.TargetName="First" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.X)">
+                        <DiscreteDoubleKeyFrame KeyTime="0" Value="-80"/>
+                        <SplineDoubleKeyFrame KeyTime="0:0:1.5" Value="{Binding ActualWidth, ElementName=Track}" KeySpline="0.4,0,0.6,1"/>
+                        <DiscreteDoubleKeyFrame KeyTime="0:0:2" Value="{Binding ActualWidth, ElementName=Track}"/>
+                      </DoubleAnimationUsingKeyFrames>
+                      <DoubleAnimationUsingKeyFrames Storyboard.TargetName="Second" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.X)">
+                        <DiscreteDoubleKeyFrame KeyTime="0" Value="-80"/>
+                        <DiscreteDoubleKeyFrame KeyTime="0:0:0.75" Value="-80"/>
+                        <SplineDoubleKeyFrame KeyTime="0:0:2" Value="{Binding ActualWidth, ElementName=Track}" KeySpline="0.4,0,0.6,1"/>
+                      </DoubleAnimationUsingKeyFrames>
+                    </Storyboard>
+                  </VisualState>
+                </VisualStateGroup>
+              </VisualStateManager.VisualStateGroups>
+              <Border Background="{TemplateBinding Foreground}" Opacity="0.15" CornerRadius="2"/>
+              <Border x:Name="First" Background="{TemplateBinding Foreground}" Width="80" HorizontalAlignment="Left" CornerRadius="2">
+                <Border.RenderTransform><TranslateTransform X="-80"/></Border.RenderTransform>
+              </Border>
+              <Border x:Name="Second" Background="{TemplateBinding Foreground}" Width="80" HorizontalAlignment="Left" CornerRadius="2">
+                <Border.RenderTransform><TranslateTransform X="-80"/></Border.RenderTransform>
+              </Border>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value></Setter>
+      </Style>
+    </ResourceDictionary>
+  </Grid.Resources>
+  <Grid.RowDefinitions><RowDefinition Height="32"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+  <TextBlock Text="WeaselRS: Rime 部署" FontFamily="Microsoft YaHei UI" FontSize="12" IsHitTestVisible="False"/>
+  <TextBlock Grid.Row="1" x:Name="Status" Text="正在部署 Rime 数据…" FontFamily="Microsoft YaHei UI" FontSize="20" Margin="0,8,0,16"/>
+  <Border Grid.Row="2" CornerRadius="6" Padding="12" Background="{ThemeResource LogFill}">
+    <ScrollViewer x:Name="LogScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <TextBlock x:Name="LogText" FontFamily="Consolas, Microsoft YaHei UI" FontSize="12" TextWrapping="Wrap" IsTextSelectionEnabled="True"/>
+    </ScrollViewer>
+  </Border>
+  <Grid Grid.Row="3" Margin="0,16,0,0" MinHeight="40">
+    <ProgressBar x:Name="Progress" Style="{StaticResource FluentProgress}" IsIndeterminate="True" VerticalAlignment="Center" Height="4"/>
+    <Button x:Name="Okay" Style="{StaticResource FluentButton}" Content="好的" Visibility="Collapsed" HorizontalAlignment="Right" MinWidth="96"/>
+  </Grid>
+</Grid>

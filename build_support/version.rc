@@ -1,0 +1,29 @@
+// Shared VERSIONINFO. Values are supplied by version.rs from Cargo metadata.
+#include <winver.h>
+
+1 VERSIONINFO
+ FILEVERSION WEASEL_FILE_VERSION
+ PRODUCTVERSION WEASEL_FILE_VERSION
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE WEASEL_FILE_TYPE
+ FILESUBTYPE 0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", WEASEL_FILE_DESCRIPTION
+            VALUE "FileVersion", WEASEL_VERSION_STRING
+            VALUE "InternalName", WEASEL_INTERNAL_NAME
+            VALUE "OriginalFilename", WEASEL_ORIGINAL_FILENAME
+            VALUE "ProductName", "Weasel-RS"
+            VALUE "ProductVersion", WEASEL_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

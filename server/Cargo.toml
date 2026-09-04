@@ -1,0 +1,24 @@
+[package]
+name = "weasel-server"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+weasel-common = { path = "../common" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "process"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+windows-core = "0.100.0"
+windows-collections = "0.100.0"
+windows-reference = "0.100.0"
+windows-time = "0.100.0"
+
+windows-strings = "0.100.0"
+
+[build-dependencies]
+embed-resource = "3"
+bindgen = "0.72"
+windows-bindgen = "0.100.0"
+windows-rdl = "0.100.0"

@@ -1,0 +1,16 @@
+[package]
+name = "weasel-broker"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+weasel-common = { path = "../common" }
+tokio = { version = "1", features = ["io-util", "net", "rt", "time", "process"] }
+windows-core = "0.100.0"
+
+windows-strings = "0.100.0"
+
+[build-dependencies]
+embed-resource = "3"
+windows-bindgen = "0.100.0"

@@ -1,0 +1,214 @@
+// Hand-authored Text Services Framework values that are absent from the
+// Windows Win32 metadata projection.
+//
+// Source:
+// https://github.com/microsoft/win32metadata/blob/98f1681a5f9950ff15d9b4053034049e22b71bec/generation/WinSDK/manual/TextServices.Manual.cs
+
+#[win32]
+mod Windows {
+    mod Win32 {
+        mod UI {
+            mod TextServices {
+                // Modern taskbar input-mode button (ctffunc.h / Weasel Globals.cpp).
+                const GUID_LBI_INPUTMODE: GUID =
+                    0x2c77a81e_41cc_4178_a3a7_5f8a987568e6;
+                const CLSID_TF_CategoryMgr: GUID =
+                    0xa4b544a1_438d_4b41_9325_869523e2d6c7;
+                const CLSID_TF_InputProcessorProfiles: GUID =
+                    0x33c53a50_f456_4884_b049_85fd643ecfed;
+
+                const GUID_TFCAT_CATEGORY_OF_TIP: GUID =
+                    0x534c48c1_0607_4098_a521_4fc899c73e90;
+                const GUID_TFCAT_TIP_KEYBOARD: GUID =
+                    0x34745c63_b2f0_4784_8b67_5e12c8701a31;
+
+                const GUID_TFCAT_TIPCAP_SECUREMODE: GUID =
+                    0x49d2f9ce_1f5e_11d7_a6d3_00065b84435c;
+                const GUID_TFCAT_TIPCAP_UIELEMENTENABLED: GUID =
+                    0x49d2f9cf_1f5e_11d7_a6d3_00065b84435c;
+                const GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT: GUID =
+                    0xccf05dd7_4a87_11d7_a6e2_00065b84435c;
+                const GUID_TFCAT_TIPCAP_COMLESS: GUID =
+                    0x364215d9_75bc_11d7_a6ef_00065b84435c;
+                const GUID_TFCAT_TIPCAP_WOW16: GUID =
+                    0x364215da_75bc_11d7_a6ef_00065b84435c;
+                const GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT: GUID =
+                    0x13a016df_560b_46cd_947a_4c3af1e0e35d;
+                const GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT: GUID =
+                    0x25504fb4_7bab_4bc1_9c69_cf81890f0ef5;
+
+                const GUID_TFCAT_PROP_AUDIODATA: GUID =
+                    0x9b7be3a9_e8ab_4d47_a8fe_254fa423436d;
+                const GUID_TFCAT_PROP_INKDATA: GUID =
+                    0x7c6a82ae_b0d7_4f14_a745_14f28b009d61;
+                const GUID_TFCAT_PROPSTYLE_CUSTOM: GUID =
+                    0x04af3031_852d_40a2_bc09_8992898ce722;
+                const GUID_TFCAT_PROPSTYLE_STATICCOMPACT: GUID =
+                    0x05f9794b_4d19_40d8_8864_4e747371a66d;
+
+                const GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER: GUID =
+                    0x046b8c80_1647_40f7_9b21_b93b81aabc1b;
+                const GUID_TFCAT_DISPLAYATTRIBUTEPROPERTY: GUID =
+                    0xb95f181b_ea4c_4af1_8056_7c321abbb091;
+                const GUID_TFCAT_PROPSTYLE_STATIC: GUID =
+                    0x565fb8d8_6bd4_4ca1_b223_0f2ccb8f4f96;
+
+                const TF_PROFILETYPE_INPUTPROCESSOR: u32 = 1;
+                const GUID_WEASEL_PROFILE: GUID =
+                    0x3d02cab6_2b8e_4781_ba20_1c9267529467;
+                const GUID_PROP_ATTRIBUTE: GUID =
+                    0x34b45670_7526_11d2_a147_00105a2799b5;
+
+                #[repr(i32)]
+                enum TfAnchorManual {
+                    TF_ANCHOR_START = 0,
+                    TF_ANCHOR_END = 1,
+                }
+
+                #[repr(i32)]
+                enum TfActiveSelEndManual {
+                    TF_AE_NONE = 0,
+                    TF_AE_START = 1,
+                    TF_AE_END = 2,
+                }
+
+                #[repr(i32)]
+                enum TfLayoutCodeManual {
+                    TF_LC_CREATE = 0,
+                    TF_LC_CHANGE = 1,
+                    TF_LC_DESTROY = 2,
+                }
+
+                #[repr(i32)]
+                enum TfGravityManual {
+                    TF_GRAVITY_BACKWARD = 0,
+                    TF_GRAVITY_FORWARD = 1,
+                }
+
+                #[repr(i32)]
+                enum TfShiftDirManual {
+                    TF_SD_BACKWARD = 0,
+                    TF_SD_FORWARD = 1,
+                }
+
+                #[repr(i32)]
+                enum TF_DA_LINESTYLE_MANUAL {
+                    TF_LS_NONE = 0,
+                    TF_LS_SOLID = 1,
+                    TF_LS_DOT = 2,
+                    TF_LS_DASH = 3,
+                    TF_LS_SQUIGGLE = 4,
+                }
+
+                #[repr(i32)]
+                enum TF_DA_COLORTYPE_MANUAL {
+                    TF_CT_NONE = 0,
+                    TF_CT_SYSCOLOR = 1,
+                    TF_CT_COLORREF = 2,
+                }
+
+                #[repr(i32)]
+                enum TF_DA_ATTR_INFO_MANUAL {
+                    TF_ATTR_INPUT = 0,
+                    TF_ATTR_TARGET_CONVERTED = 1,
+                    TF_ATTR_CONVERTED = 2,
+                    TF_ATTR_TARGET_NOTCONVERTED = 3,
+                    TF_ATTR_INPUT_ERROR = 4,
+                    TF_ATTR_FIXEDCONVERTED = 5,
+                    TF_ATTR_OTHER = -1,
+                }
+
+                const TS_AS_TEXT_CHANGE: u32 = 0x01;
+                const TS_AS_SEL_CHANGE: u32 = 0x02;
+                const TS_AS_LAYOUT_CHANGE: u32 = 0x04;
+                const TS_AS_ATTR_CHANGE: u32 = 0x08;
+                const TS_AS_STATUS_CHANGE: u32 = 0x10;
+                const TS_AS_ALL_SINKS: u32 = 0x1f;
+
+                const TS_LF_SYNC: u32 = 0x1;
+                const TS_LF_READ: u32 = 0x2;
+                const TS_LF_READWRITE: u32 = 0x6;
+
+                const TS_SD_READONLY: u32 = 0x001;
+                const TS_SD_LOADING: u32 = 0x002;
+                const TS_SD_RESERVED: u32 = 0x004;
+                const TS_SD_TKBAUTOCORRECTENABLE: u32 = 0x008;
+                const TS_SD_TKBPREDICTIONENABLE: u32 = 0x010;
+                const TS_SD_UIINTEGRATIONENABLE: u32 = 0x020;
+                const TS_SD_INPUTPANEMANUALDISPLAYENABLE: u32 = 0x040;
+                const TS_SD_EMBEDDEDHANDWRITINGVIEW_ENABLED: u32 = 0x080;
+                const TS_SD_EMBEDDEDHANDWRITINGVIEW_VISIBLE: u32 = 0x100;
+                const TS_SD_MASKALL: u32 = 0x003;
+
+                const TS_SS_DISJOINTSEL: u32 = 0x001;
+                const TS_SS_REGIONS: u32 = 0x002;
+                const TS_SS_TRANSITORY: u32 = 0x004;
+                const TS_SS_NOHIDDENTEXT: u32 = 0x008;
+                const TS_SS_TKBAUTOCORRECTENABLE: u32 = 0x010;
+                const TS_SS_TKBPREDICTIONENABLE: u32 = 0x020;
+                const TS_SS_UWPCONTROL: u32 = 0x040;
+
+                const TS_ST_CORRECTION: u32 = 0x1;
+                const TS_IE_CORRECTION: u32 = 0x1;
+                const TS_IE_COMPOSITION: u32 = 0x2;
+                const TS_TC_CORRECTION: u32 = 0x1;
+
+                const TS_IAS_NOQUERY: u32 = 0x1;
+                const TS_IAS_QUERYONLY: u32 = 0x2;
+
+                const GXFPF_ROUND_NEAREST: u32 = 0x1;
+                const GXFPF_NEAREST: u32 = 0x2;
+
+                const TS_ATTR_FIND_BACKWARDS: u32 = 0x0001;
+                const TS_ATTR_FIND_WANT_OFFSET: u32 = 0x0002;
+                const TS_ATTR_FIND_UPDATESTART: u32 = 0x0004;
+                const TS_ATTR_FIND_WANT_VALUE: u32 = 0x0008;
+                const TS_ATTR_FIND_WANT_END: u32 = 0x0010;
+                const TS_ATTR_FIND_HIDDEN: u32 = 0x0020;
+
+                const TS_CH_PRECEDING_DEL: u32 = 1;
+                const TS_CH_FOLLOWING_DEL: u32 = 2;
+                const TS_SHIFT_COUNT_HIDDEN: u32 = 0x1;
+                const TS_SHIFT_HALT_HIDDEN: u32 = 0x2;
+                const TS_SHIFT_HALT_VISIBLE: u32 = 0x4;
+                const TS_SHIFT_COUNT_ONLY: u32 = 0x8;
+                const TS_GTA_HIDDEN: u32 = 0x1;
+                const TS_GEA_HIDDEN: u32 = 0x1;
+
+                const TF_POPF_ALL: u32 = 0x0001;
+                const TF_ES_ASYNCDONTCARE: u32 = 0x0;
+                const TF_ES_SYNC: u32 = 0x1;
+                const TF_ES_READ: u32 = 0x2;
+                const TF_ES_READWRITE: u32 = 0x6;
+                const TF_ES_ASYNC: u32 = 0x8;
+                const TF_SD_READONLY: u32 = 0x001;
+                const TF_SD_LOADING: u32 = 0x002;
+                const TF_SD_RESERVED: u32 = 0x004;
+                const TF_SD_TKBAUTOCORRECTENABLE: u32 = 0x008;
+                const TF_SD_TKBPREDICTIONENABLE: u32 = 0x010;
+                const TF_SD_UIINTEGRATIONENABLE: u32 = 0x020;
+                const TF_SD_INPUTPANEMANUALDISPLAYENABLE: u32 = 0x040;
+                const TF_SD_EMBEDDEDHANDWRITINGVIEW_ENABLED: u32 = 0x080;
+                const TF_SD_EMBEDDEDHANDWRITINGVIEW_VISIBLE: u32 = 0x100;
+                const TF_SD_MASKALL: u32 = 0x003;
+                const TF_SS_DISJOINTSEL: u32 = 0x001;
+                const TF_SS_REGIONS: u32 = 0x002;
+                const TF_SS_TRANSITORY: u32 = 0x004;
+                const TF_SS_TKBAUTOCORRECTENABLE: u32 = 0x010;
+                const TF_SS_TKBPREDICTIONENABLE: u32 = 0x020;
+                const TF_SS_UWPCONTROL: u32 = 0x040;
+                const TF_IAS_NOQUERY: u32 = 0x1;
+                const TF_IAS_QUERYONLY: u32 = 0x2;
+                const TF_IAS_NO_DEFAULT_COMPOSITION: u32 = 0x80000000;
+                const TF_GTP_INCL_TEXT: u32 = 0x1;
+                const TF_HF_OBJECT: u32 = 1;
+                const TF_TF_MOVESTART: u32 = 1;
+                const TF_TF_IGNOREEND: u32 = 2;
+                const TF_ST_CORRECTION: u32 = 1;
+                const TF_IE_CORRECTION: u32 = 1;
+                const TF_TU_CORRECTION: u32 = 0x1;
+                const TF_INVALID_COOKIE: u32 = 0xffffffff;
+            }
+        }
+    }
+}
