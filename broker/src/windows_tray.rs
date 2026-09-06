@@ -33,6 +33,7 @@ static TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomic
 static BROKER_STATE: OnceLock<Arc<Mutex<BrokerState>>> = OnceLock::new();
 
 struct BrokerState {
+    settings: crate::settings_rpc::SettingsStore,
     directory: PathBuf,
     server: Option<Child>,
     renderer: Option<Child>,
@@ -88,6 +89,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let state = Arc::new(Mutex::new(BrokerState {
+        settings: _settings_service.settings(),
         directory: directory.clone(),
         server: Some(server),
         renderer: Some(renderer),
@@ -550,6 +552,18 @@ fn deploy(state: &mut BrokerState) -> (String, u32) {
 }
 
 fn restart_components(state: &mut BrokerState) -> (String, u32) {
+    let paths = match RuntimePaths::for_directory(state.directory.clone()) {
+        Ok(paths) => paths,
+        Err(error) => {
+            return (
+                format!("无法确定配置目录，已取消重启：{error}"),
+                MB_ICONERROR as u32,
+            );
+        }
+    };
+    let settings = crate::settings::load(&paths, |warning| {
+        deployment_diagnostic(&state.directory, &warning);
+    });
     let mut errors = Vec::new();
     if let Err(error) = shutdown_component(
         &mut state.server,
@@ -569,6 +583,8 @@ fn restart_components(state: &mut BrokerState) -> (String, u32) {
     ) {
         errors.push(format!("无法停止 renderer：{error}"));
     }
+    // Publish synchronously before renderer can query its startup theme.
+    state.settings.replace(settings);
     // Restore each component that actually stopped, even on partial failure.
     if state.renderer.is_none() && !STOPPING.load(Ordering::Acquire) {
         match start_child(&state.directory, "weasel-renderer.exe", &[]) {
@@ -622,6 +638,7 @@ fn begin_deploy(window: HWND, operation: Operation) {
                 let mut shared = state.lock().unwrap_or_else(|e| e.into_inner());
                 shared.operation = operation;
                 BrokerState {
+                    settings: shared.settings.clone(),
                     directory: shared.directory.clone(),
                     server: shared.server.take(),
                     renderer: if operation == Operation::Restart {

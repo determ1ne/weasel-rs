@@ -1,5 +1,9 @@
 //! Read-only configuration endpoint, confined to the current logon session.
-use std::{thread, time::Duration};
+use std::{
+    sync::{Arc, RwLock},
+    thread,
+    time::Duration,
+};
 use tokio::{runtime::Builder, sync::oneshot, task::JoinSet};
 use weasel_common::{
     message::{Envelope, PeerRole, Settings, envelope::Payload},
@@ -7,12 +11,28 @@ use weasel_common::{
 };
 
 pub struct SettingsService {
+    settings: SettingsStore,
     stop: Option<oneshot::Sender<()>>,
     done: std::sync::mpsc::Receiver<()>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
+/// Shared effective snapshot. Publication completes before replacement children start.
+#[derive(Clone)]
+pub struct SettingsStore(Arc<RwLock<Settings>>);
+impl SettingsStore {
+    pub fn replace(&self, settings: Settings) {
+        *self.0.write().unwrap_or_else(|p| p.into_inner()) = settings;
+    }
+    fn snapshot(&self) -> Settings {
+        self.0.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+}
+
 impl SettingsService {
+    pub fn settings(&self) -> SettingsStore {
+        self.settings.clone()
+    }
     pub fn start(settings: Settings) -> Result<Self, Box<dyn std::error::Error>> {
         Self::start_on(try_default_broker_pipe_name()?, settings)
     }
@@ -24,6 +44,8 @@ impl SettingsService {
         runtime.block_on(server.bind())?;
         let (stop, mut stopping) = oneshot::channel();
         let (finished, done) = std::sync::mpsc::channel();
+        let settings = SettingsStore(Arc::new(RwLock::new(settings)));
+        let published = settings.clone();
         let worker = thread::Builder::new().name("broker-settings".into()).spawn(move || {
             runtime.block_on(async move {
                 let mut clients = JoinSet::new();
@@ -55,6 +77,7 @@ impl SettingsService {
             let _ = finished.send(());
         })?;
         Ok(Self {
+            settings: published,
             stop: Some(stop),
             done,
             worker: Some(worker),
@@ -75,13 +98,13 @@ impl Drop for SettingsService {
     }
 }
 
-async fn serve(connection: RpcConnection, settings: Settings) -> Result<(), RpcError> {
+async fn serve(connection: RpcConnection, settings: SettingsStore) -> Result<(), RpcError> {
     while let Some(request) = connection.recv().await? {
         if matches!(request.payload, Some(Payload::GetSettings(_))) {
             connection
                 .send(&Envelope {
                     request_id: request.request_id,
-                    payload: Some(Payload::Settings(settings.clone())),
+                    payload: Some(Payload::Settings(settings.snapshot())),
                 })
                 .await?;
         }
@@ -119,11 +142,20 @@ mod tests {
                 let (a_result, b_result) = tokio::join!(a.get_settings(), b.get_settings());
                 assert_eq!(a_result.unwrap().theme, "ten");
                 assert_eq!(b_result.unwrap().theme, "ten");
+                service.settings().replace(Settings {
+                    theme: "eleven".into(),
+                });
+                // Existing and newly accepted clients observe the published snapshot.
+                assert_eq!(b.get_settings().await.unwrap().theme, "eleven");
+                let c = RpcClient::connect_as(&pipe, PeerRole::Renderer)
+                    .await
+                    .unwrap();
+                assert_eq!(c.get_settings().await.unwrap().theme, "eleven");
                 // The read-only endpoint does not accept lifecycle commands.
                 assert!(a.shutdown("not allowed").await.is_err());
                 let tip = RpcClient::connect_as(&pipe, PeerRole::Tip).await.unwrap();
                 assert!(tip.get_settings().await.is_err());
-                assert_eq!(b.get_settings().await.unwrap().theme, "ten");
+                assert_eq!(b.get_settings().await.unwrap().theme, "eleven");
             })
             .await
             .unwrap();
