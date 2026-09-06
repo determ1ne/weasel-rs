@@ -78,7 +78,7 @@ struct UiState {
 /// Called and dropped on the UI runtime's initialized STA.
 pub fn create() -> Result<Box<dyn crate::backend::ThemeBackend>, String> {
     // The XAML Island backend requires Windows 10 1903 (build 18362) or later.
-    const REQUIRED_VERSION: OsVersion = OsVersion::new(10, 0, 18362, 0);
+    const REQUIRED_VERSION: OsVersion = OsVersion::new(10, 0, 0, 18362);
     if REQUIRED_VERSION > OsVersion::current() {
         return Err(format!(
             "XAML Island backend requires Windows 10 1903 (build 18362) or later, but the current version is {}",
