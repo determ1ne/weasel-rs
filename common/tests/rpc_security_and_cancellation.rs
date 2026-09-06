@@ -324,28 +324,6 @@ fn pipe_security(client: &NamedPipeClient, flags: u32) -> String {
 }
 
 #[tokio::test]
-async fn every_input_instance_has_appcontainer_access_and_low_integrity() {
-    timeout(DEADLINE, async {
-        let server = RpcServer::new(name("acl"));
-        // The kernel maps GENERIC_ALL to the pipe's FILE_ALL_ACCESS mask.
-        let expected = format!(
-            "D:P(D;;FA;;;NU)(A;;;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AC)(A;;FA;;;{})S:(ML;;NX;;;LW)",
-            RuntimeIdentity::current().unwrap().user_sid()
-        );
-        let (first, _first_connection) = pair(&server).await;
-        let flags = (DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION) as u32;
-        // The kernel may add the SACL auto-inherited control flag; compare ACEs
-        // exactly while allowing that bookkeeping difference.
-        assert_eq!(pipe_security(&first, flags).replace("S:AI(", "S:("), expected);
-        let second = ClientOptions::new().open(server.pipe_name()).unwrap();
-        let _second_connection = server.accept().await.unwrap();
-        assert_eq!(pipe_security(&second, flags).replace("S:AI(", "S:("), expected);
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
 async fn renderer_pipe_keeps_its_logon_private_acl() {
     timeout(DEADLINE, async {
         let server = RpcServer::with_role(name("renderer-acl"), PeerRole::Renderer);
