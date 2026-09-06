@@ -1,0 +1,43 @@
+name: Build Windows installer
+
+on:
+  push:
+    tags:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Prepare build environment
+        run: ./scripts/prepare-ci.ps1
+
+      - name: Build and package
+        id: build
+        run: ./scripts/build-ci.ps1
+
+      - name: Upload installer and checksum
+        uses: actions/upload-artifact@v7
+        with:
+          name: Weasel-RS-${{ steps.build.outputs.version }}-x64
+          path: |
+            artifacts/installer/Weasel-RS-${{ steps.build.outputs.version }}-x64-setup.exe
+            artifacts/installer/Weasel-RS-${{ steps.build.outputs.version }}-x64-setup.exe.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
