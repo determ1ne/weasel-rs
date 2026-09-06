@@ -101,8 +101,8 @@ FunctionEnd
   ${EndIf}
   SetRegView 64
   ReadRegStr $0 HKLM "SOFTWARE\Microsoft\Windows NT\CurrentVersion" "CurrentBuildNumber"
-  ${If} $0 < 18362
-    MessageBox MB_OK|MB_ICONSTOP "需要 Windows 10 1903 或更新版本。" /SD IDOK
+  ${If} $0 < 17763
+    MessageBox MB_OK|MB_ICONSTOP "需要 Windows 10 1809 或更新版本。" /SD IDOK
     SetErrorLevel 1
     Quit
   ${EndIf}

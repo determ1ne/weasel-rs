@@ -6,6 +6,7 @@ use crate::bindings::Windows::Win32::SWP_NOSIZE;
 use weasel_common::message::RenderSnapshot;
 use windows_core::Interface;
 use windows_strings::{PCWSTR, w};
+use windows_version::OsVersion;
 
 use crate::{
     backend::ThemeBackend,
@@ -76,6 +77,14 @@ struct UiState {
 
 /// Called and dropped on the UI runtime's initialized STA.
 pub fn create() -> Result<Box<dyn crate::backend::ThemeBackend>, String> {
+    // The XAML Island backend requires Windows 10 1903 (build 18362) or later.
+    const REQUIRED_VERSION: OsVersion = OsVersion::new(10, 0, 18362, 0);
+    if REQUIRED_VERSION > OsVersion::current() {
+        return Err(format!(
+            "XAML Island backend requires Windows 10 1903 (build 18362) or later, but the current version is {}",
+            OsVersion::current().pack
+        ));
+    }
     unsafe { create_initialized() }
 }
 
