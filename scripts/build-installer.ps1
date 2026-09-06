@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    # Build an uncompressed installer without the component selection page.
+    # Build an uncompressed installer that installs all components without a selection page.
     [switch]$Dev
 )
 
@@ -81,7 +81,7 @@ try {
     $buildDefinitions = @()
     if ($Dev) {
         $buildDefinitions += '/DDEV_INSTALLER'
-        Write-Host 'Dev installer: compression disabled; component selection skipped (default components).'
+        Write-Host 'Dev installer: compression disabled; component selection skipped (all components selected).'
     }
     & $compiler @runtimeDefinitions @buildDefinitions @arguments
     if ($LASTEXITCODE -ne 0) {

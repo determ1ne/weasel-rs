@@ -11,6 +11,7 @@ RequestExecutionLevel admin
 !include LogicLib.nsh
 !include x64.nsh
 !include FileFunc.nsh
+!include Sections.nsh
 
 !ifndef PROJECT_ROOT
   !error "Use scripts\build-installer.ps1 to supply PROJECT_ROOT."
@@ -120,6 +121,9 @@ FunctionEnd
 Function .onInit
   !insertmacro CheckPlatform
   !insertmacro LockInstaller
+!ifdef DEV_INSTALLER
+  Call SelectAllDevComponents
+!endif
   StrCpy $CopiedFiles 0
   StrCpy $TriedRegistration 0
   StrCpy $IsUpgrade 0
@@ -385,7 +389,21 @@ Section "-注册与安装信息" SEC_REGISTER
   install_done:
 SectionEnd
 
-!ifndef DEV_INSTALLER
+!ifdef DEV_INSTALLER
+; SEC_REGISTER is the final installation section. Select every component,
+; including /o sections, while preserving read-only and other section flags.
+Function SelectAllDevComponents
+  Push $0
+  Push $1
+  ${For} $0 0 ${SEC_REGISTER}
+    SectionGetFlags $0 $1
+    IntOp $1 $1 | ${SF_SELECTED}
+    SectionSetFlags $0 $1
+  ${Next}
+  Pop $1
+  Pop $0
+FunctionEnd
+!else
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN} "小狼毫 RS 程序和所需运行库（必选）。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_LIBRIME} "Rime 输入引擎和共享方案数据（必选）。"
