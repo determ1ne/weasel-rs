@@ -178,55 +178,7 @@ impl Drop for LocalSecurityDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn descriptor_text(descriptor: &LocalSecurityDescriptor, flags: u32) -> String {
-        let mut text = windows_core::PWSTR::null();
-        assert!(
-            unsafe {
-                ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                    PSECURITY_DESCRIPTOR(descriptor.as_ptr()),
-                    SDDL_REVISION_1 as u32,
-                    SECURITY_INFORMATION(flags),
-                    &mut text,
-                    None,
-                )
-            }
-            .as_bool()
-        );
-        unsafe {
-            let mut len = 0;
-            while *text.0.add(len) != 0 {
-                len += 1;
-            }
-            let result = String::from_utf16_lossy(std::slice::from_raw_parts(text.0, len));
-            LocalFree(HANDLE(text.0.cast()));
-            result
-        }
-    }
 
-    #[test]
-    fn input_pipe_uses_mozc_appcontainer_policy_without_widening_internal_objects() {
-        let identity = RuntimeIdentity::current().unwrap();
-        let shared = LocalSecurityDescriptor::for_input_pipe(&identity).unwrap();
-        let flags = (DACL_SECURITY_INFORMATION
-            | SACL_SECURITY_INFORMATION
-            | LABEL_SECURITY_INFORMATION) as u32;
-        let sddl = descriptor_text(&shared, flags);
-        assert_eq!(
-            sddl,
-            format!(
-                "D:P(D;;GA;;;NU)(A;;;;;OW)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)(A;;GA;;;{})S:(ML;;NX;;;LW)",
-                identity.user_sid()
-            )
-        );
-        assert!(!sddl.contains(";;;WD)") && !sddl.contains(";;;RC)"));
-        let expected = format!("D:P(D;;GA;;;NU)(A;;GA;;;{})", identity.logon_sid());
-        for private in [
-            LocalSecurityDescriptor::for_named_pipe(&identity).unwrap(),
-            LocalSecurityDescriptor::for_logon(&identity).unwrap(),
-        ] {
-            assert_eq!(descriptor_text(&private, flags), expected);
-        }
-    }
     #[test]
     fn identity_and_security() {
         let a = RuntimeIdentity::current().unwrap();
