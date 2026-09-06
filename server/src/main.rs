@@ -95,12 +95,7 @@ async fn read_connection(
             continue;
         }
         match envelope.payload.as_ref() {
-            Some(
-                Payload::OpenInput(_)
-                | Payload::KeyEvent(_)
-                | Payload::ContextCommand(_)
-                | Payload::LayoutUpdate(_),
-            ) => {
+            Some(Payload::OpenInput(_) | Payload::KeyEvent(_) | Payload::ContextCommand(_)) => {
                 if engine
                     .try_send(Work::Message {
                         client_id,

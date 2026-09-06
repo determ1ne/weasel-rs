@@ -175,6 +175,13 @@ async fn role_operation_allowlists_and_response_rejection() {
                 .await
                 .unwrap();
                 if allowed.contains(&index) {
+                    if index == 5 {
+                        // Authorized layout bypasses the ordered input FIFO.
+                        while connection.take_layout_for(None).is_none() {
+                            tokio::task::yield_now().await;
+                        }
+                        continue;
+                    }
                     assert!(
                         connection.recv().await.unwrap().is_some(),
                         "{peer:?} operation {index}"

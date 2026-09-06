@@ -26,6 +26,7 @@ fn main() {
         .input(&native_winmd)
         .input_default()
         .filters([
+            "Windows.Win32.SWP_NOSIZE",
             "Windows.Win32.AllocConsole",
             "Windows.Win32.RegisterClassW",
             "Windows.Win32.CreateWindowExW",

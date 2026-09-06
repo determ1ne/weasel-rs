@@ -154,6 +154,7 @@ impl TextService {
         let context_composition: ITfContextComposition = context.cast()?;
         let composition = unsafe { context_composition.StartComposition(ec, &range, sink)? };
         let previous = self.lock(&state.composition)?.replace(composition);
+        self.lock(&state.rpc)?.reset_layout();
         drop(previous);
         self.lock(&state.composition_text)?.clear();
         *self.lock(&state.composition_cursor)? = 0;

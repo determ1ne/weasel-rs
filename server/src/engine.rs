@@ -353,25 +353,6 @@ impl Engine {
                     self.renderer.publish(snapshot);
                 }
             }
-            Some(Payload::LayoutUpdate(update)) => {
-                let snapshot = self.clients.get_mut(&client_id).and_then(|client| {
-                    if client.route.token != update.token || self.active_client != Some(client_id) {
-                        return None;
-                    }
-                    client.anchor = update.anchor.unwrap_or_default();
-                    (!client.last_response.candidates.is_empty()).then(|| {
-                        render_snapshot(
-                            client_id,
-                            client.revision,
-                            &client.last_response,
-                            &client.anchor,
-                        )
-                    })
-                });
-                if let Some(snapshot) = snapshot {
-                    self.renderer.publish(snapshot);
-                }
-            }
             _ => (),
         }
     }
@@ -417,6 +398,28 @@ impl Processor<Work> for Engine {
     }
 
     fn idle(&mut self) {
+        // Poll the active connection's latest geometry, never the input FIFO.
+        // idle() also runs every 20ms, so a final drag position needs no next key.
+        if let Some(client_id) = self.active_client
+            && let Some(client) = self.clients.get_mut(&client_id)
+            && client.alive.load(Ordering::Acquire)
+            && let Some(update) = client
+                .connection
+                .take_layout_for(client.route.token.as_ref())
+        {
+            let anchor = update.anchor.unwrap_or_default();
+            if client.anchor != anchor {
+                client.anchor = anchor;
+                if !client.last_response.candidates.is_empty() {
+                    self.renderer.publish(render_snapshot(
+                        client_id,
+                        client.revision,
+                        &client.last_response,
+                        &client.anchor,
+                    ));
+                }
+            }
+        }
         let hide = self.active_client.and_then(|client_id| {
             self.clients
                 .get(&client_id)

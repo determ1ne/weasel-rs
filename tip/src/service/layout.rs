@@ -1,105 +1,129 @@
 use super::*;
 use crate::bindings::TF_ES_ASYNC;
+use weasel_common::message::ContextToken;
 
+/// One pending TSF read, refreshed by notifications received before it runs.
+#[derive(Default)]
+pub(super) struct LayoutSchedule {
+    serial: u64,
+    pending: Option<(u64, ContextToken)>,
+}
+impl LayoutSchedule {
+    fn request(&mut self, token: ContextToken) -> Option<u64> {
+        if let Some((_, latest)) = &mut self.pending {
+            *latest = token;
+            return None;
+        }
+        self.serial = self.serial.wrapping_add(1);
+        self.pending = Some((self.serial, token));
+        Some(self.serial)
+    }
+    fn take(&mut self, ticket: u64) -> Option<ContextToken> {
+        if self.pending.as_ref().is_some_and(|(id, _)| *id == ticket) {
+            self.pending.take().map(|(_, token)| token)
+        } else {
+            None
+        }
+    }
+}
 impl TextService {
-    /// Called after a successful composition write. A host need not emit a
-    /// layout notification for every edit; request a read after the write lock
-    /// is released instead of relying on OnLayoutChange for the first anchor.
     pub(super) fn request_composition_layout(&self, state: &Arc<ContextState>) -> Result<()> {
         if !self.activated.load(Ordering::Acquire)
             || self.faulted.load(Ordering::Acquire)
             || *self.lock(&self.focused_context)? != Some(state.id)
+            || self.lock(&state.composition)?.is_none()
         {
             return Ok(());
         }
-        let Some(composition) = self.lock(&state.composition)?.as_ref().cloned() else {
-            return Ok(());
-        };
         let Some(tid) = *self.lock(&self.keystroke_client_id)? else {
             return Ok(());
         };
-        let view = unsafe { state.context.GetActiveView()? };
-        let range = unsafe { composition.GetRange()? };
+        let token = state.token()?;
+        let Some(ticket) = self.lock(&state.layout)?.request(token) else {
+            return Ok(());
+        };
         let probe: ITfEditSession = LayoutProbe {
-            view,
-            range,
-            composition,
             state: state.clone(),
-            token: state.token()?,
+            ticket,
             generation: Arc::clone(&self.generation),
             requested_generation: self.generation.load(Ordering::Acquire),
             _module: ModuleLease::new(),
         }
         .into();
-        // Never synchronously reenter an edit session while updating preedit.
+        // Defer until the write lock is released; retain Terminal's explicit
+        // post-composition probe even when no layout callback is delivered.
         let result = unsafe {
             state
                 .context
                 .RequestEditSession(tid, &probe, TF_ES_ASYNC | TF_ES_READ)
-        };
-        result?.ok()
+        }
+        .and_then(|hr| hr.ok());
+        if result.is_err() {
+            self.lock(&state.layout)?.take(ticket);
+        }
+        result
     }
 }
-
 #[implement(ITfEditSession)]
 pub(super) struct LayoutProbe {
-    pub(super) view: ITfContextView,
-    pub(super) range: ITfRange,
-    pub(super) composition: ITfComposition,
-    pub(super) state: Arc<ContextState>,
-    pub(super) token: weasel_common::message::ContextToken,
-    pub(super) generation: Arc<AtomicU64>,
-    pub(super) requested_generation: u64,
-    pub(super) _module: ModuleLease,
+    state: Arc<ContextState>,
+    ticket: u64,
+    generation: Arc<AtomicU64>,
+    requested_generation: u64,
+    _module: ModuleLease,
 }
-
+impl Drop for LayoutProbe {
+    fn drop(&mut self) {
+        // TSF can discard an edit session without executing it.
+        if let Ok(mut layout) = self.state.layout.try_lock() {
+            layout.take(self.ticket);
+        }
+    }
+}
 impl ITfEditSession_Impl for LayoutProbe_Impl {
     fn DoEditSession(&self, ec: TfEditCookie) -> Result<()> {
         boundary::guard(None, || {
-            if !self.state.matches(Some(&self.token))? {
+            let Some(token) = self
+                .state
+                .layout
+                .try_lock()
+                .map_err(|_| Error::from_hresult(boundary::E_FAIL))?
+                .take(self.ticket)
+            else {
+                return Ok(());
+            };
+            if !self.state.matches(Some(&token))?
+                || self.generation.load(Ordering::Acquire) != self.requested_generation
+            {
                 return Ok(());
             }
-            if self.generation.load(Ordering::Acquire) != self.requested_generation {
-                return Ok(());
-            }
-            if self
+            let Some(composition) = self
                 .state
                 .composition
                 .try_lock()
                 .map_err(|_| Error::from_hresult(boundary::E_FAIL))?
-                .as_ref()
-                != Some(&self.composition)
-            {
+                .clone()
+            else {
                 return Ok(());
-            }
+            };
+            // Query current geometry, not a range captured before queued edits.
+            let view = unsafe { self.state.context.GetActiveView()? };
+            let range = unsafe { composition.GetRange()? };
             let mut rect = RECT::default();
             let mut clipped = BOOL(0);
-            let hr = unsafe {
-                self.view
-                    .GetTextExt(ec, &self.range, &mut rect, &mut clipped)
-            };
-            if hr.is_err() {
-                self.state
-                    .rpc
-                    .try_lock()
-                    .map_err(|_| Error::from_hresult(boundary::E_FAIL))?
-                    .log(
-                        "debug",
-                        format!("layout anchor GetTextExt failed hr={hr:?}"),
-                    );
+            if unsafe { view.GetTextExt(ec, &range, &mut rect, &mut clipped) }.is_err() {
+                // Transient geometry failure must not flood the key/log queue.
                 return Ok(());
             }
-            if self.generation.load(Ordering::Acquire) != self.requested_generation {
-                return Ok(());
-            }
-            if !self.state.matches(Some(&self.token))?
+            if self.generation.load(Ordering::Acquire) != self.requested_generation
+                || !self.state.matches(Some(&token))?
                 || self
                     .state
                     .composition
                     .try_lock()
                     .map_err(|_| Error::from_hresult(boundary::E_FAIL))?
                     .as_ref()
-                    != Some(&self.composition)
+                    != Some(&composition)
             {
                 return Ok(());
             }
@@ -109,7 +133,7 @@ impl ITfEditSession_Impl for LayoutProbe_Impl {
                 .map_err(|_| Error::from_hresult(boundary::E_FAIL))?
                 .send_layout_update(LayoutUpdate {
                     session_id: self.state.id,
-                    token: Some(self.token.clone()),
+                    token: Some(token),
                     anchor: Some(RenderRect {
                         left: rect.left,
                         top: rect.top,
@@ -120,5 +144,25 @@ impl ITfEditSession_Impl for LayoutProbe_Impl {
                 });
             Ok(())
         })
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn coalesces_and_old_drop_cannot_cancel_next_probe() {
+        let mut schedule = LayoutSchedule::default();
+        let first = schedule.request(ContextToken::default()).unwrap();
+        let latest = ContextToken {
+            generation: 2,
+            ..Default::default()
+        };
+        for _ in 0..1000 {
+            assert!(schedule.request(latest.clone()).is_none());
+        }
+        assert_eq!(schedule.take(first), Some(latest));
+        let second = schedule.request(ContextToken::default()).unwrap();
+        assert!(schedule.take(first).is_none());
+        assert!(schedule.take(second).is_some());
     }
 }

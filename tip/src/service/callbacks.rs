@@ -99,13 +99,10 @@ impl ITfTextLayoutSink_Impl for TextService_Impl {
         &self,
         pic: Ref<'_, ITfContext>,
         _lcode: TfLayoutCode,
-        pview: Ref<'_, ITfContextView>,
+        _pview: Ref<'_, ITfContextView>,
     ) -> Result<()> {
         boundary::guard(Some(&self.faulted), || {
             let Some(context) = pic.to_owned() else {
-                return Ok(());
-            };
-            let Some(view) = pview.to_owned() else {
                 return Ok(());
             };
             let Some(state) = self.find_context(&context)? else {
@@ -114,33 +111,8 @@ impl ITfTextLayoutSink_Impl for TextService_Impl {
             if *self.lock(&self.focused_context)? != Some(state.id) {
                 return Ok(());
             }
-            let Some(composition) = self.lock(&state.composition)?.as_ref().cloned() else {
-                let token = state.token()?;
-                self.lock(&state.rpc)?.send_layout_update(LayoutUpdate {
-                    session_id: state.id,
-                    token: Some(token),
-                    anchor: Some(RenderRect::default()),
-                });
-                return Ok(());
-            };
-            let Ok(range) = (unsafe { composition.GetRange() }) else {
-                return Ok(());
-            };
-            let Some(tid) = *self.lock(&self.keystroke_client_id)? else {
-                return Ok(());
-            };
-            let probe: ITfEditSession = LayoutProbe {
-                view,
-                range,
-                composition,
-                state: state.clone(),
-                token: state.token()?,
-                generation: Arc::clone(&self.generation),
-                requested_generation: self.generation.load(Ordering::Acquire),
-                _module: ModuleLease::new(),
-            }
-            .into();
-            let _ = unsafe { context.RequestEditSession(tid, &probe, TF_ES_READ) };
+            // Completion and blur responses hide the candidates; idle layout is irrelevant.
+            let _ = self.request_composition_layout(&state);
             Ok(())
         })
     }

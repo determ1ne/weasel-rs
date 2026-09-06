@@ -106,6 +106,7 @@ pub struct RpcServer {
 
 /// A connected client/server RPC stream.
 pub struct RpcConnection {
+    layout: std::sync::Arc<std::sync::Mutex<Option<LayoutUpdate>>>,
     incoming: Mutex<mpsc::Receiver<Result<Envelope, RpcError>>>,
     outgoing: mpsc::Sender<(Envelope, oneshot::Sender<Result<(), RpcError>>)>,
     closed: watch::Sender<bool>,
@@ -221,6 +222,8 @@ impl RpcConnection {
         let (closed, mut read_closed) = watch::channel(false);
         let mut write_closed = closed.subscribe();
         let reader_signal = closed.clone();
+        let layout = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let reader_layout = layout.clone();
         let reader_task = tokio::spawn(async move {
             tokio::select! {
                 _ = read_closed.changed() => {}
@@ -238,6 +241,10 @@ impl RpcConnection {
                             Err(error) => Err(error),
                         };
                         let failed = result.is_err();
+                        if let Ok(Envelope { payload: Some(Payload::LayoutUpdate(update)), .. }) = &result {
+                            *reader_layout.lock().unwrap_or_else(|p| p.into_inner()) = Some(update.clone());
+                            continue;
+                        }
                         if tx.send(result).await.is_err() || failed { break; }
                     }
                 } => {}
@@ -268,6 +275,7 @@ impl RpcConnection {
             writer_signal.send_replace(true);
         });
         Self {
+            layout,
             incoming: Mutex::new(incoming),
             outgoing,
             closed,
@@ -277,6 +285,23 @@ impl RpcConnection {
 
     pub async fn recv(&self) -> Result<Option<Envelope>, RpcError> {
         self.incoming.lock().await.recv().await.transpose()
+    }
+
+    /// Layout events bypass recv()'s ordered input queue. Keep a future token's
+    /// geometry until its preceding queued context command has been applied.
+    pub fn take_layout_for(
+        &self,
+        token: Option<&crate::message::ContextToken>,
+    ) -> Option<LayoutUpdate> {
+        let mut latest = self.layout.lock().unwrap_or_else(|p| p.into_inner());
+        if latest
+            .as_ref()
+            .is_some_and(|update| update.token.as_ref() == token)
+        {
+            latest.take()
+        } else {
+            None
+        }
     }
 
     /// Queue in wire order without waiting on a slow peer.

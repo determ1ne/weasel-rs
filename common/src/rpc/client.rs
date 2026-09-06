@@ -99,6 +99,7 @@ impl Drop for PendingCall {
 /// A connected bidirectional RPC client.
 #[derive(Clone)]
 pub struct RpcClient {
+    layout: watch::Sender<Option<LayoutUpdate>>,
     outbound: mpsc::Sender<Envelope>,
     pending: Pending,
     closed: watch::Sender<bool>,
@@ -128,6 +129,7 @@ impl RpcClient {
             .open(pipe_name.as_ref())?;
         let (mut reader, mut writer) = tokio::io::split(pipe);
         let (outbound, mut outbound_rx) = mpsc::channel(32);
+        let (layout, mut layout_rx) = watch::channel::<Option<LayoutUpdate>>(None);
         let pending: Pending = Arc::new(Mutex::new(Some(HashMap::new())));
         let (closed, mut writer_closed) = watch::channel(false);
         let mut reader_closed = closed.subscribe();
@@ -146,7 +148,17 @@ impl RpcClient {
             _ = writer_closed.changed() => {},
             _ = async {
             if wire::write_hello(&mut writer, role, std::process::id() as u64).await.is_err() { return; }
-            while let Some(envelope) = outbound_rx.recv().await {
+            loop {
+                let envelope = tokio::select! {
+                    biased;
+                    envelope = outbound_rx.recv() => match envelope { Some(v) => v, None => break },
+                    changed = layout_rx.changed() => {
+                        if changed.is_err() { break; }
+                        let latest = layout_rx.borrow_and_update().clone();
+                        let Some(update) = latest else { continue };
+                        Envelope { request_id: 0, payload: Some(Payload::LayoutUpdate(update)) }
+                    }
+                };
                 if !matches!(tokio::time::timeout(std::time::Duration::from_secs(2), write_frame(&mut writer, &envelope)).await, Ok(Ok(()))) {
                     break;
                 }
@@ -215,6 +227,7 @@ impl RpcClient {
         });
 
         Ok(Self {
+            layout,
             outbound,
             pending,
             closed,
@@ -292,12 +305,10 @@ impl RpcClient {
         if !self.is_connected() {
             return Err(RpcError::Disconnected);
         }
-        self.outbound
-            .try_send(Envelope {
-                request_id: 0,
-                payload: Some(Payload::LayoutUpdate(update)),
-            })
-            .map_err(|error| self.queue_error(error))
+        // Geometry is replaceable state, not an ordered input operation.
+        // A busy pipe retains the final position without filling the key FIFO.
+        self.layout.send_replace(Some(update));
+        Ok(())
     }
 
     /// Send a best-effort diagnostic event to the server.

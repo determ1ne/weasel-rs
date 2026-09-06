@@ -41,6 +41,7 @@ enum RpcCommand {
 
 #[derive(Default)]
 struct PushTarget {
+    layout: LayoutMailbox,
     window: AtomicUsize,
     updates: Mutex<Vec<KeyEventResponse>>,
     failed: AtomicBool,
@@ -48,6 +49,13 @@ struct PushTarget {
     epoch: AtomicU64,
     cancellation: AtomicU64,
     connection_generation: AtomicU64,
+}
+
+struct LayoutMailbox(tokio::sync::watch::Sender<Option<LayoutUpdate>>);
+impl Default for LayoutMailbox {
+    fn default() -> Self {
+        Self(tokio::sync::watch::channel(None).0)
+    }
 }
 
 impl PushTarget {
@@ -238,11 +246,18 @@ impl WorkerState {
         mut commands: tokio::sync::mpsc::Receiver<RpcCommand>,
         mut stop: tokio::sync::oneshot::Receiver<()>,
     ) {
+        let mut layouts = self.push.layout.0.subscribe();
         loop {
             let command = tokio::select! {
                 biased;
                 _ = &mut stop => break,
                 command = commands.recv() => command,
+                changed = layouts.changed() => {
+                    if changed.is_err() { break; }
+                    let latest = layouts.borrow_and_update().clone();
+                    let Some(update) = latest else { continue };
+                    Some(RpcCommand::LayoutUpdate(update))
+                }
             };
             let Some(command) = command else { break };
             let deadline = command.deadline();
@@ -536,6 +551,7 @@ impl RpcWorker {
     }
 
     pub fn context_command(&self, command: ContextCommand) -> bool {
+        self.reset_layout();
         self.commands
             .as_ref()
             .is_some_and(|sender| sender.try_send(RpcCommand::Context(command)).is_ok())
@@ -575,10 +591,20 @@ impl RpcWorker {
     }
 
     pub fn send_layout_update(&self, update: LayoutUpdate) {
-        let Some(commands) = self.commands.as_ref() else {
+        if self.commands.is_none() || self.push.current_epoch() == 0 {
             return;
-        };
-        let _ = commands.try_send(RpcCommand::LayoutUpdate(update));
+        }
+        self.push.layout.0.send_if_modified(|latest| {
+            if latest.as_ref() == Some(&update) {
+                return false;
+            }
+            *latest = Some(update);
+            true
+        });
+    }
+
+    pub fn reset_layout(&self) {
+        self.push.layout.0.send_replace(None);
     }
 
     pub fn stop(&mut self) {
@@ -645,6 +671,29 @@ impl Drop for RpcWorker {
 mod tests {
     use super::*;
     use weasel_common::rpc::RpcServer;
+
+    #[test]
+    fn layout_flood_retains_latest_without_using_command_queue() {
+        let mut worker = RpcWorker::default();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        worker.commands = Some(Arc::new(tx));
+        worker.push.epoch.store(1, Ordering::Release);
+        let mut changes = worker.push.layout.0.subscribe();
+        let mut last = LayoutUpdate::default();
+        for x in 0..10000 {
+            last.anchor = Some(weasel_common::message::RenderRect {
+                left: x,
+                ..Default::default()
+            });
+            worker.send_layout_update(last.clone());
+        }
+        assert!(rx.try_recv().is_err());
+        assert_eq!(*changes.borrow_and_update(), Some(last.clone()));
+        worker.send_layout_update(last);
+        assert!(!changes.has_changed().unwrap());
+        worker.reset_layout();
+        assert!(changes.borrow_and_update().is_none());
+    }
 
     fn translated_key() -> KeyEvent {
         KeyEvent {

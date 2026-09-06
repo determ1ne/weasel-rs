@@ -2,6 +2,7 @@
 
 mod visual;
 
+use crate::bindings::Windows::Win32::SWP_NOSIZE;
 use weasel_common::message::RenderSnapshot;
 use windows_core::Interface;
 use windows_strings::{PCWSTR, w};
@@ -70,6 +71,7 @@ struct UiState {
     window: HWND,
     xaml_window: HWND,
     last_snapshot: Option<RenderSnapshot>,
+    measured_size: Option<Size>,
 }
 
 /// Called and dropped on the UI runtime's initialized STA.
@@ -176,6 +178,7 @@ unsafe fn create_initialized() -> Result<Box<dyn ThemeBackend>, String> {
         window,
         xaml_window,
         last_snapshot: None,
+        measured_size: None,
     }))
 }
 
@@ -291,12 +294,13 @@ fn render_snapshot(
         .as_ref()
         .ok_or("visible snapshot has no anchor")?;
 
-    if !state
+    let unchanged = state
         .last_snapshot
         .as_ref()
-        .is_some_and(|old| same_content(old, snapshot))
-    {
+        .is_some_and(|old| same_content(old, snapshot));
+    if !unchanged {
         state.revokers.clear();
+        state.measured_size = None;
         apply_dwm_theme(state);
         if let Err(error) = state.theme.render(
             &state.root,
@@ -314,6 +318,26 @@ fn render_snapshot(
     let (width, height) = desired_size(state);
     let (x, y) = popup_position(anchor, width, height);
     unsafe {
+        if unchanged {
+            let dpi = GetDpiForWindow(state.window);
+            let _ = SetWindowPos(
+                state.window,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                0,
+                0,
+                (SWP_NOACTIVATE | SWP_NOSIZE) as u32,
+            );
+            if GetDpiForWindow(state.window) == dpi {
+                return Ok(());
+            }
+            // A cross-monitor move can synchronously change the Island DPI.
+            // Invalidate the cache and remeasure before resizing both HWNDs.
+            state.measured_size = None;
+        }
+        let (width, height) = desired_size(state);
+        let (x, y) = popup_position(anchor, width, height);
         let _ = SetWindowPos(
             state.window,
             Some(HWND_TOPMOST),
@@ -383,14 +407,16 @@ fn apply_dwm_corner_preference(window: HWND) {
     }
 }
 
-fn desired_size(state: &UiState) -> (i32, i32) {
-    let _ = state.root.Measure(Size {
-        Width: 10_000.0,
-        Height: 10_000.0,
-    });
-    let desired = state.root.DesiredSize().unwrap_or(Size {
-        Width: 260.0,
-        Height: 34.0,
+fn desired_size(state: &mut UiState) -> (i32, i32) {
+    let desired = *state.measured_size.get_or_insert_with(|| {
+        let _ = state.root.Measure(Size {
+            Width: 10_000.0,
+            Height: 10_000.0,
+        });
+        state.root.DesiredSize().unwrap_or(Size {
+            Width: 260.0,
+            Height: 34.0,
+        })
     });
     let dpi = unsafe { GetDpiForWindow(state.window).max(96) } as f32;
     (

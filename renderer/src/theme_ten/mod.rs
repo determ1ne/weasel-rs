@@ -448,6 +448,25 @@ impl ThemeBackend for Ten {
 
 impl Window {
     fn render(&self, snapshot: &RenderSnapshot, events: &EventSender) -> Result<(), String> {
+        // Layout-only snapshots must not cancel a pressed candidate, rebuild
+        // text layouts, or repaint content. position() handles DPI transitions.
+        let moved = {
+            let mut app = self.app.borrow_mut();
+            if let Some(content) = app.content.as_mut()
+                && crate::presentation::is_visible(snapshot)
+                && crate::state::same_content(&content.snapshot, snapshot)
+            {
+                content.snapshot = snapshot.clone();
+                content.events = events.clone();
+                true
+            } else {
+                false
+            }
+        };
+        if moved {
+            self.position().map_err(|e| e.to_string())?;
+            return self.health();
+        }
         self.cancel();
         self.health()?;
         if !snapshot.visible || !snapshot.anchor.as_ref().is_some_and(|a| a.valid) {
