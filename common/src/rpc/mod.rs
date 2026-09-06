@@ -27,6 +27,10 @@ pub fn try_default_renderer_pipe_name() -> std::io::Result<String> {
     crate::platform::RuntimeIdentity::current()?.pipe_name("renderer")
 }
 
+pub fn try_default_broker_pipe_name() -> std::io::Result<String> {
+    crate::platform::RuntimeIdentity::current()?.pipe_name("broker")
+}
+
 #[derive(Debug)]
 pub enum RpcError {
     Io(std::io::Error),

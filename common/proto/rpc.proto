@@ -16,7 +16,7 @@ enum PeerRole { PEER_ROLE_UNSPECIFIED = 0; PEER_ROLE_TIP = 1; PEER_ROLE_BROKER =
 message Hello { PeerRole role = 1; uint64 instance_id = 2; }
 message Request {
   uint64 id = 1;
-  oneof operation { Ping ping = 10; InputKey key = 11; ContextCommand context = 12; Shutdown shutdown = 13; OpenInput open_input = 14; }
+  oneof operation { Ping ping = 10; InputKey key = 11; ContextCommand context = 12; Shutdown shutdown = 13; OpenInput open_input = 14; GetSettings get_settings = 15; }
 }
 message OpenInput { ContextToken token = 1; }
 message InputOpened { ContextToken token = 1; }
@@ -30,7 +30,7 @@ message InputKey {
 }
 message Response {
   uint64 id = 1;
-  oneof result { Pong pong = 10; InputResult input = 11; ShutdownResponse shutdown = 12; Failure failure = 13; InputOpened input_opened = 14; }
+  oneof result { Pong pong = 10; InputResult input = 11; ShutdownResponse shutdown = 12; Failure failure = 13; InputOpened input_opened = 14; Settings settings = 15; }
 }
 message Pong { string text = 1; }
 enum FailureCode { FAILURE_CODE_UNSPECIFIED = 0; FAILURE_CODE_INVALID_ARGUMENT = 1; FAILURE_CODE_NOT_READY = 2; FAILURE_CODE_OVERLOADED = 3; FAILURE_CODE_STALE_CONTEXT = 4; FAILURE_CODE_INTERNAL = 5; }

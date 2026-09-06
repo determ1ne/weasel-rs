@@ -2,6 +2,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod lifecycle;
+mod settings;
+mod settings_rpc;
 
 #[cfg(windows)]
 mod bindings;

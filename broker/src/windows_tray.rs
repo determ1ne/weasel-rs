@@ -66,6 +66,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let paths = RuntimePaths::discover()?;
     paths.ensure()?;
     let _ = LOGGER.set(ComponentLogger::for_paths(&paths, "broker")?);
+    let settings = crate::settings::load(&paths, |warning| {
+        deployment_diagnostic(&paths.executable_directory, &warning);
+    });
+    let _settings_service = crate::settings_rpc::SettingsService::start(settings)?;
     let directory = paths.executable_directory;
     let server = start_child(&directory, "weasel-server.exe", &[])?;
     let renderer = match start_child(&directory, "weasel-renderer.exe", &[]) {

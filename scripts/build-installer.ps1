@@ -20,6 +20,7 @@ try {
     $version = $versionMatch.Groups[1].Value
 
     $requiredFiles = @(
+        'weasel.json',
         'target\x86_64-pc-windows-msvc\release\weasel-broker.exe',
         'target\x86_64-pc-windows-msvc\release\weasel-server.exe',
         'target\x86_64-pc-windows-msvc\release\weasel-renderer.exe',

@@ -40,6 +40,14 @@ pub fn encode(envelope: &m::Envelope) -> Result<m::RpcFrame, RpcError> {
         .clone()
         .ok_or_else(|| invalid("missing payload"))?;
     let body = match payload {
+        P::GetSettings(v) if id != 0 => B::Request(m::Request {
+            id,
+            operation: Some(Q::GetSettings(v)),
+        }),
+        P::Settings(v) if id != 0 => B::Response(m::Response {
+            id,
+            result: Some(R::Settings(v)),
+        }),
         P::Ping(v) if id != 0 => B::Request(m::Request {
             id,
             operation: Some(Q::Ping(v)),
@@ -152,6 +160,7 @@ pub fn unpack(frame: m::RpcFrame) -> Result<m::Envelope, RpcError> {
                 v.id,
                 match v.operation.ok_or_else(|| invalid("missing operation"))? {
                     Q::Ping(v) => P::Ping(v),
+                    Q::GetSettings(v) => P::GetSettings(v),
                     Q::Shutdown(v) => P::Shutdown(v),
                     Q::OpenInput(v) => {
                         validate_token(&v.token)?;
@@ -184,6 +193,7 @@ pub fn unpack(frame: m::RpcFrame) -> Result<m::Envelope, RpcError> {
                 v.id,
                 match v.result.ok_or_else(|| invalid("missing result"))? {
                     R::Pong(v) => P::Pong(v),
+                    R::Settings(v) => P::Settings(v),
                     R::Shutdown(v) => P::ShutdownResponse(v),
                     R::InputOpened(v) => {
                         validate_token(&v.token)?;

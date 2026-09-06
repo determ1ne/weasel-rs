@@ -44,6 +44,7 @@ try {
         }
     }
 
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'weasel.json') -Destination (Join-Path $targetDirectory 'x86_64-pc-windows-msvc\release\weasel.json')
     Write-Host 'Release builds completed:'
     Write-Host "  x64 components: $(Join-Path $targetDirectory 'x86_64-pc-windows-msvc\release')"
     Write-Host "  x86 TIP:        $(Join-Path $targetDirectory 'i686-pc-windows-msvc\release\weasel_tip.dll')"

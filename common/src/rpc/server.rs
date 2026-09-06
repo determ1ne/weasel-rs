@@ -25,6 +25,7 @@ fn validate_peer_role(
                 || (allow_unspecified && peer == PeerRole::Unspecified)
         }
         PeerRole::Renderer => matches!(peer, PeerRole::Server | PeerRole::Broker),
+        PeerRole::Broker => peer == PeerRole::Renderer,
         _ => false,
     };
     if allowed {
@@ -42,6 +43,7 @@ fn validate_business(
     message: Envelope,
 ) -> Result<Envelope, RpcError> {
     let allowed = match (local, peer, message.payload.as_ref()) {
+        (PeerRole::Broker, PeerRole::Renderer, Some(Payload::GetSettings(_))) => true,
         (
             PeerRole::Server | PeerRole::Renderer,
             PeerRole::Broker,
@@ -193,6 +195,15 @@ impl RpcServer {
             self.role,
             self.allow_unspecified_peer,
         ))
+    }
+
+    /// Bind before starting clients, without waiting for a connection.
+    pub async fn bind(&self) -> Result<(), RpcError> {
+        let mut next = self.next_instance.lock().await;
+        if next.is_none() {
+            *next = Some(self.create_instance(true)?);
+        }
+        Ok(())
     }
 }
 

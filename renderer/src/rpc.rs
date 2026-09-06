@@ -19,11 +19,31 @@ pub fn run() -> Result<(), String> {
         .enable_time()
         .build()
         .map_err(|error| format!("could not create renderer runtime: {error}"))?;
-    let ui = UiHandle::start()?;
+    let theme = runtime.block_on(load_theme());
+    let ui = UiHandle::start(&theme)?;
     runtime.block_on(run_rpc(
         RpcServer::with_role(default_renderer_pipe_name(), PeerRole::Renderer),
         ui,
     ))
+}
+
+async fn load_theme() -> String {
+    use weasel_common::rpc::{RpcClient, RpcError, try_default_broker_pipe_name};
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        let client =
+            RpcClient::connect_as(try_default_broker_pipe_name()?, PeerRole::Renderer).await?;
+        client.get_settings().await
+    })
+    .await;
+    match result.unwrap_or(Err(RpcError::Timeout)) {
+        Ok(settings) if matches!(settings.theme.as_str(), "eleven" | "ten") => settings.theme,
+        result => {
+            crate::diagnostics::record(format_args!(
+                "broker settings unavailable or unsupported: {result:?}; using eleven"
+            ));
+            "eleven".into()
+        }
+    }
 }
 
 async fn run_rpc(server: RpcServer, mut ui: UiHandle) -> Result<(), String> {

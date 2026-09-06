@@ -96,8 +96,8 @@ fn select_first<T>(
 }
 
 impl UiHandle {
-    pub fn start() -> Result<Self, String> {
-        select_first(&theme_candidates(), Self::start_attempt)
+    pub fn start(theme: &str) -> Result<Self, String> {
+        select_first(&theme_candidates(theme), Self::start_attempt)
     }
 
     fn start_attempt(registration: ThemeRegistration) -> Result<Self, AttemptError> {

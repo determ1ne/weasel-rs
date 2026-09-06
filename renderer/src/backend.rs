@@ -22,9 +22,9 @@ pub struct ThemeRegistration {
     pub create: fn() -> Result<Box<dyn ThemeBackend>, String>,
 }
 
-/// Selection policy placeholder. Names are backend identifiers, not OS checks.
-pub fn theme_candidates() -> Vec<ThemeRegistration> {
-    vec![
+/// Prefer the configured backend, retaining the other initialization fallback.
+pub fn theme_candidates(preferred: &str) -> Vec<ThemeRegistration> {
+    let mut themes = vec![
         ThemeRegistration {
             name: "eleven",
             create: crate::theme_eleven::create,
@@ -33,5 +33,26 @@ pub fn theme_candidates() -> Vec<ThemeRegistration> {
             name: "ten",
             create: crate::theme_ten::create,
         },
-    ]
+    ];
+    themes.sort_by_key(|theme| theme.name != preferred);
+    themes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn preference_preserves_fallback_without_creating_ui() {
+        for (preferred, expected) in [
+            ("ten", ["ten", "eleven"]),
+            ("eleven", ["eleven", "ten"]),
+            ("unknown", ["eleven", "ten"]),
+        ] {
+            let names: Vec<_> = theme_candidates(preferred)
+                .iter()
+                .map(|theme| theme.name)
+                .collect();
+            assert_eq!(names, expected);
+        }
+    }
 }

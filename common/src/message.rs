@@ -47,6 +47,8 @@ pub mod envelope {
     use super::*;
     #[derive(Clone, Debug, PartialEq)]
     pub enum Payload {
+        GetSettings(GetSettings),
+        Settings(Settings),
         Ping(Ping),
         Pong(Pong),
         LogEvent(LogEvent),

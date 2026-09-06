@@ -333,6 +333,17 @@ impl RpcClient {
         }
     }
 
+    /// Read the broker's effective startup configuration.
+    pub async fn get_settings(&self) -> Result<crate::message::Settings, RpcError> {
+        let response = self
+            .request(Payload::GetSettings(crate::message::GetSettings {}))
+            .await?;
+        match response.payload {
+            Some(Payload::Settings(settings)) => Ok(settings),
+            _ => Err(RpcError::UnexpectedResponse),
+        }
+    }
+
     /// Check service readiness on a control connection, without creating input state.
     pub async fn ping(&self, text: impl Into<String>) -> Result<Pong, RpcError> {
         let response = self
