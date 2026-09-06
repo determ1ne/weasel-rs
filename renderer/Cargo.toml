@@ -8,6 +8,7 @@ license.workspace = true
 weasel-common = { path = "../common" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 windows-core = "0.100.0"
+windows-numerics = "0.100.0"
 windows-collections = "0.100.0"
 windows-reference = "0.100.0"
 windows-time = "0.100.0"

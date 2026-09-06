@@ -21,14 +21,12 @@ pub use Windows::UI::Xaml::{
     VerticalAlignment,
 };
 pub use Windows::Win32::{
-    CreateWindowExW, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    DwmSetWindowAttribute, GWL_EXSTYLE, GetCurrentThreadId, GetDpiForWindow, GetMessageW,
+    CreateWindowExW, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DefWindowProcW, DestroyWindow, DwmSetWindowAttribute, GWL_EXSTYLE, GetDpiForWindow,
     GetMonitorInfoW, GetPropW, GetWindowLongPtrW, HANDLE, HWND, HWND_TOPMOST,
-    IDesktopWindowXamlSourceNative, KillTimer, LPARAM, LRESULT, MONITOR_DEFAULTTONEAREST,
-    MONITORINFO, MSG, MonitorFromRect, PostThreadMessageW, RECT, RO_INIT_SINGLETHREADED,
-    RegisterClassW, RemovePropW, RoInitialize, RoUninitialize, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SetPropW, SetThreadDpiAwarenessContext, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_APP, WM_DPICHANGED, WM_SIZE, WNDCLASSW, WPARAM,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    IDesktopWindowXamlSourceNative, LPARAM, LRESULT, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromRect, PostThreadMessageW, RECT, RegisterClassW, RemovePropW, SW_HIDE, SW_SHOWNA,
+    SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetPropW, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, WM_DPICHANGED, WM_SIZE, WNDCLASSW, WPARAM, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };

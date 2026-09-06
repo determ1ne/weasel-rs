@@ -68,20 +68,6 @@ use crate::bindings::{
     UIColorType, UISettings, VerticalAlignment,
 };
 
-/// Visual construction is a theme concern; the RPC protocol remains generic.
-pub trait RenderTheme {
-    fn render(
-        &self,
-        root: &Border,
-        rows: &StackPanel,
-        quick_action_panel: &Border,
-        quick_actions: &StackPanel,
-        snapshot: &RenderSnapshot,
-        events: &crate::xaml_host::EventSender,
-        revokers: &mut Vec<windows_core::EventRevoker>,
-    ) -> windows_core::Result<()>;
-}
-
 #[derive(Default)]
 pub struct CandidateTheme {
     brushes: std::cell::RefCell<Vec<([u8; 4], SolidColorBrush)>>,
@@ -102,36 +88,43 @@ impl CandidateTheme {
     }
 }
 
-impl RenderTheme for CandidateTheme {
-    fn render(
+impl CandidateTheme {
+    fn candidate_font(&self) -> windows_core::Result<FontFamily> {
+        if let Some(font) = self.font.borrow().as_ref() {
+            return Ok(font.clone());
+        }
+        let font = FontFamily::CreateInstanceWithName(&HSTRING::from("Microsoft YaHei UI"))?;
+        *self.font.borrow_mut() = Some(font.clone());
+        Ok(font)
+    }
+
+    /// Validate shared visuals while the attached host is still hidden, without
+    /// creating callbacks or requiring a snapshot/event owner.
+    pub fn prepare(
         &self,
         root: &Border,
         rows: &StackPanel,
         quick_action_panel: &Border,
         quick_actions: &StackPanel,
-        snapshot: &RenderSnapshot,
-        events: &crate::xaml_host::EventSender,
-        revokers: &mut Vec<windows_core::EventRevoker>,
     ) -> windows_core::Result<()> {
         let palette = self.palette.get().unwrap_or_else(Palette::system);
         self.palette.set(Some(palette));
-        let solid = |color| self.brush(color);
-        let foreground = solid(palette.foreground)?;
-        let secondary_foreground = solid(with_alpha(palette.foreground, 0xa0))?;
-        let disabled_foreground = solid(with_alpha(palette.foreground, 0x5c))?;
-        let accent = solid(palette.accent)?;
-        let panel_background = solid(palette.acrylic_base())?;
-        let panel_border = solid(with_alpha(palette.foreground, 0x24))?;
-        let selection_background = solid(with_alpha(palette.foreground, 0x0f))?;
-        let hover_background = solid(with_alpha(palette.foreground, 0x20))?;
-        let pressed_background = solid(with_alpha(palette.foreground, 0x34))?;
-        let pressed_foreground = solid(with_alpha(palette.foreground, 0x70))?;
-        let transparent = solid(Color {
+        self.brush(palette.foreground)?;
+        self.brush(palette.accent)?;
+        for alpha in [0xa0, 0x5c, 0x24, 0x0f, 0x20, 0x34, 0x70] {
+            self.brush(with_alpha(palette.foreground, alpha))?;
+        }
+        self.brush(Color {
             A: 0,
             R: 0,
             G: 0,
             B: 0,
         })?;
+        let panel_background = self.brush(palette.acrylic_base())?;
+        let panel_border = self.brush(with_alpha(palette.foreground, 0x24))?;
+        self.candidate_font()?;
+        // Validate the icon font factory as well as the candidate font.
+        FontFamily::CreateInstanceWithName(&HSTRING::from(icon_font()))?;
 
         root.SetPadding(Thickness {
             Left: 0.0,
@@ -153,8 +146,6 @@ impl RenderTheme for CandidateTheme {
         rows.SetOrientation(Orientation::Horizontal)?;
         rows.SetPadding(thickness(2.0, 2.0, 2.0, 2.0))?;
         rows.SetSpacing(0.0)?;
-        let children = rows.Children()?;
-        children.Clear()?;
 
         quick_action_panel.SetBorderBrush(&panel_border)?;
         quick_action_panel.SetBorderThickness(thickness(1.0, 0.0, 0.0, 0.0))?;
@@ -162,6 +153,41 @@ impl RenderTheme for CandidateTheme {
         quick_action_panel.SetVerticalAlignment(VerticalAlignment::Stretch)?;
         quick_actions.SetOrientation(Orientation::Horizontal)?;
         quick_actions.SetVerticalAlignment(VerticalAlignment::Center)?;
+        Ok(())
+    }
+
+    pub fn render(
+        &self,
+        root: &Border,
+        rows: &StackPanel,
+        quick_action_panel: &Border,
+        quick_actions: &StackPanel,
+        snapshot: &RenderSnapshot,
+        events: &crate::ui_runtime::EventSender,
+        revokers: &mut Vec<windows_core::EventRevoker>,
+    ) -> windows_core::Result<()> {
+        self.prepare(root, rows, quick_action_panel, quick_actions)?;
+        let palette = self.palette.get().unwrap_or_else(Palette::system);
+        self.palette.set(Some(palette));
+        let solid = |color| self.brush(color);
+        let foreground = solid(palette.foreground)?;
+        let secondary_foreground = solid(with_alpha(palette.foreground, 0xa0))?;
+        let disabled_foreground = solid(with_alpha(palette.foreground, 0x5c))?;
+        let accent = solid(palette.accent)?;
+        let panel_border = solid(with_alpha(palette.foreground, 0x24))?;
+        let selection_background = solid(with_alpha(palette.foreground, 0x0f))?;
+        let hover_background = solid(with_alpha(palette.foreground, 0x20))?;
+        let pressed_background = solid(with_alpha(palette.foreground, 0x34))?;
+        let pressed_foreground = solid(with_alpha(palette.foreground, 0x70))?;
+        let transparent = solid(Color {
+            A: 0,
+            R: 0,
+            G: 0,
+            B: 0,
+        })?;
+
+        let children = rows.Children()?;
+        children.Clear()?;
         let action_children = quick_actions.Children()?;
         action_children.Clear()?;
         append_action(
@@ -219,11 +245,7 @@ impl RenderTheme for CandidateTheme {
             revokers,
         )?;
 
-        let candidate_font = match self.font.borrow().as_ref() {
-            Some(font) => font.clone(),
-            None => FontFamily::CreateInstanceWithName(&HSTRING::from("Microsoft YaHei UI"))?,
-        };
-        *self.font.borrow_mut() = Some(candidate_font.clone());
+        let candidate_font = self.candidate_font()?;
         for (index, candidate) in snapshot.items.iter().enumerate() {
             let item_index = index as u32;
             let selected = item_index == snapshot.selected_index;
@@ -362,7 +384,7 @@ fn append_action(
     enabled: bool,
     action: RendererEventAction,
     snapshot: &RenderSnapshot,
-    events: &crate::xaml_host::EventSender,
+    events: &crate::ui_runtime::EventSender,
     foreground: &SolidColorBrush,
     disabled_foreground: &SolidColorBrush,
     hover_background: &SolidColorBrush,

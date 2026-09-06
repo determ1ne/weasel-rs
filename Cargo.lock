@@ -827,6 +827,7 @@ dependencies = [
  "windows-bindgen",
  "windows-collections",
  "windows-core",
+ "windows-numerics",
  "windows-rdl",
  "windows-reference",
  "windows-strings",
@@ -946,6 +947,15 @@ name = "windows-metadata"
 version = "0.100.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d3a758dc1da4ae61aa7f93afbb505d564c72dd6431e513ed581377857896a72"
+
+[[package]]
+name = "windows-numerics"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c5500bf6a9098f27922953422ae7324cdd330c868e945801593455a6832701"
+dependencies = [
+ "windows-core",
+]
 
 [[package]]
 name = "windows-rdl"

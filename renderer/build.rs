@@ -1,9 +1,11 @@
 use std::path::PathBuf;
+mod build_ten;
 #[path = "../build_support/icon.rs"]
 mod icon;
 
 fn main() {
     icon::embed();
+    build_ten::generate();
     let manifest_dir = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is not set"),
     );
@@ -52,6 +54,9 @@ fn main() {
             "Windows.Win32.WM_APP",
             "Windows.Win32.WM_DPICHANGED",
             "Windows.Win32.WM_SIZE",
+            "Windows.Win32.WM_SETTINGCHANGE",
+            "Windows.Win32.WM_THEMECHANGED",
+            "Windows.Win32.WM_SYSCOLORCHANGE",
             "Windows.Win32.GetWindowLongPtrW",
             "Windows.Win32.SetWindowLongPtrW",
             "Windows.Win32.GWL_EXSTYLE",

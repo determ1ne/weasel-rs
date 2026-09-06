@@ -1,6 +1,6 @@
 use crate::{
     state::Owner,
-    xaml_host::{UiCommand, UiCommandSender, UiHandle},
+    ui_runtime::{UiCommand, UiCommandSender, UiHandle},
 };
 use std::{collections::HashMap, time::Duration};
 use tokio::{
@@ -65,13 +65,13 @@ async fn run_rpc(server: RpcServer, mut ui: UiHandle) -> Result<(), String> {
                     if commands.is_owner(owner) {
                         if let Some(route) = routes.get(&owner) { let _ = route.try_send(event); }
                     }
-                } else { break Err("XAML event channel closed".into()); }
+                } else { break Err("UI event channel closed".into()); }
             }
             finished = &mut ui.finished => {
                 break match finished {
                     Ok(Err(error)) => Err(error),
-                    Ok(Ok(())) => Err("XAML thread exited unexpectedly".into()),
-                    Err(_) => Err("XAML thread panicked".into()),
+                    Ok(Ok(())) => Err("UI thread exited unexpectedly".into()),
+                    Err(_) => Err("UI thread panicked".into()),
                 };
             }
             _ = shutdown_receiver.changed() => break Ok(()),
