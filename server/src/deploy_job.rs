@@ -71,13 +71,15 @@ pub fn diagnostic(message: &str) {
     tracing::info!(message, "deployment diagnostic");
 }
 
-pub fn run(ui: Arc<UiMailbox>, guard: SingleInstance) {
+pub fn run(ui: Option<Arc<UiMailbox>>, guard: SingleInstance) -> DeployComplete {
     diagnostic("deployment worker started");
     let telemetry = crate::deploy_telemetry::Telemetry::stdout();
     let mut publish = |source: &str, text: String| {
         // Native output is preview/telemetry only; persistent diagnostics are bounded
         // by the ComponentLogger installed by main for this deployment process.
-        ui.log(&text); // Never waits for the UI to consume a queue slot.
+        if let Some(ui) = &ui {
+            ui.log(&text); // Never waits for the UI to consume a queue slot.
+        }
         telemetry.log(source, text);
     };
     let result = tokio::runtime::Builder::new_current_thread()
@@ -102,8 +104,14 @@ pub fn run(ui: Arc<UiMailbox>, guard: SingleInstance) {
         },
     };
     drop(guard);
-    telemetry.finish(done.clone());
-    ui.finish(done);
+    if let Some(ui) = ui {
+        telemetry.finish(done.clone());
+        ui.finish(done.clone());
+    } else {
+        // There is no window keeping this process alive after deployment.
+        telemetry.finish_and_wait(done.clone());
+    }
+    done
 }
 
 async fn run_process(

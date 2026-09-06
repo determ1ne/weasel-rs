@@ -24,6 +24,7 @@ use std::{
     },
     thread,
 };
+use weasel_common::deploy_protocol::DeployComplete;
 use weasel_common::process::SingleInstance;
 use windows_core::Interface;
 use windows_strings::{HSTRING, w};
@@ -36,18 +37,29 @@ static FINISHED: AtomicBool = AtomicBool::new(false);
 pub fn run() -> Result<(), String> {
     let result = (|| {
         let guard = SingleInstance::acquire("deploy-ui-active").map_err(|e| e.to_string())?;
-        unsafe {
-            RoInitialize(RO_INIT_SINGLETHREADED)
-                .ok()
-                .map_err(|e| e.to_string())?;
-            let result = run_initialized(guard);
-            RoUninitialize();
-            result
-        }
+        with_fallback(
+            guard,
+            |guard| unsafe {
+                RoInitialize(RO_INIT_SINGLETHREADED)
+                    .ok()
+                    .map_err(|e| e.to_string())?;
+                let result = run_initialized(guard);
+                RoUninitialize();
+                result
+            },
+            |guard| {
+                thread::Builder::new()
+                    .name("rime-deploy-headless".into())
+                    .spawn(move || crate::deploy_job::run(None, guard))
+                    .map_err(|e| e.to_string())?
+                    .join()
+                    .map_err(|_| "deployment worker panicked".to_owned())
+            },
+        )
     })();
     if let Err(error) = &result {
         diagnostic(&format!("deployment UI failed: {error}"));
-        crate::deploy_telemetry::Telemetry::stdout().finish(
+        crate::deploy_telemetry::Telemetry::stdout().finish_and_wait(
             weasel_common::deploy_protocol::DeployComplete {
                 success: false,
                 exit_code: None,
@@ -55,10 +67,47 @@ pub fn run() -> Result<(), String> {
             },
         );
     }
-    result
+    match result? {
+        Some(done) if !done.success => Err(done.message),
+        _ => Ok(()),
+    }
+}
+
+/// The UI transfers its guard only when starting the worker. Keeping it here
+/// permits initialization fallback, but never a second deployment after start.
+fn with_fallback<G>(
+    guard: G,
+    ui: impl FnOnce(&mut Option<G>) -> Result<(), String>,
+    headless: impl FnOnce(G) -> Result<DeployComplete, String>,
+) -> Result<Option<DeployComplete>, String> {
+    let mut guard = Some(guard);
+    match ui(&mut guard) {
+        Ok(()) => Ok(None),
+        Err(error) => match guard {
+            Some(guard) => {
+                diagnostic(&format!(
+                    "deployment UI unavailable; running --deploy without UI: {error}"
+                ));
+                headless(guard).map(Some)
+            }
+            None => Err(error),
+        },
+    }
 }
 
 struct Window(HWND);
+struct XamlManager(WindowsXamlManager);
+impl Drop for XamlManager {
+    fn drop(&mut self) {
+        let _ = self.0.Close();
+    }
+}
+struct XamlSource(DesktopWindowXamlSource);
+impl Drop for XamlSource {
+    fn drop(&mut self) {
+        let _ = self.0.Close();
+    }
+}
 impl Drop for Window {
     fn drop(&mut self) {
         unsafe {
@@ -119,7 +168,7 @@ impl Drop for LayoutBinding {
     }
 }
 
-unsafe fn run_initialized(guard: SingleInstance) -> Result<(), String> {
+unsafe fn run_initialized(guard: &mut Option<SingleInstance>) -> Result<(), String> {
     let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     let mut cursor = POINT::default();
     let _ = GetCursorPos(&mut cursor);
@@ -168,7 +217,8 @@ unsafe fn run_initialized(guard: SingleInstance) -> Result<(), String> {
         ));
     }
     let hwnd = window.0;
-    let manager = WindowsXamlManager::InitializeForCurrentThread().map_err(|e| e.to_string())?;
+    let _manager =
+        XamlManager(WindowsXamlManager::InitializeForCurrentThread().map_err(|e| e.to_string())?);
     // A transparent Grid is insufficient: the Island has its own opaque backing.
     let transparency = (|| -> windows_core::Result<()> {
         let window = crate::ui_bindings::Windows::UI::Xaml::Window::Current()?;
@@ -181,14 +231,14 @@ unsafe fn run_initialized(guard: SingleInstance) -> Result<(), String> {
             "XAML Island background transparency unavailable: {error}"
         ));
     }
-    let source = DesktopWindowXamlSource::new().map_err(|e| e.to_string())?;
-    let native: IDesktopWindowXamlSourceNative = source.cast().map_err(|e| e.to_string())?;
+    let source = XamlSource(DesktopWindowXamlSource::new().map_err(|e| e.to_string())?);
+    let native: IDesktopWindowXamlSourceNative = source.0.cast().map_err(|e| e.to_string())?;
     native
         .AttachToWindow(hwnd)
         .ok()
         .map_err(|e| e.to_string())?;
     let child = native.WindowHandle().map_err(|e| e.to_string())?;
-    let input: IDesktopWindowXamlSourceNative2 = source.cast().map_err(|e| e.to_string())?;
+    let input: IDesktopWindowXamlSourceNative2 = source.0.cast().map_err(|e| e.to_string())?;
     let root: Grid = XamlReader::Load(&HSTRING::from(include_str!("deploy.xaml")))
         .map_err(|e| e.to_string())?
         .cast()
@@ -214,7 +264,7 @@ unsafe fn run_initialized(guard: SingleInstance) -> Result<(), String> {
         .FindName(&HSTRING::from("Okay"))
         .and_then(|x| x.cast())
         .map_err(|e| e.to_string())?;
-    source.SetContent(&root).map_err(|e| e.to_string())?;
+    source.0.SetContent(&root).map_err(|e| e.to_string())?;
     let layout = LayoutBinding(Box::new(Layout {
         parent: hwnd,
         child,
@@ -312,9 +362,10 @@ unsafe fn run_initialized(guard: SingleInstance) -> Result<(), String> {
     let mailbox = Arc::new(UiMailbox::default());
     mailbox.set_window(hwnd.0 as usize);
     let sender = mailbox.clone();
+    let guard = guard.take().ok_or("deployment already started")?;
     let worker = thread::Builder::new()
         .name("rime-deploy-ui-worker".into())
-        .spawn(move || crate::deploy_job::run(sender, guard))
+        .spawn(move || crate::deploy_job::run(Some(sender), guard))
         .map_err(|e| e.to_string())?;
     let mut text = LogBuffer::default();
     let mut message = MSG::default();
@@ -369,8 +420,8 @@ unsafe fn run_initialized(guard: SingleInstance) -> Result<(), String> {
     mailbox.set_window(0);
     drop(_drag_layout);
     drop(layout);
-    drop(source);
-    drop(manager);
+    // Controls drop before their source, manager and native window, including
+    // initialization failures that fall back to the headless deployer.
     Ok(())
 }
 
@@ -577,6 +628,60 @@ impl LogBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn initialization_failure_falls_back_once_with_the_same_guard() {
+        let done = DeployComplete {
+            success: true,
+            exit_code: Some(0),
+            message: "done".into(),
+        };
+        let mut calls = 0;
+        let result = with_fallback(
+            42,
+            |_| Err("XAML unavailable".into()),
+            |guard| {
+                assert_eq!(guard, 42);
+                calls += 1;
+                Ok(done.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(result, Some(done));
+    }
+
+    #[test]
+    fn successful_ui_and_started_workers_never_start_a_second_deployment() {
+        assert!(
+            with_fallback((), |_| Ok(()), |_| panic!("unexpected fallback"))
+                .unwrap()
+                .is_none()
+        );
+        let result = with_fallback(
+            (),
+            |guard| {
+                guard.take();
+                Err("worker already started".into())
+            },
+            |_| panic!("deployment must not run twice"),
+        );
+        assert_eq!(result.unwrap_err(), "worker already started");
+    }
+
+    #[test]
+    fn headless_deployment_failure_remains_a_completion_not_an_initialization_error() {
+        let done = DeployComplete {
+            success: false,
+            exit_code: Some(1),
+            message: "deploy failed".into(),
+        };
+        let result = with_fallback((), |_| Err("no UI".into()), |_| Ok(done.clone())).unwrap();
+        assert_eq!(result, Some(done));
+        assert_eq!(
+            with_fallback((), |_| Err("no UI".into()), |_| Err("spawn failed".into())).unwrap_err(),
+            "spawn failed"
+        );
+    }
     #[test]
     fn startup_center_uses_work_area_and_negative_monitor_coordinates() {
         let work = RECT {

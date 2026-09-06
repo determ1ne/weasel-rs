@@ -153,6 +153,8 @@ pub fn generate() {
             "Windows.Win32.IDesktopWindowXamlSourceNative2",
             "Windows.Foundation.Size",
             "Windows.UI.Xaml.Hosting.WindowsXamlManager::InitializeForCurrentThread",
+            "Windows.UI.Xaml.Hosting.WindowsXamlManager::Close",
+            "Windows.UI.Xaml.Hosting.DesktopWindowXamlSource::Close",
             "Windows.UI.Xaml.Hosting.DesktopWindowXamlSource::{CreateInstance, Content}",
             "Windows.UI.Xaml.Controls.Button::CreateInstance",
             "Windows.UI.Xaml.Controls.Border::CreateInstance",
