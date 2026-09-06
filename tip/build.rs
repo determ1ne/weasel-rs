@@ -36,6 +36,7 @@ fn main() {
         .input_default()
         .output(&bindings)
         .filters([
+            "Windows.Win32.OutputDebugStringW",
             "Windows.Win32.WaitForSingleObject",
             "Windows.Win32.WAIT_OBJECT_0",
             "Windows.Win32.FindWindowW",

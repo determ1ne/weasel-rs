@@ -27,6 +27,8 @@ fn main() {
             "Windows.Win32.ERROR_ALREADY_EXISTS",
             "Windows.Win32.ERROR_INVALID_PARAMETER",
             "Windows.Win32.DACL_SECURITY_INFORMATION",
+            "Windows.Win32.SACL_SECURITY_INFORMATION",
+            "Windows.Win32.LABEL_SECURITY_INFORMATION",
             "Windows.Win32.SE_KERNEL_OBJECT",
         ])
         .flat()

@@ -8,6 +8,7 @@ mod icons;
 mod keyboard;
 mod module;
 mod registration;
+mod rpc_diagnostics;
 mod rpc_worker;
 mod service;
 mod update_window;

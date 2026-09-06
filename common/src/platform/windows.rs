@@ -112,21 +112,33 @@ impl RuntimeIdentity {
 }
 
 /// Owned LocalAlloc descriptor. Keep alive through the object creation call.
-/// The protected DACL grants only this logon access (a user ACE would also allow
-/// other logons of that user). Network logons are explicitly denied.
-/// No low-integrity label is added: low-integrity TIP access needs a separately
-/// reviewed endpoint/protocol and explicit MIC policy; never add Everyone write.
+/// Internal objects remain logon-private; the input pipe explicitly supports
+/// AppContainer and low-integrity hosts using Mozc's sharable-pipe policy.
 pub struct LocalSecurityDescriptor(PSECURITY_DESCRIPTOR);
 
 impl LocalSecurityDescriptor {
     pub fn for_named_pipe(identity: &RuntimeIdentity) -> io::Result<Self> {
         Self::for_logon(identity)
     }
+    pub fn for_input_pipe(identity: &RuntimeIdentity) -> io::Result<Self> {
+        // Mozc kSharablePipe: suppress implicit owner rights, grant System,
+        // administrators, app packages and the user; label low integrity.
+        // Keep network denial. No Everyone or Restricted Code grant.
+        // This is deliberately not a logon-only ACL: the logon suffix in the
+        // name is routing, not authentication, and peer roles are self-reported.
+        Self::from_sddl(format!(
+            "O:{}D:P(D;;GA;;;NU)(A;;;;;OW)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)(A;;GA;;;{})S:(ML;;NX;;;LW)",
+            identity.user_sid, identity.user_sid
+        ))
+    }
     pub(crate) fn for_logon(identity: &RuntimeIdentity) -> io::Result<Self> {
-        let sddl = HSTRING::from(format!(
+        Self::from_sddl(format!(
             "O:{}D:P(D;;GA;;;NU)(A;;GA;;;{})",
             identity.user_sid, identity.logon_sid
-        ));
+        ))
+    }
+    fn from_sddl(sddl: String) -> io::Result<Self> {
+        let sddl = HSTRING::from(sddl);
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         if !unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -166,6 +178,55 @@ impl Drop for LocalSecurityDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn descriptor_text(descriptor: &LocalSecurityDescriptor, flags: u32) -> String {
+        let mut text = windows_core::PWSTR::null();
+        assert!(
+            unsafe {
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    PSECURITY_DESCRIPTOR(descriptor.as_ptr()),
+                    SDDL_REVISION_1 as u32,
+                    SECURITY_INFORMATION(flags),
+                    &mut text,
+                    None,
+                )
+            }
+            .as_bool()
+        );
+        unsafe {
+            let mut len = 0;
+            while *text.0.add(len) != 0 {
+                len += 1;
+            }
+            let result = String::from_utf16_lossy(std::slice::from_raw_parts(text.0, len));
+            LocalFree(HANDLE(text.0.cast()));
+            result
+        }
+    }
+
+    #[test]
+    fn input_pipe_uses_mozc_appcontainer_policy_without_widening_internal_objects() {
+        let identity = RuntimeIdentity::current().unwrap();
+        let shared = LocalSecurityDescriptor::for_input_pipe(&identity).unwrap();
+        let flags = (DACL_SECURITY_INFORMATION
+            | SACL_SECURITY_INFORMATION
+            | LABEL_SECURITY_INFORMATION) as u32;
+        let sddl = descriptor_text(&shared, flags);
+        assert_eq!(
+            sddl,
+            format!(
+                "D:P(D;;GA;;;NU)(A;;;;;OW)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)(A;;GA;;;{})S:(ML;;NX;;;LW)",
+                identity.user_sid()
+            )
+        );
+        assert!(!sddl.contains(";;;WD)") && !sddl.contains(";;;RC)"));
+        let expected = format!("D:P(D;;GA;;;NU)(A;;GA;;;{})", identity.logon_sid());
+        for private in [
+            LocalSecurityDescriptor::for_named_pipe(&identity).unwrap(),
+            LocalSecurityDescriptor::for_logon(&identity).unwrap(),
+        ] {
+            assert_eq!(descriptor_text(&private, flags), expected);
+        }
+    }
     #[test]
     fn identity_and_security() {
         let a = RuntimeIdentity::current().unwrap();

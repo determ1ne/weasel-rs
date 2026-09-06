@@ -128,7 +128,8 @@ impl RpcServer {
     }
 
     /// Declare the listener's protocol role. Roles constrain protocol operations;
-    /// they are self-reported, not authentication. The logon ACL remains authoritative.
+    /// they are self-reported, not authentication. Server uses a shared input
+    /// ACL for sandboxed TIPs; renderer retains the private logon ACL.
     /// Production endpoints should use this strict constructor; new() additionally
     /// accepts Unspecified peers for compatibility with existing test clients.
     pub fn with_role(pipe_name: impl Into<String>, role: PeerRole) -> Self {
@@ -152,7 +153,11 @@ impl RpcServer {
 
     fn create_instance(&self, first: bool) -> Result<NamedPipeServer, RpcError> {
         let identity = crate::platform::RuntimeIdentity::current()?;
-        let descriptor = crate::platform::LocalSecurityDescriptor::for_named_pipe(&identity)?;
+        let descriptor = if self.role == PeerRole::Server {
+            crate::platform::LocalSecurityDescriptor::for_input_pipe(&identity)?
+        } else {
+            crate::platform::LocalSecurityDescriptor::for_named_pipe(&identity)?
+        };
         let mut attributes = descriptor.security_attributes();
         let mut options = ServerOptions::new();
         options

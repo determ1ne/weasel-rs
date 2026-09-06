@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::rpc_diagnostics::report;
 use weasel_common::message::{
     ContextAction, ContextCommand, KeyEvent, KeyEventResponse, LayoutUpdate, PeerRole,
 };
@@ -146,19 +147,32 @@ impl Drop for Connection {
 
 async fn connect_client(pipe_name: &str, target: &Arc<PushTarget>) -> Option<Connection> {
     let generation = target.cancellation.load(Ordering::Acquire);
-    let client = RpcClient::connect_as(pipe_name, PeerRole::Tip).await.ok()?;
+    let client = RpcClient::connect_as(pipe_name, PeerRole::Tip)
+        .await
+        .inspect_err(|error| report("pipe-connect", Some(pipe_name), error))
+        .ok()?;
     let mut updates = client.subscribe_key_responses();
 
     // Treat the handshake as part of connection establishment.  A pipe can
     // be opened just before the server exits, so connect() alone is not
     // enough to consider the server usable.
-    client.ping("tip activated").await.ok()?;
+    client
+        .ping("tip activated")
+        .await
+        .inspect_err(|error| report("handshake-ping", Some(pipe_name), error))
+        .ok()?;
     if target.cancellation.load(Ordering::Acquire) != generation {
+        report(
+            "handshake-cancelled",
+            Some(pipe_name),
+            "connection was invalidated during handshake",
+        );
         client.disconnect().await;
         return None;
     }
     let epoch = NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::AcqRel);
     if epoch == 0 {
+        report("connection-epoch", Some(pipe_name), "epoch exhausted");
         client.disconnect().await;
         return None;
     }
@@ -175,6 +189,7 @@ async fn connect_client(pipe_name: &str, target: &Arc<PushTarget>) -> Option<Con
                 Ok(response) => response,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    report("server-events", None, "reply subscription overflowed");
                     if target.current_epoch() == epoch {
                         target.failed.store(true, Ordering::Release);
                         target.invalidate();
@@ -184,6 +199,11 @@ async fn connect_client(pipe_name: &str, target: &Arc<PushTarget>) -> Option<Con
                 }
             };
             if !enqueue_update(&target, epoch, response) {
+                report(
+                    "server-events",
+                    None,
+                    "could not enqueue reply for the host thread",
+                );
                 if target.current_epoch() == epoch {
                     target.failed.store(true, Ordering::Release);
                     target.invalidate();
@@ -227,18 +247,33 @@ impl WorkerState {
             let Some(command) = command else { break };
             let deadline = command.deadline();
             if Instant::now() >= deadline {
+                report(
+                    "command-expired",
+                    Some(&self.pipe_name),
+                    "command expired before dispatch",
+                );
                 continue;
             }
             self.discard_disconnected_client().await;
 
             // Keep both the handshake and dispatch within the original budget.
             // Await serially so key replies and context commands retain ordering.
+            let establishing = self.client.is_none();
             let result = tokio::select! {
                 biased;
                 _ = &mut stop => break,
                 result = tokio::time::timeout_at(deadline.into(), self.dispatch(command)) => result,
             };
             if result.is_err() {
+                report(
+                    if establishing {
+                        "connect-or-handshake-timeout"
+                    } else {
+                        "request-timeout"
+                    },
+                    Some(&self.pipe_name),
+                    "command deadline exceeded (80ms budget)",
+                );
                 // Invalidate queued racing replies before English fallback.
                 self.disconnect_invalidated_client().await;
             }
@@ -275,6 +310,11 @@ impl WorkerState {
             .as_ref()
             .is_some_and(|current| !current.is_connected() || self.push.current_epoch() == 0)
         {
+            report(
+                "connection-invalidated",
+                Some(&self.pipe_name),
+                "transport closed or epoch cancelled",
+            );
             self.disconnect_invalidated_client().await;
         }
     }
@@ -302,7 +342,8 @@ impl WorkerState {
         let Some(current) = self.client.as_ref() else {
             return;
         };
-        if current.send_log_event(level, text).await.is_err() {
+        if let Err(error) = current.send_log_event(level, text).await {
+            report("send-diagnostic", Some(&self.pipe_name), error);
             self.disconnect_invalidated_client().await;
         }
     }
@@ -317,10 +358,16 @@ impl WorkerState {
         match current.process_translated_key(event).await {
             Ok(value) if self.push.current_epoch() != 0 && value.token == expected => Some(value),
             Ok(_) => {
+                report(
+                    "key-response",
+                    Some(&self.pipe_name),
+                    "response token mismatch or epoch cancelled",
+                );
                 self.disconnect_invalidated_client().await;
                 None
             }
-            Err(_) => {
+            Err(error) => {
+                report("key-request", Some(&self.pipe_name), error);
                 self.disconnect_invalidated_client().await;
                 None
             }
@@ -343,7 +390,8 @@ impl WorkerState {
         let Some(current) = self.client.as_ref() else {
             return;
         };
-        if current.context_command(command).await.is_err() {
+        if let Err(error) = current.context_command(command).await {
+            report("context-request", Some(&self.pipe_name), error);
             self.disconnect_invalidated_client().await;
         }
     }
@@ -360,7 +408,8 @@ impl WorkerState {
         let Some(current) = self.client.as_ref() else {
             return;
         };
-        if current.send_layout_update(update).await.is_err() {
+        if let Err(error) = current.send_layout_update(update).await {
+            report("layout-send", Some(&self.pipe_name), error);
             self.disconnect_invalidated_client().await;
         }
     }
@@ -372,12 +421,17 @@ fn run_thread(
     stop: tokio::sync::oneshot::Receiver<()>,
 ) {
     crate::boundary::cleanup(|| {
-        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
             .build()
-        else {
-            return;
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                report("runtime-start", Some(&state.pipe_name), error);
+                state.push.invalidate();
+                return;
+            }
         };
         runtime.block_on(state.run(commands, stop));
     });
@@ -402,7 +456,8 @@ impl RpcWorker {
     fn start_resolved(&mut self, pipe: std::io::Result<String>) {
         match pipe {
             Ok(pipe) => self.start_with_pipe(pipe),
-            Err(_) => {
+            Err(error) => {
+                report("pipe-identity", None, error);
                 self.stop();
                 self.push.connection_failed.store(true, Ordering::Release);
             }
@@ -424,6 +479,10 @@ impl RpcWorker {
         let thread = thread::Builder::new()
             .name("weasel-tip-rpc".to_owned())
             .spawn(move || run_thread(state, command_receiver, stop_receiver))
+            .inspect_err(|error| {
+                report("worker-start", None, error);
+                self.push.invalidate();
+            })
             .ok();
 
         self.stop = thread.as_ref().map(|_| stop);
@@ -446,6 +505,7 @@ impl RpcWorker {
                 response,
                 deadline: Instant::now() + COMMAND_TIMEOUT,
             })
+            .inspect_err(|error| report("key-queue", None, error))
             .is_err()
         {
             return None;
@@ -453,7 +513,10 @@ impl RpcWorker {
 
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(Some(value)) => Some(value),
-            _ => {
+            result => {
+                if let Err(error) = result {
+                    report("host-wait", None, error);
+                }
                 // The runtime can be descheduled past its 80ms timer. The host
                 // must invalidate synchronously before passing the key through.
                 self.push.invalidate();
