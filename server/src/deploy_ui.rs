@@ -298,6 +298,17 @@ unsafe fn run_initialized(guard: SingleInstance) -> Result<(), String> {
         return Err("无法创建部署 UI 定时器".into());
     }
     let _ = ShowWindow(hwnd, SW_SHOW);
+    // Bring the interactive window to the foreground
+    let _ = SetForegroundWindow(hwnd);
+    let _ = SetWindowPos(
+        hwnd,
+        Some(HWND_TOP),
+        0,
+        0,
+        0,
+        0,
+        (SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW) as u32,
+    );
     let mailbox = Arc::new(UiMailbox::default());
     mailbox.set_window(hwnd.0 as usize);
     let sender = mailbox.clone();
