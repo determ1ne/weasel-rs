@@ -195,6 +195,9 @@ impl TextService {
         self.set_selection(context, ec, &range, response.composition_cursor as usize)?;
         *self.lock(&state.composition_text)? = response.composition.clone();
         *self.lock(&state.composition_cursor)? = response.composition_cursor as usize;
+        // Geometry failure must not fault or replay a successful text edit.
+        // Layout notifications can still supply the position later.
+        let _ = self.request_composition_layout(&state);
         Ok(())
     }
 

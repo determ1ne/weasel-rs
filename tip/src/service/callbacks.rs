@@ -132,6 +132,7 @@ impl ITfTextLayoutSink_Impl for TextService_Impl {
             let probe: ITfEditSession = LayoutProbe {
                 view,
                 range,
+                composition,
                 state: state.clone(),
                 token: state.token()?,
                 generation: Arc::clone(&self.generation),
