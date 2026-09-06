@@ -821,7 +821,7 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "weasel-broker"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "embed-resource",
  "serde_json",
@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-common"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "prost",
  "prost-build",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-renderer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "embed-resource",
  "tokio",
@@ -866,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bindgen",
  "embed-resource",
@@ -885,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-tip"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "embed-resource",
  "tokio",
