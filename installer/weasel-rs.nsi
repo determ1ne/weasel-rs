@@ -1,7 +1,11 @@
 Unicode true
 ManifestDPIAware true
 RequestExecutionLevel admin
-SetCompressor /SOLID lzma
+!ifdef DEV_INSTALLER
+  SetCompress off
+!else
+  SetCompressor /SOLID lzma
+!endif
 
 !include MUI2.nsh
 !include LogicLib.nsh
@@ -41,7 +45,9 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "Weasel-RS contributors"
 !insertmacro MUI_PAGE_WELCOME
 !define MUI_LICENSEPAGE_CHECKBOX
 !insertmacro MUI_PAGE_LICENSE "${PROJECT_ROOT}\LICENSE"
-!insertmacro MUI_PAGE_COMPONENTS
+!ifndef DEV_INSTALLER
+  !insertmacro MUI_PAGE_COMPONENTS
+!endif
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_REBOOTLATER_DEFAULT
 !define MUI_FINISHPAGE_TEXT_REBOOT "小狼毫RS 已安装。部分正在使用的 DLL 或运行库需要重启后才能完成更新。请保存工作后重启计算机。"
@@ -379,11 +385,13 @@ Section "-注册与安装信息" SEC_REGISTER
   install_done:
 SectionEnd
 
+!ifndef DEV_INSTALLER
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN} "小狼毫 RS 程序和所需运行库（必选）。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_LIBRIME} "Rime 输入引擎和共享方案数据（必选）。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_SYMBOLS} "用于崩溃分析的调试符号。"
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
+!endif
 
 Function .onInstFailed
   ${If} $IsUpgrade == 1

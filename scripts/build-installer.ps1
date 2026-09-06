@@ -1,6 +1,9 @@
 #Requires -Version 5.1
 [CmdletBinding()]
-param()
+param(
+    # Build an uncompressed installer without the component selection page.
+    [switch]$Dev
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -48,7 +51,8 @@ try {
 
     $outputDirectory = Join-Path $projectRoot 'artifacts\installer'
     $null = New-Item -ItemType Directory -Path $outputDirectory -Force
-    $outputFile = Join-Path $outputDirectory "Weasel-RS-$version-x64-setup.exe"
+    $buildSuffix = if ($Dev) { '-dev' } else { '' }
+    $outputFile = Join-Path $outputDirectory "Weasel-RS-$version-x64$buildSuffix-setup.exe"
     $runtimeDefinitions = @()
     foreach ($architecture in @('x86', 'x64')) {
         $runtimePath = Join-Path $projectRoot "artifacts\vcredist\vc_redist.$architecture.exe"
@@ -74,7 +78,12 @@ try {
         "/DOUTPUT_FILE=$outputFile",
         (Join-Path $projectRoot 'installer\weasel-rs.nsi')
     )
-    & $compiler @runtimeDefinitions @arguments
+    $buildDefinitions = @()
+    if ($Dev) {
+        $buildDefinitions += '/DDEV_INSTALLER'
+        Write-Host 'Dev installer: compression disabled; component selection skipped (default components).'
+    }
+    & $compiler @runtimeDefinitions @buildDefinitions @arguments
     if ($LASTEXITCODE -ne 0) {
         throw "NSIS compilation failed (exit code $LASTEXITCODE)."
     }
