@@ -5,7 +5,7 @@
 //! It reads settings from broker, but never connects to server or listens on the
 //! live renderer pipe. Candidate interactions are visual only.
 use crate::{
-    backend::UiMode,
+    theme_api::UiMode,
     ui_runtime::{UiCommand, UiHandle},
 };
 use weasel_common::message::{RenderItem, RenderRect, RenderSnapshot};
@@ -116,7 +116,9 @@ mod tests {
     fn synthetic_snapshot_is_valid_and_visible() {
         let snapshot = synthetic_snapshot();
         crate::state::validate(&snapshot).unwrap();
-        assert!(crate::presentation::is_visible(&snapshot));
+        assert!(crate::presentation::is_visible(
+            &crate::theme_adapter::view(&snapshot, 1)
+        ));
         assert!(snapshot.can_page_previous && snapshot.can_page_next);
         assert_eq!(snapshot.selected_index, 0);
         assert!((snapshot.selected_index as usize) < snapshot.items.len());

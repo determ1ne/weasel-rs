@@ -1,4 +1,4 @@
-use weasel_common::message::{RenderSnapshot, RendererEvent, RendererEventAction};
+use crate::theme_api::{CandidateView, UiAction};
 use windows_core::HSTRING;
 use windows_version::OsVersion;
 
@@ -162,8 +162,8 @@ impl CandidateTheme {
         rows: &StackPanel,
         quick_action_panel: &Border,
         quick_actions: &StackPanel,
-        snapshot: &RenderSnapshot,
-        events: &crate::ui_runtime::EventSender,
+        snapshot: &CandidateView,
+        events: &crate::theme_api::EventSink,
         revokers: &mut Vec<windows_core::EventRevoker>,
     ) -> windows_core::Result<()> {
         self.prepare(root, rows, quick_action_panel, quick_actions)?;
@@ -196,8 +196,7 @@ impl CandidateTheme {
             8.0,
             thickness(2.0, 2.0, 3.0, 2.0),
             snapshot.can_page_previous,
-            RendererEventAction::NavigatePrevious,
-            snapshot,
+            UiAction::NavigatePrevious,
             events,
             &foreground,
             &disabled_foreground,
@@ -212,8 +211,7 @@ impl CandidateTheme {
             8.0,
             thickness(1.0, 2.0, 2.0, 2.0),
             snapshot.can_page_next,
-            RendererEventAction::NavigateNext,
-            snapshot,
+            UiAction::NavigateNext,
             events,
             &foreground,
             &disabled_foreground,
@@ -234,8 +232,7 @@ impl CandidateTheme {
             16.0,
             thickness(2.0, 2.0, 2.0, 2.0),
             true,
-            RendererEventAction::OpenEmojiPanel,
-            snapshot,
+            UiAction::OpenEmojiPanel,
             events,
             &foreground,
             &disabled_foreground,
@@ -356,17 +353,8 @@ impl CandidateTheme {
                     let _ = released_indicator.SetHeight(16.0);
                 })?);
                 let event_sender = events.clone();
-                let session_id = snapshot.session_id;
-                let token = snapshot.token.clone();
-                let revision = snapshot.revision;
                 revokers.push(row.Tapped(move |_, _| {
-                    let _ = event_sender.send(RendererEvent {
-                        session_id,
-                        action: RendererEventAction::ItemInvoked as i32,
-                        item_index,
-                        token: token.clone(),
-                        revision,
-                    });
+                    event_sender.send(UiAction::ItemInvoked(item_index));
                 })?);
             }
             children.Append(&row)?;
@@ -382,9 +370,8 @@ fn append_action(
     font_size: f64,
     margin: Thickness,
     enabled: bool,
-    action: RendererEventAction,
-    snapshot: &RenderSnapshot,
-    events: &crate::ui_runtime::EventSender,
+    action: UiAction,
+    events: &crate::theme_api::EventSink,
     foreground: &SolidColorBrush,
     disabled_foreground: &SolidColorBrush,
     hover_background: &SolidColorBrush,
@@ -450,17 +437,8 @@ fn append_action(
             let _ = released_text.SetForeground(&released_foreground);
         })?);
         let event_sender = events.clone();
-        let session_id = snapshot.session_id;
-        let token = snapshot.token.clone();
-        let revision = snapshot.revision;
         revokers.push(item.Tapped(move |_, _| {
-            let _ = event_sender.send(RendererEvent {
-                session_id,
-                action: action as i32,
-                item_index: 0,
-                token: token.clone(),
-                revision,
-            });
+            event_sender.send(action);
         })?);
     }
     actions.Children()?.Append(&item)

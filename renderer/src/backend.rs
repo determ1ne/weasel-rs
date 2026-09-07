@@ -1,50 +1,11 @@
-//! UI-thread-only rendering boundary. Concrete XAML/D2D resources stay private.
-use crate::{bindings::Windows::Win32::MSG, ui_runtime::EventSender};
-use weasel_common::message::RenderSnapshot;
-
-pub trait ThemeBackend {
-    fn render(&mut self, snapshot: &RenderSnapshot, events: &EventSender) -> Result<(), String>;
-    fn hide(&mut self);
-    /// Invalidate appearance resources only. The runtime decides whether the
-    /// current owner still permits redrawing its snapshot.
-    fn refresh_appearance(&mut self) -> Result<(), String>;
-    fn pre_translate(&mut self, _message: &MSG) -> Result<bool, String> {
-        Ok(false)
-    }
-    fn check_health(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-/// How the renderer is running. Live is the normal per-candidate strip driven
-/// by the server; Preview is a standalone, closable stand-in showing the skin.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum UiMode {
-    Live,
-    Preview,
-}
-
-#[derive(Clone, Copy)]
-pub struct ThemeRegistration {
-    pub name: &'static str,
-    /// `theme_settings` is the broker's configuration as JSON, forwarded verbatim
-    /// so a theme can render the user's configured skin.
-    pub create: fn(UiMode, &str) -> Result<Box<dyn ThemeBackend>, String>,
-}
+//! Registration and ordered initialization fallback for built-in themes.
+use crate::theme_api::ThemeFactory;
 
 /// Prefer the configured backend, retaining the other initialization fallback.
-pub fn theme_candidates(preferred: &str) -> Vec<ThemeRegistration> {
-    let mut themes = vec![
-        ThemeRegistration {
-            name: "eleven",
-            create: crate::theme_eleven::create,
-        },
-        ThemeRegistration {
-            name: "ten",
-            create: crate::theme_ten::create,
-        },
-    ];
-    themes.sort_by_key(|theme| theme.name != preferred);
+pub fn theme_candidates(preferred: &str) -> Vec<&'static dyn ThemeFactory> {
+    let mut themes: Vec<&'static dyn ThemeFactory> =
+        vec![&crate::theme_eleven::Factory, &crate::theme_ten::Factory];
+    themes.sort_by_key(|theme| theme.name() != preferred);
     themes
 }
 
@@ -60,9 +21,12 @@ mod tests {
         ] {
             let names: Vec<_> = theme_candidates(preferred)
                 .iter()
-                .map(|theme| theme.name)
+                .map(|theme| theme.name())
                 .collect();
             assert_eq!(names, expected);
+            for factory in theme_candidates(preferred) {
+                assert!(!factory.capabilities().preedit);
+            }
         }
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
-    backend::UiMode,
     state::Owner,
+    theme_api::UiMode,
     ui_runtime::{UiCommand, UiCommandSender, UiHandle},
 };
 use std::{collections::HashMap, time::Duration};

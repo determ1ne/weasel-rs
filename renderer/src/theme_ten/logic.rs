@@ -1,4 +1,4 @@
-use weasel_common::message::{RenderSnapshot, RendererEvent, RendererEventAction};
+use crate::theme_api::{CandidateView, UiAction};
 
 pub const SCALE: f32 = 46.0 / 68.0;
 pub const HEIGHT: f32 = 46.0;
@@ -84,7 +84,7 @@ impl Layout {
     }
 }
 
-pub fn enabled(snapshot: &RenderSnapshot, hit: Hit) -> bool {
+pub fn enabled(snapshot: &CandidateView, hit: Hit) -> bool {
     snapshot.visible
         && match hit {
             Hit::Candidate(i) => snapshot.items.get(i).is_some_and(|item| item.enabled),
@@ -104,7 +104,7 @@ impl Gesture {
         self.pressed = None;
         self.hovered = None;
     }
-    pub fn press(&mut self, hit: Option<Hit>, snapshot: &RenderSnapshot) {
+    pub fn press(&mut self, hit: Option<Hit>, snapshot: &CandidateView) {
         self.pressed = hit.filter(|h| enabled(snapshot, *h));
     }
     pub fn motion(&mut self, hit: Option<Hit>) {
@@ -114,27 +114,16 @@ impl Gesture {
             self.pressed = None;
         }
     }
-    pub fn release(
-        &mut self,
-        hit: Option<Hit>,
-        snapshot: &RenderSnapshot,
-    ) -> Option<RendererEvent> {
+    pub fn release(&mut self, hit: Option<Hit>, snapshot: &CandidateView) -> Option<UiAction> {
         let pressed = self.pressed.take()?;
         if Some(pressed) != hit || !enabled(snapshot, pressed) {
             return None;
         }
-        let (action, item_index) = match pressed {
-            Hit::Candidate(i) => (RendererEventAction::ItemInvoked, i as u32),
-            Hit::Previous => (RendererEventAction::NavigatePrevious, 0),
-            Hit::Next => (RendererEventAction::NavigateNext, 0),
-            Hit::Emoji => (RendererEventAction::OpenEmojiPanel, 0),
-        };
-        Some(RendererEvent {
-            session_id: snapshot.session_id,
-            token: snapshot.token.clone(),
-            revision: snapshot.revision,
-            action: action as i32,
-            item_index,
+        Some(match pressed {
+            Hit::Candidate(i) => UiAction::ItemInvoked(i as u32),
+            Hit::Previous => UiAction::NavigatePrevious,
+            Hit::Next => UiAction::NavigateNext,
+            Hit::Emoji => UiAction::OpenEmojiPanel,
         })
     }
 }
@@ -181,13 +170,11 @@ impl Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use weasel_common::message::{ContextToken, RenderItem};
-    fn snapshot() -> RenderSnapshot {
-        RenderSnapshot {
+    use crate::theme_api::CandidateItem as RenderItem;
+    fn snapshot() -> CandidateView {
+        CandidateView {
             visible: true,
-            session_id: 42,
-            revision: 7,
-            token: Some(ContextToken::default()),
+            content_id: 7,
             items: vec![RenderItem {
                 enabled: true,
                 ..Default::default()
@@ -250,8 +237,7 @@ mod tests {
         assert!(g.release(h, &s).is_none());
         g.press(h, &s);
         let e = g.release(h, &s).unwrap();
-        assert_eq!((e.session_id, e.revision, e.item_index), (42, 7, 0));
-        assert_eq!(e.token, s.token);
+        assert_eq!(e, UiAction::ItemInvoked(0));
         s.items[0].enabled = false;
         g.press(h, &s);
         assert!(g.release(h, &s).is_none());
@@ -261,13 +247,13 @@ mod tests {
         assert!(enabled(&s, Hit::Next));
         g.press(Some(Hit::Next), &s);
         assert_eq!(
-            g.release(Some(Hit::Next), &s).unwrap().action,
-            RendererEventAction::NavigateNext as i32
+            g.release(Some(Hit::Next), &s).unwrap(),
+            UiAction::NavigateNext
         );
         g.press(Some(Hit::Emoji), &s);
         assert_eq!(
-            g.release(Some(Hit::Emoji), &s).unwrap().action,
-            RendererEventAction::OpenEmojiPanel as i32
+            g.release(Some(Hit::Emoji), &s).unwrap(),
+            UiAction::OpenEmojiPanel
         );
     }
     #[test]

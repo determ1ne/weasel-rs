@@ -1,9 +1,10 @@
 //! Bounded UI worker lifecycle and toolkit-independent snapshot dispatch.
 #![allow(unsafe_op_in_unsafe_fn)]
 use crate::{
-    backend::{ThemeBackend, ThemeRegistration, UiMode, theme_candidates},
+    backend::theme_candidates,
     bindings::Windows::Win32::*,
     state::{Mailbox, Owner},
+    theme_api::{ThemeBackend, ThemeFactory, UiMode},
 };
 use std::{
     sync::{Arc, Mutex, mpsc},
@@ -40,7 +41,7 @@ pub struct UiHandle {
 }
 
 #[derive(Clone)]
-pub struct EventSender {
+struct EventSender {
     pub owner: Owner,
     sender: tokio::sync::mpsc::Sender<(Owner, RendererEvent)>,
 }
@@ -59,20 +60,14 @@ fn join_ui_thread(thread: thread::JoinHandle<()>, timeout: Duration) -> Result<(
     thread.join().map_err(|_| "UI thread panicked".to_owned())
 }
 
-impl EventSender {
-    pub fn send(&self, event: RendererEvent) {
-        let _ = self.sender.try_send((self.owner, event));
-    }
-}
-
 enum AttemptError {
     Failed(String),
     Fatal(String),
 }
 
 fn select_first<T>(
-    candidates: &[ThemeRegistration],
-    mut attempt: impl FnMut(ThemeRegistration) -> Result<T, AttemptError>,
+    candidates: &[&'static dyn ThemeFactory],
+    mut attempt: impl FnMut(&'static dyn ThemeFactory) -> Result<T, AttemptError>,
 ) -> Result<T, String> {
     let mut failures = Vec::new();
     for candidate in candidates {
@@ -81,12 +76,15 @@ fn select_first<T>(
             Err(AttemptError::Failed(error)) => {
                 crate::diagnostics::record(format_args!(
                     "theme {} unavailable: {error}",
-                    candidate.name
+                    candidate.name()
                 ));
-                failures.push(format!("{}: {error}", candidate.name));
+                failures.push(format!("{}: {error}", candidate.name()));
             }
             Err(AttemptError::Fatal(error)) => {
-                return Err(format!("theme {} startup aborted: {error}", candidate.name));
+                return Err(format!(
+                    "theme {} startup aborted: {error}",
+                    candidate.name()
+                ));
             }
         }
     }
@@ -104,7 +102,7 @@ impl UiHandle {
     }
 
     fn start_attempt(
-        registration: ThemeRegistration,
+        registration: &'static dyn ThemeFactory,
         mode: UiMode,
         theme_settings: &str,
     ) -> Result<Self, AttemptError> {
@@ -115,7 +113,7 @@ impl UiHandle {
         let (finished_sender, finished) = tokio::sync::oneshot::channel();
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
-            .name(format!("weasel-renderer-{}", registration.name))
+            .name(format!("weasel-renderer-{}", registration.name()))
             .spawn(move || {
                 // Cleanup/unwind finishes on this apartment BEFORE failure is
                 // reported to the selector. No failed XAML state reaches ten.
@@ -159,7 +157,7 @@ impl UiHandle {
                 )));
             }
         };
-        crate::diagnostics::record(format_args!("using renderer theme {}", registration.name));
+        crate::diagnostics::record(format_args!("using renderer theme {}", registration.name()));
         Ok(Self {
             commands: UiCommandSender { mailbox, thread_id },
             events,
@@ -270,6 +268,7 @@ struct Presentation {
     backend: Box<dyn ThemeBackend>,
     events: EventSender,
     last: Option<RenderSnapshot>,
+    content_id: u64,
 }
 
 impl Presentation {
@@ -281,8 +280,21 @@ impl Presentation {
         self.events.owner = owner;
         match snapshot {
             Some(snapshot) => {
-                if crate::presentation::is_visible(&snapshot) {
-                    self.backend.render(&snapshot, &self.events)?;
+                if !self
+                    .last
+                    .as_ref()
+                    .is_some_and(|old| crate::state::same_content(old, &snapshot))
+                {
+                    self.content_id = self
+                        .content_id
+                        .checked_add(1)
+                        .ok_or("presentation identity exhausted")?;
+                }
+                let view = crate::theme_adapter::view(&snapshot, self.content_id);
+                if crate::presentation::is_visible(&view) {
+                    let events =
+                        crate::theme_adapter::events(owner, &snapshot, self.events.sender.clone());
+                    self.backend.render(&view, &events)?;
                 } else {
                     self.backend.hide();
                 }
@@ -300,8 +312,14 @@ impl Presentation {
         self.backend.refresh_appearance()?;
         if current_owner == Some(self.events.owner) {
             if let Some(snapshot) = &self.last {
-                if crate::presentation::is_visible(snapshot) {
-                    self.backend.render(snapshot, &self.events)?;
+                let view = crate::theme_adapter::view(snapshot, self.content_id);
+                if crate::presentation::is_visible(&view) {
+                    let events = crate::theme_adapter::events(
+                        self.events.owner,
+                        snapshot,
+                        self.events.sender.clone(),
+                    );
+                    self.backend.render(&view, &events)?;
                 }
             }
         }
@@ -310,7 +328,7 @@ impl Presentation {
 }
 
 fn run_ui(
-    registration: ThemeRegistration,
+    registration: &'static dyn ThemeFactory,
     mode: UiMode,
     theme_settings: String,
     mailbox: Arc<Mutex<Mailbox>>,
@@ -323,11 +341,17 @@ fn run_ui(
             .map_err(|e| e.to_string())?;
         let _apartment = Apartment;
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let backend = (registration.create)(mode, &theme_settings)?;
+        let backend = registration.create(mode, &theme_settings)?;
+        crate::diagnostics::record(format_args!(
+            "theme {} capabilities: {:?}",
+            registration.name(),
+            registration.capabilities()
+        ));
         let mut presentation = Presentation {
             backend,
             events,
             last: None,
+            content_id: 0,
         };
         let thread_id = GetCurrentThreadId();
         let _appearance =
@@ -402,29 +426,28 @@ mod tests {
         assert!(!is_thread_message(&message, WM_RENDERER_QUIT));
     }
 
-    fn unused_factory(_: UiMode, _theme_settings: &str) -> Result<Box<dyn ThemeBackend>, String> {
-        Err("test factory must not create native resources".into())
+    struct FakeFactory(&'static str);
+    impl ThemeFactory for FakeFactory {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn capabilities(&self) -> crate::theme_api::ThemeCapabilities {
+            crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY
+        }
+        fn create(&self, _: UiMode, _: &str) -> Result<Box<dyn ThemeBackend>, String> {
+            Err("test factory must not create native resources".into())
+        }
     }
-
-    fn candidates() -> [ThemeRegistration; 2] {
-        [
-            ThemeRegistration {
-                name: "eleven",
-                create: unused_factory,
-            },
-            ThemeRegistration {
-                name: "ten",
-                create: unused_factory,
-            },
-        ]
+    fn candidates() -> [&'static dyn ThemeFactory; 2] {
+        [&FakeFactory("eleven"), &FakeFactory("ten")]
     }
 
     #[test]
     fn first_success_stops_registration_and_failure_falls_back() {
         let mut attempted = Vec::new();
         let selected = select_first(&candidates(), |candidate| {
-            attempted.push(candidate.name);
-            Ok(candidate.name)
+            attempted.push(candidate.name());
+            Ok(candidate.name())
         })
         .unwrap();
         assert_eq!(selected, "eleven");
@@ -432,11 +455,11 @@ mod tests {
 
         attempted.clear();
         let selected = select_first(&candidates(), |candidate| {
-            attempted.push(candidate.name);
-            if candidate.name == "eleven" {
+            attempted.push(candidate.name());
+            if candidate.name() == "eleven" {
                 Err(AttemptError::Failed("unavailable".into()))
             } else {
-                Ok(candidate.name)
+                Ok(candidate.name())
             }
         })
         .unwrap();
@@ -447,7 +470,7 @@ mod tests {
     #[test]
     fn failures_are_aggregated_but_fatal_timeout_stops_fallback() {
         let error = select_first::<()>(&candidates(), |candidate| {
-            Err(AttemptError::Failed(format!("{} failed", candidate.name)))
+            Err(AttemptError::Failed(format!("{} failed", candidate.name())))
         })
         .unwrap_err();
         assert!(error.contains("eleven failed") && error.contains("ten failed"));
@@ -473,7 +496,7 @@ mod tests {
             }
         }
         let selected = select_first(&candidates(), |candidate| {
-            if candidate.name == "eleven" {
+            if candidate.name() == "eleven" {
                 let flag = dropped.clone();
                 let worker = thread::spawn(move || {
                     let _resource = Resource(flag, thread::current().id());
@@ -482,7 +505,7 @@ mod tests {
                 Err(AttemptError::Failed("native init failure".into()))
             } else {
                 assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
-                Ok(candidate.name)
+                Ok(candidate.name())
             }
         })
         .unwrap();
@@ -497,8 +520,12 @@ mod tests {
     }
     struct FakeBackend(Arc<Mutex<Calls>>);
     impl ThemeBackend for FakeBackend {
-        fn render(&mut self, snapshot: &RenderSnapshot, _: &EventSender) -> Result<(), String> {
-            self.0.lock().unwrap().rendered.push(snapshot.sequence);
+        fn render(
+            &mut self,
+            snapshot: &crate::theme_api::CandidateView,
+            _: &crate::theme_api::EventSink,
+        ) -> Result<(), String> {
+            self.0.lock().unwrap().rendered.push(snapshot.content_id);
             Ok(())
         }
         fn hide(&mut self) {
@@ -518,6 +545,7 @@ mod tests {
             backend: Box::new(FakeBackend(calls.clone())),
             events: EventSender { owner: 0, sender },
             last: None,
+            content_id: 0,
         };
         let mut snapshot = RenderSnapshot {
             sequence: 1,
@@ -558,12 +586,12 @@ mod tests {
     #[test]
     fn event_callbacks_keep_their_owner_and_queue_is_bounded() {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
-        let mut current = EventSender { owner: 1, sender };
-        let old_callback = current.clone();
-        current.owner = 2;
-        old_callback.send(RendererEvent::default());
-        current.send(RendererEvent::default());
-        current.send(RendererEvent::default());
+        let old_callback =
+            crate::theme_adapter::events(1, &RenderSnapshot::default(), sender.clone());
+        let current = crate::theme_adapter::events(2, &RenderSnapshot::default(), sender);
+        old_callback.send(crate::theme_api::UiAction::OpenEmojiPanel);
+        current.send(crate::theme_api::UiAction::OpenEmojiPanel);
+        current.send(crate::theme_api::UiAction::OpenEmojiPanel);
         assert_eq!(receiver.try_recv().unwrap().0, 1);
         assert_eq!(receiver.try_recv().unwrap().0, 2);
         assert!(receiver.try_recv().is_err());

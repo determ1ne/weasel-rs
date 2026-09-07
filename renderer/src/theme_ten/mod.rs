@@ -2,9 +2,10 @@
 mod bindings;
 mod logic;
 
+use crate::theme_api::CandidateView;
 use crate::{
-    backend::{ThemeBackend, UiMode},
-    ui_runtime::EventSender,
+    theme_api::EventSink,
+    theme_api::{ThemeBackend, UiMode},
 };
 use bindings::*;
 use logic::{Gesture, HEIGHT, Hit, Layout, NUMBER, Palette, Recovery, SCALE, enabled, pixels};
@@ -13,7 +14,6 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     rc::Rc,
 };
-use weasel_common::message::RenderSnapshot;
 use windows_strings::w;
 
 const CLASS: windows_strings::PCWSTR = w!("Weasel.ThemeTen.D2D");
@@ -112,8 +112,8 @@ impl Graphics {
 }
 
 struct Content {
-    snapshot: RenderSnapshot,
-    events: EventSender,
+    snapshot: CandidateView,
+    events: EventSink,
     layout: Layout,
     primary_widths: Vec<f32>,
 }
@@ -149,7 +149,7 @@ struct Ten {
     window: Rc<Window>,
 }
 
-pub fn create(mode: UiMode, theme_settings: &str) -> Result<Box<dyn ThemeBackend>, String> {
+fn create(mode: UiMode, theme_settings: &str) -> Result<Box<dyn ThemeBackend>, String> {
     let preview = mode == UiMode::Preview;
     let window = Rc::new(Window {
         hwnd: Cell::new(HWND::default()),
@@ -495,7 +495,7 @@ impl Window {
 }
 
 impl ThemeBackend for Ten {
-    fn render(&mut self, snapshot: &RenderSnapshot, events: &EventSender) -> Result<(), String> {
+    fn render(&mut self, snapshot: &CandidateView, events: &EventSink) -> Result<(), String> {
         self.window.render(snapshot, events)
     }
     fn hide(&mut self) {
@@ -512,14 +512,14 @@ impl ThemeBackend for Ten {
 }
 
 impl Window {
-    fn render(&self, snapshot: &RenderSnapshot, events: &EventSender) -> Result<(), String> {
+    fn render(&self, snapshot: &CandidateView, events: &EventSink) -> Result<(), String> {
         // Layout-only snapshots must not cancel a pressed candidate, rebuild
         // text layouts, or repaint content. position() handles DPI transitions.
         let moved = {
             let mut app = self.app.borrow_mut();
             if let Some(content) = app.content.as_mut()
                 && crate::presentation::is_visible(snapshot)
-                && crate::state::same_content(&content.snapshot, snapshot)
+                && crate::theme_api::same_content(&content.snapshot, snapshot)
             {
                 content.snapshot = snapshot.clone();
                 content.events = events.clone();
@@ -846,5 +846,19 @@ unsafe fn text(
             D2D1_DRAW_TEXT_OPTIONS_CLIP,
             DWRITE_MEASURING_MODE_NATURAL,
         );
+    }
+}
+
+pub struct Factory;
+
+impl crate::theme_api::ThemeFactory for Factory {
+    fn name(&self) -> &'static str {
+        "ten"
+    }
+    fn capabilities(&self) -> crate::theme_api::ThemeCapabilities {
+        crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY
+    }
+    fn create(&self, mode: UiMode, settings: &str) -> Result<Box<dyn ThemeBackend>, String> {
+        create(mode, settings)
     }
 }

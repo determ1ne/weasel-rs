@@ -3,17 +3,17 @@
 mod visual;
 
 use crate::bindings::Windows::Win32::SWP_NOSIZE;
-use weasel_common::message::RenderSnapshot;
+use crate::theme_api::CandidateView;
 use windows_core::Interface;
 use windows_strings::{PCWSTR, w};
 use windows_version::OsVersion;
 
 use crate::{
-    backend::{ThemeBackend, UiMode},
     bindings::*,
     presentation::{is_visible, popup_position, preview_position},
-    state::same_content,
-    ui_runtime::EventSender,
+    theme_api::EventSink,
+    theme_api::same_content,
+    theme_api::{ThemeBackend, UiMode},
 };
 use visual::CandidateTheme;
 
@@ -77,7 +77,7 @@ struct UiState {
     // are supported; carried (not yet consumed) for now.
     #[allow(dead_code)]
     theme_settings: String,
-    last_snapshot: Option<RenderSnapshot>,
+    last_snapshot: Option<CandidateView>,
     measured_size: Option<Size>,
 }
 
@@ -86,10 +86,10 @@ fn supports_xaml(version: OsVersion) -> bool {
     version >= OsVersion::new(10, 0, 0, 18362)
 }
 
-pub fn create(
+fn create(
     mode: UiMode,
     theme_settings: &str,
-) -> Result<Box<dyn crate::backend::ThemeBackend>, String> {
+) -> Result<Box<dyn crate::theme_api::ThemeBackend>, String> {
     // The XAML Island backend requires Windows 10 1903 (build 18362) or later.
     if !supports_xaml(OsVersion::current()) {
         return Err(format!(
@@ -221,7 +221,7 @@ unsafe fn create_initialized(
 }
 
 impl ThemeBackend for UiState {
-    fn render(&mut self, snapshot: &RenderSnapshot, events: &EventSender) -> Result<(), String> {
+    fn render(&mut self, snapshot: &CandidateView, events: &EventSink) -> Result<(), String> {
         if !is_visible(snapshot) {
             self.hide();
             return Ok(());
@@ -383,8 +383,8 @@ unsafe extern "system" fn window_proc(
 
 fn render_snapshot(
     state: &mut UiState,
-    snapshot: &RenderSnapshot,
-    events: &EventSender,
+    snapshot: &CandidateView,
+    events: &EventSink,
 ) -> Result<(), String> {
     // render() has checked visibility; retain fallible extraction without a panic.
     let anchor = snapshot
@@ -534,4 +534,18 @@ fn desired_size(state: &mut UiState) -> (i32, i32) {
         (desired.Width * dpi / 96.0).ceil() as i32,
         (desired.Height * dpi / 96.0).ceil() as i32,
     )
+}
+
+pub struct Factory;
+
+impl crate::theme_api::ThemeFactory for Factory {
+    fn name(&self) -> &'static str {
+        "eleven"
+    }
+    fn capabilities(&self) -> crate::theme_api::ThemeCapabilities {
+        crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY
+    }
+    fn create(&self, mode: UiMode, settings: &str) -> Result<Box<dyn ThemeBackend>, String> {
+        create(mode, settings)
+    }
 }

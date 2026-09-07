@@ -2,9 +2,9 @@
 use crate::bindings::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, RECT,
 };
-use weasel_common::message::{RenderRect, RenderSnapshot};
+use crate::theme_api::{Anchor as RenderRect, CandidateView};
 
-pub fn is_visible(snapshot: &RenderSnapshot) -> bool {
+pub fn is_visible(snapshot: &CandidateView) -> bool {
     snapshot.visible
         && !snapshot.items.is_empty()
         && snapshot.anchor.as_ref().is_some_and(|anchor| anchor.valid)
@@ -94,7 +94,7 @@ mod tests {
     }
     #[test]
     fn visibility_requires_items_and_an_anchor() {
-        let mut snapshot = RenderSnapshot::default();
+        let mut snapshot = CandidateView::default();
         snapshot.visible = true;
         snapshot.items.push(Default::default());
         assert!(!is_visible(&snapshot));

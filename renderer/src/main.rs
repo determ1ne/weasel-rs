@@ -16,6 +16,9 @@ mod preview;
 mod rpc;
 mod state;
 #[cfg(windows)]
+mod theme_adapter;
+mod theme_api;
+#[cfg(windows)]
 mod theme_eleven;
 #[cfg(windows)]
 mod theme_ten;
