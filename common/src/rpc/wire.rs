@@ -3,6 +3,8 @@ use super::RpcError;
 use crate::message::{self as m, envelope::Payload as P};
 use prost::Message;
 
+// Bump only when the shared transport/TIP contract becomes incompatible.
+// Out-of-process components are updated together.
 pub const VERSION: u32 = 3;
 fn invalid(text: &str) -> RpcError {
     RpcError::Protocol(text.into())
@@ -40,13 +42,13 @@ pub fn encode(envelope: &m::Envelope) -> Result<m::RpcFrame, RpcError> {
         .clone()
         .ok_or_else(|| invalid("missing payload"))?;
     let body = match payload {
-        P::GetSettings(v) if id != 0 => B::Request(m::Request {
+        P::QueryConfig(v) if id != 0 => B::Request(m::Request {
             id,
-            operation: Some(Q::GetSettings(v)),
+            operation: Some(Q::QueryConfig(v)),
         }),
-        P::Settings(v) if id != 0 => B::Response(m::Response {
+        P::ConfigValue(v) if id != 0 => B::Response(m::Response {
             id,
-            result: Some(R::Settings(v)),
+            result: Some(R::ConfigValue(v)),
         }),
         P::Ping(v) if id != 0 => B::Request(m::Request {
             id,
@@ -160,7 +162,7 @@ pub fn unpack(frame: m::RpcFrame) -> Result<m::Envelope, RpcError> {
                 v.id,
                 match v.operation.ok_or_else(|| invalid("missing operation"))? {
                     Q::Ping(v) => P::Ping(v),
-                    Q::GetSettings(v) => P::GetSettings(v),
+                    Q::QueryConfig(v) => P::QueryConfig(v),
                     Q::Shutdown(v) => P::Shutdown(v),
                     Q::OpenInput(v) => {
                         validate_token(&v.token)?;
@@ -193,7 +195,7 @@ pub fn unpack(frame: m::RpcFrame) -> Result<m::Envelope, RpcError> {
                 v.id,
                 match v.result.ok_or_else(|| invalid("missing result"))? {
                     R::Pong(v) => P::Pong(v),
-                    R::Settings(v) => P::Settings(v),
+                    R::ConfigValue(v) => P::ConfigValue(v),
                     R::Shutdown(v) => P::ShutdownResponse(v),
                     R::InputOpened(v) => {
                         validate_token(&v.token)?;

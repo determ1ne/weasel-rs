@@ -72,11 +72,6 @@ struct UiState {
     window: HWND,
     xaml_window: HWND,
     preview: bool,
-    // Broker configuration (JSON) forwarded to the theme so it can render the
-    // user's configured skin. Rendering reads it once theme-specific settings
-    // are supported; carried (not yet consumed) for now.
-    #[allow(dead_code)]
-    theme_settings: String,
     last_snapshot: Option<CandidateView>,
     measured_size: Option<Size>,
 }
@@ -86,10 +81,7 @@ fn supports_xaml(version: OsVersion) -> bool {
     version >= OsVersion::new(10, 0, 0, 18362)
 }
 
-fn create(
-    mode: UiMode,
-    theme_settings: &str,
-) -> Result<Box<dyn crate::theme_api::ThemeBackend>, String> {
+fn create(mode: UiMode) -> Result<Box<dyn crate::theme_api::ThemeBackend>, String> {
     // The XAML Island backend requires Windows 10 1903 (build 18362) or later.
     if !supports_xaml(OsVersion::current()) {
         return Err(format!(
@@ -97,7 +89,7 @@ fn create(
             OsVersion::current().build
         ));
     }
-    unsafe { create_initialized(mode, theme_settings) }
+    unsafe { create_initialized(mode) }
 }
 
 #[cfg(test)]
@@ -112,10 +104,7 @@ mod version_tests {
     }
 }
 
-unsafe fn create_initialized(
-    mode: UiMode,
-    theme_settings: &str,
-) -> Result<Box<dyn ThemeBackend>, String> {
+unsafe fn create_initialized(mode: UiMode) -> Result<Box<dyn ThemeBackend>, String> {
     let window = create_window(mode)?;
     let window_guard = WindowGuard(window);
     apply_dwm_corner_preference(window);
@@ -213,8 +202,7 @@ unsafe fn create_initialized(
         _window_guard: window_guard,
         window,
         xaml_window,
-        preview: mode == UiMode::Preview,
-        theme_settings: theme_settings.to_owned(),
+        preview: mode != UiMode::Live,
         last_snapshot: None,
         measured_size: None,
     }))
@@ -277,7 +265,7 @@ unsafe fn create_window(mode: UiMode) -> Result<HWND, String> {
         WINDOW_CLASS,
         title,
         WS_POPUP
-            | if mode == UiMode::Preview {
+            | if mode != UiMode::Live {
                 crate::bindings::Windows::Win32::WS_SYSMENU as u32
             } else {
                 0
@@ -294,7 +282,7 @@ unsafe fn create_window(mode: UiMode) -> Result<HWND, String> {
     if window.0.is_null() {
         return Err("could not create renderer window".to_owned());
     }
-    if mode == UiMode::Preview {
+    if mode != UiMode::Live {
         apply_taskbar_icon(window, icon);
     }
     Ok(window)
@@ -545,7 +533,13 @@ impl crate::theme_api::ThemeFactory for Factory {
     fn capabilities(&self) -> crate::theme_api::ThemeCapabilities {
         crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY
     }
-    fn create(&self, mode: UiMode, settings: &str) -> Result<Box<dyn ThemeBackend>, String> {
-        create(mode, settings)
+    fn create(
+        &self,
+        mode: UiMode,
+        settings: &weasel_common::settings::ConfigSnapshot,
+    ) -> Result<Box<dyn ThemeBackend>, String> {
+        // Theme-local validation; style fields will be defined by this theme.
+        let _: serde_json::Map<String, serde_json::Value> = settings.theme_settings("eleven")?;
+        create(mode)
     }
 }

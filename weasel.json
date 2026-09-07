@@ -1,3 +1,5 @@
 {
-  "theme": "eleven"
+  "theme": "eleven",
+  "inline_preedit": true,
+  "themeSettings": {}
 }

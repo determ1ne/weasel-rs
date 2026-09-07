@@ -25,16 +25,13 @@ message DeployComplete {
 // the broker's published snapshot.
 // Unreadable/invalid disk overrides return Failure instead of a misleading
 // preview using partially accepted settings. Missing files use normal defaults.
-message GetSettings {
+message QueryConfig {
   bool refresh = 1;
+  string path = 2;
 }
-message Settings {
-  string theme = 1;
-  // Complete merged configuration as a JSON object (not original file bytes).
-  // Uses the same source as theme: published normally, disk when refresh=true.
-  // Backends currently carry this opaque object; individual style keys are not
-  // interpreted yet. Each fallback backend must select its own settings from it.
-  string theme_settings = 2;
+message ConfigValue {
+  // Absent means missing; the string "null" is a present JSON null value.
+  optional string json = 1;
 }
 
 message Shutdown {

@@ -8,6 +8,7 @@ pub(crate) mod wire;
 
 pub use client::RpcClient;
 pub use server::{RpcConnection, RpcServer};
+pub use wire::VERSION as PROTOCOL_VERSION;
 
 /// Return the current user/logon pipe used by the tip/server pair.
 /// Panics if process identity cannot be established; never falls back to a shared name.

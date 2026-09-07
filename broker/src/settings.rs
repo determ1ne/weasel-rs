@@ -5,11 +5,11 @@ use std::{
     io::{self, Read},
     path::Path,
 };
-use weasel_common::{message::Settings, runtime_paths::RuntimePaths};
+use weasel_common::{runtime_paths::RuntimePaths, settings::ConfigSnapshot};
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
-pub fn load(paths: &RuntimePaths, mut warn: impl FnMut(String)) -> Settings {
+pub fn load(paths: &RuntimePaths, mut warn: impl FnMut(String)) -> ConfigSnapshot {
     // Also keep packaged defaults available to standalone cargo builds.
     let mut value: Value = serde_json::from_str(include_str!("../../weasel.json"))
         .expect("packaged settings must be valid JSON");
@@ -24,11 +24,7 @@ pub fn load(paths: &RuntimePaths, mut warn: impl FnMut(String)) -> Settings {
             ));
         }
     }
-    Settings {
-        theme: value["theme"].as_str().unwrap_or("eleven").into(),
-        // Canonical merged object; not the original JSON file formatting.
-        theme_settings: value.to_string(),
-    }
+    ConfigSnapshot::new(value)
 }
 
 fn overlay_file(base: &mut Value, path: &Path) -> Result<(), String> {
@@ -64,6 +60,12 @@ fn overlay(base: &mut Value, bytes: &[u8]) -> Result<(), String> {
         Some("eleven" | "ten")
     ) {
         return Err("theme must be eleven or ten".into());
+    }
+    if next.get("inline_preedit").is_some_and(|v| !v.is_boolean()) {
+        return Err("inline_preedit must be a boolean".into());
+    }
+    if next.get("themeSettings").is_some_and(|v| !v.is_object()) {
+        return Err("themeSettings must be an object".into());
     }
     *base = next;
     Ok(())
@@ -147,15 +149,21 @@ mod tests {
         };
         paths.ensure().unwrap();
         let mut warnings = Vec::new();
-        assert_eq!(load(&paths, |w| warnings.push(w)).theme, "eleven");
+        assert_eq!(
+            load(&paths, |w| warnings.push(w)).theme().unwrap(),
+            "eleven"
+        );
         std::fs::write(directory.join("weasel.json"), br#"{"theme":"ten"}"#).unwrap();
-        assert_eq!(load(&paths, |w| warnings.push(w)).theme, "ten");
+        assert_eq!(load(&paths, |w| warnings.push(w)).theme().unwrap(), "ten");
         let custom = paths.user_data.join("weasel.custom.json");
         std::fs::write(&custom, br#"{"theme":"eleven"}"#).unwrap();
-        assert_eq!(load(&paths, |w| warnings.push(w)).theme, "eleven");
+        assert_eq!(
+            load(&paths, |w| warnings.push(w)).theme().unwrap(),
+            "eleven"
+        );
         assert!(warnings.is_empty());
         std::fs::write(&custom, b"invalid").unwrap();
-        assert_eq!(load(&paths, |w| warnings.push(w)).theme, "ten");
+        assert_eq!(load(&paths, |w| warnings.push(w)).theme().unwrap(), "ten");
         assert_eq!(warnings.len(), 1);
         std::fs::write(&custom, vec![b' '; MAX_CONFIG_BYTES as usize + 1]).unwrap();
         assert!(overlay_file(&mut serde_json::json!({"theme":"ten"}), &custom).is_err());

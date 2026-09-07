@@ -375,14 +375,25 @@ impl RpcClient {
 
     /// Read the broker's configuration. `refresh` requests a one-shot re-read
     /// from disk for this call (the preview uses it to see a just-edited setup).
-    pub async fn get_settings(&self, refresh: bool) -> Result<crate::message::Settings, RpcError> {
+    pub async fn query_config(
+        &self,
+        path: &str,
+        refresh: bool,
+    ) -> Result<Option<serde_json::Value>, RpcError> {
         let response = self
-            .request(Payload::GetSettings(crate::message::GetSettings {
+            .request(Payload::QueryConfig(crate::message::QueryConfig {
                 refresh,
+                path: path.into(),
             }))
             .await?;
         match response.payload {
-            Some(Payload::Settings(settings)) => Ok(settings),
+            Some(Payload::ConfigValue(value)) => value
+                .json
+                .map(|json| {
+                    serde_json::from_str(&json)
+                        .map_err(|e| RpcError::Protocol(format!("invalid configuration JSON: {e}")))
+                })
+                .transpose(),
             _ => Err(RpcError::UnexpectedResponse),
         }
     }

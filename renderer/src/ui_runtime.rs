@@ -95,18 +95,18 @@ fn select_first<T>(
 }
 
 impl UiHandle {
-    pub fn start(theme: &str, mode: UiMode, theme_settings: &str) -> Result<Self, String> {
+    pub fn start(theme: &str, mode: UiMode, config: &weasel_common::settings::ConfigSnapshot) -> Result<Self, String> {
         select_first(&theme_candidates(theme), |registration| {
-            Self::start_attempt(registration, mode, theme_settings)
+            Self::start_attempt(registration, mode, config)
         })
     }
 
     fn start_attempt(
         registration: &'static dyn ThemeFactory,
         mode: UiMode,
-        theme_settings: &str,
+        config: &weasel_common::settings::ConfigSnapshot,
     ) -> Result<Self, AttemptError> {
-        let theme_settings = theme_settings.to_owned();
+        let config = config.to_owned();
         let mailbox = Arc::new(Mutex::new(Mailbox::default()));
         let receiver = mailbox.clone();
         let (event_sender, events) = tokio::sync::mpsc::channel(32);
@@ -121,7 +121,7 @@ impl UiHandle {
                     run_ui(
                         registration,
                         mode,
-                        theme_settings,
+                        config,
                         receiver,
                         EventSender {
                             owner: 0,
@@ -330,7 +330,7 @@ impl Presentation {
 fn run_ui(
     registration: &'static dyn ThemeFactory,
     mode: UiMode,
-    theme_settings: String,
+    config: weasel_common::settings::ConfigSnapshot,
     mailbox: Arc<Mutex<Mailbox>>,
     events: EventSender,
     ready: &mpsc::SyncSender<Result<u32, String>>,
@@ -341,7 +341,7 @@ fn run_ui(
             .map_err(|e| e.to_string())?;
         let _apartment = Apartment;
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let backend = registration.create(mode, &theme_settings)?;
+        let backend = registration.create(mode, &config)?;
         crate::diagnostics::record(format_args!(
             "theme {} capabilities: {:?}",
             registration.name(),
@@ -434,7 +434,7 @@ mod tests {
         fn capabilities(&self) -> crate::theme_api::ThemeCapabilities {
             crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY
         }
-        fn create(&self, _: UiMode, _: &str) -> Result<Box<dyn ThemeBackend>, String> {
+        fn create(&self, _: UiMode, _: &weasel_common::settings::ConfigSnapshot) -> Result<Box<dyn ThemeBackend>, String> {
             Err("test factory must not create native resources".into())
         }
     }

@@ -1,6 +1,12 @@
 //! Registration and ordered initialization fallback for built-in themes.
 use crate::theme_api::ThemeFactory;
 
+pub fn supports_theme(name: &str) -> bool {
+    theme_candidates(name)
+        .iter()
+        .any(|factory| factory.name() == name)
+}
+
 /// Prefer the configured backend, retaining the other initialization fallback.
 pub fn theme_candidates(preferred: &str) -> Vec<&'static dyn ThemeFactory> {
     let mut themes: Vec<&'static dyn ThemeFactory> =

@@ -98,8 +98,12 @@ pub trait ThemeBackend {
 pub trait ThemeFactory: Send + Sync {
     fn name(&self) -> &'static str;
     fn capabilities(&self) -> ThemeCapabilities;
-    /// The merged JSON configuration; each theme reads only its own settings.
-    fn create(&self, mode: UiMode, settings: &str) -> Result<Box<dyn ThemeBackend>, String>;
+    /// Local immutable configuration; each theme interprets its own settings.
+    fn create(
+        &self,
+        mode: UiMode,
+        settings: &weasel_common::settings::ConfigSnapshot,
+    ) -> Result<Box<dyn ThemeBackend>, String>;
 }
 
 /// How the renderer is running. Live is the normal per-candidate strip driven

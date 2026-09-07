@@ -10,9 +10,10 @@ use tokio::{
     task::JoinSet,
 };
 use weasel_common::{
-    message::{Envelope, PeerRole, Settings, envelope::Payload},
+    message::{Envelope, PeerRole, envelope::Payload},
     rpc::{RpcConnection, RpcError, RpcServer, try_default_broker_pipe_name},
     runtime_paths::RuntimePaths,
+    settings::ConfigSnapshot as Settings,
 };
 
 pub struct SettingsService {
@@ -122,16 +123,17 @@ async fn serve(
     disk_reads: Arc<Semaphore>,
 ) -> Result<(), RpcError> {
     while let Some(request) = connection.recv().await? {
-        if let Some(Payload::GetSettings(query)) = &request.payload {
+        if let Some(Payload::QueryConfig(query)) = &request.payload {
             // A refresh re-reads the on-disk configuration for this one call so a
             // just-edited setup is previewed; it does not publish to the store.
             let payload = if query.refresh {
                 let paths = paths.clone();
+                let path = query.path.clone();
                 read_on_worker(disk_reads.clone(), move || {
                     let mut warnings = Vec::new();
                     let fresh = crate::settings::load(&paths, |warning| warnings.push(warning));
                     if warnings.is_empty() {
-                        Payload::Settings(fresh)
+                        config_payload(&fresh, &path)
                     } else {
                         // A preview must not claim rejected disk settings were applied.
                         Payload::Failure(weasel_common::message::Failure {
@@ -142,7 +144,7 @@ async fn serve(
                 })
                 .await?
             } else {
-                Payload::Settings(settings.snapshot())
+                config_payload(&settings.snapshot(), &query.path)
             };
             connection
                 .send(&Envelope {
@@ -153,6 +155,18 @@ async fn serve(
         }
     }
     Ok(())
+}
+
+fn config_payload(snapshot: &Settings, path: &str) -> Payload {
+    match snapshot.query(path) {
+        Ok(value) => Payload::ConfigValue(weasel_common::message::ConfigValue {
+            json: value.map(ToString::to_string),
+        }),
+        Err(message) => Payload::Failure(weasel_common::message::Failure {
+            code: weasel_common::message::FailureCode::InvalidArgument as i32,
+            message,
+        }),
+    }
 }
 
 async fn read_on_worker<T: Send + 'static>(
@@ -233,10 +247,7 @@ mod tests {
         let paths = test_paths();
         let service = SettingsService::start_on(
             pipe.clone(),
-            Settings {
-                theme: "ten".into(),
-                theme_settings: String::new(),
-            },
+            Settings::new(serde_json::json!({"theme":"ten"})),
             paths.clone(),
         )
         .unwrap();
@@ -246,22 +257,48 @@ mod tests {
                 let a = connect(&pipe, PeerRole::Renderer).await.unwrap();
                 let b = connect(&pipe, PeerRole::Renderer).await.unwrap();
                 let (a_result, b_result) =
-                    tokio::join!(a.get_settings(false), b.get_settings(false));
-                assert_eq!(a_result.unwrap().theme, "ten");
-                assert_eq!(b_result.unwrap().theme, "ten");
-                service.settings().replace(Settings {
-                    theme: "eleven".into(),
-                    theme_settings: String::new(),
-                });
+                    tokio::join!(a.query_config(".", false), b.query_config(".", false));
+                assert_eq!(a_result.unwrap().unwrap()["theme"], "ten");
+                assert_eq!(b_result.unwrap().unwrap()["theme"], "ten");
+                let engine = connect(&pipe, PeerRole::Server).await.unwrap();
+                assert_eq!(
+                    engine.query_config(".theme", false).await.unwrap(),
+                    Some(serde_json::json!("ten"))
+                );
+                assert!(
+                    engine
+                        .query_config(".missing", false)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(
+                    engine
+                        .query_config(".theme | invalid", false)
+                        .await
+                        .is_err()
+                );
+                service
+                    .settings()
+                    .replace(Settings::new(serde_json::json!({"theme":"eleven"})));
                 // Existing and newly accepted clients observe the published snapshot.
-                assert_eq!(b.get_settings(false).await.unwrap().theme, "eleven");
+                assert_eq!(
+                    b.query_config(".", false).await.unwrap().unwrap()["theme"],
+                    "eleven"
+                );
                 let c = connect(&pipe, PeerRole::Renderer).await.unwrap();
-                assert_eq!(c.get_settings(false).await.unwrap().theme, "eleven");
+                assert_eq!(
+                    c.query_config(".", false).await.unwrap().unwrap()["theme"],
+                    "eleven"
+                );
                 // The read-only endpoint does not accept lifecycle commands.
                 assert!(a.shutdown("not allowed").await.is_err());
                 let tip = connect(&pipe, PeerRole::Tip).await.unwrap();
-                assert!(tip.get_settings(false).await.is_err());
-                assert_eq!(b.get_settings(false).await.unwrap().theme, "eleven");
+                assert!(tip.query_config(".", false).await.is_err());
+                assert_eq!(
+                    b.query_config(".", false).await.unwrap().unwrap()["theme"],
+                    "eleven"
+                );
             })
             .await
             .unwrap();
@@ -270,10 +307,7 @@ mod tests {
         // Drop closes the listener and releases first-instance ownership.
         let _replacement = SettingsService::start_on(
             pipe,
-            Settings {
-                theme: "eleven".into(),
-                theme_settings: String::new(),
-            },
+            Settings::new(serde_json::json!({"theme":"eleven"})),
             paths,
         )
         .unwrap();
@@ -291,10 +325,7 @@ mod tests {
         std::fs::create_dir_all(&paths.user_data).unwrap();
         let service = SettingsService::start_on(
             pipe.clone(),
-            Settings {
-                theme: "ten".into(),
-                theme_settings: String::new(),
-            },
+            Settings::new(serde_json::json!({"theme":"ten"})),
             paths.clone(),
         )
         .unwrap();
@@ -303,40 +334,42 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), async {
                 let client = connect(&pipe, PeerRole::Renderer).await.unwrap();
                 // Baseline: a non-refresh query returns the published snapshot.
-                assert_eq!(client.get_settings(false).await.unwrap().theme, "ten");
+                assert_eq!(
+                    client.query_config(".", false).await.unwrap().unwrap()["theme"],
+                    "ten"
+                );
                 // The user edits the configuration on disk.
                 std::fs::write(&custom, br#"{"theme":"eleven","preview":true}"#).unwrap();
-                // A refresh re-reads the fresh disk state and carries theme_settings.
-                let fresh = client.get_settings(true).await.unwrap();
-                assert_eq!(fresh.theme, "eleven");
-                assert!(fresh.theme_settings.contains("\"theme\""));
-                assert!(fresh.theme_settings.contains("preview"));
-                let json: serde_json::Value = serde_json::from_str(&fresh.theme_settings).unwrap();
-                assert_eq!(json["theme"], fresh.theme);
+                // A refresh re-reads the fresh disk state and returns the complete merged object.
+                let fresh = client.query_config(".", true).await.unwrap().unwrap();
+                assert_eq!(fresh["theme"], "eleven");
+                assert_eq!(fresh["preview"], true);
                 // The refresh does not publish: the published snapshot is unchanged.
-                assert_eq!(client.get_settings(false).await.unwrap().theme, "ten");
+                assert_eq!(
+                    client.query_config(".", false).await.unwrap().unwrap()["theme"],
+                    "ten"
+                );
                 std::fs::write(
                     &custom,
-                    br#"{"theme":"ten","themes":{"ten":{"color":"red"}}}"#,
+                    br#"{"theme":"ten","themeSettings":{"ten":{"color":"red"}}}"#,
                 )
                 .unwrap();
-                let fresh = client.get_settings(true).await.unwrap();
-                let json: serde_json::Value = serde_json::from_str(&fresh.theme_settings).unwrap();
-                assert_eq!(json["themes"]["ten"]["color"], "red");
-                assert!(
-                    client
-                        .get_settings(false)
-                        .await
-                        .unwrap()
-                        .theme_settings
-                        .is_empty()
+                let fresh = client.query_config(".", true).await.unwrap().unwrap();
+                let json = fresh;
+                assert_eq!(json["themeSettings"]["ten"]["color"], "red");
+                assert_eq!(
+                    client.query_config(".", false).await.unwrap().unwrap()["theme"],
+                    "ten"
                 );
                 std::fs::write(&custom, b"{invalid").unwrap();
                 assert!(matches!(
-                    client.get_settings(true).await,
+                    client.query_config(".", true).await,
                     Err(RpcError::Remote { .. })
                 ));
-                assert_eq!(client.get_settings(false).await.unwrap().theme, "ten");
+                assert_eq!(
+                    client.query_config(".", false).await.unwrap().unwrap()["theme"],
+                    "ten"
+                );
             })
             .await
             .unwrap();

@@ -2,12 +2,12 @@
 mod bindings;
 mod logic;
 
+use bindings::*;
 use crate::theme_api::CandidateView;
 use crate::{
     theme_api::EventSink,
     theme_api::{ThemeBackend, UiMode},
 };
-use bindings::*;
 use logic::{Gesture, HEIGHT, Hit, Layout, NUMBER, Palette, Recovery, SCALE, enabled, pixels};
 use std::{
     cell::{Cell, RefCell},
@@ -134,11 +134,6 @@ struct Window {
     recovery: RefCell<Recovery>,
     positioning: Cell<bool>,
     preview: bool,
-    // Broker configuration (JSON) forwarded to the theme so it can render the
-    // user's configured skin. Rendering reads it once theme-specific settings
-    // are supported; carried (not yet consumed) for now.
-    #[allow(dead_code)]
-    theme_settings: String,
 }
 
 // Keep the native callback's allocation behind a shared reference even while
@@ -149,8 +144,8 @@ struct Ten {
     window: Rc<Window>,
 }
 
-fn create(mode: UiMode, theme_settings: &str) -> Result<Box<dyn ThemeBackend>, String> {
-    let preview = mode == UiMode::Preview;
+fn create(mode: UiMode) -> Result<Box<dyn ThemeBackend>, String> {
+    let preview = mode != UiMode::Live;
     let window = Rc::new(Window {
         hwnd: Cell::new(HWND::default()),
         dpi: Cell::new(96),
@@ -164,7 +159,6 @@ fn create(mode: UiMode, theme_settings: &str) -> Result<Box<dyn ThemeBackend>, S
         recovery: RefCell::new(Recovery::default()),
         positioning: Cell::new(false),
         preview,
-        theme_settings: theme_settings.to_owned(),
     });
     unsafe {
         let instance = GetModuleHandleW(None);
@@ -858,7 +852,13 @@ impl crate::theme_api::ThemeFactory for Factory {
     fn capabilities(&self) -> crate::theme_api::ThemeCapabilities {
         crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY
     }
-    fn create(&self, mode: UiMode, settings: &str) -> Result<Box<dyn ThemeBackend>, String> {
-        create(mode, settings)
+    fn create(
+        &self,
+        mode: UiMode,
+        settings: &weasel_common::settings::ConfigSnapshot,
+    ) -> Result<Box<dyn ThemeBackend>, String> {
+        // Theme-local validation; style fields will be defined by this theme.
+        let _: serde_json::Map<String, serde_json::Value> = settings.theme_settings("ten")?;
+        create(mode)
     }
 }

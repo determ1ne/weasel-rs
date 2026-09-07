@@ -25,7 +25,7 @@ fn validate_peer_role(
                 || (allow_unspecified && peer == PeerRole::Unspecified)
         }
         PeerRole::Renderer => matches!(peer, PeerRole::Server | PeerRole::Broker),
-        PeerRole::Broker => peer == PeerRole::Renderer,
+        PeerRole::Broker => matches!(peer, PeerRole::Renderer | PeerRole::Server),
         _ => false,
     };
     if allowed {
@@ -43,7 +43,11 @@ fn validate_business(
     message: Envelope,
 ) -> Result<Envelope, RpcError> {
     let allowed = match (local, peer, message.payload.as_ref()) {
-        (PeerRole::Broker, PeerRole::Renderer, Some(Payload::GetSettings(_))) => true,
+        (
+            PeerRole::Broker,
+            PeerRole::Renderer | PeerRole::Server,
+            Some(Payload::QueryConfig(_)),
+        ) => true,
         (
             PeerRole::Server | PeerRole::Renderer,
             PeerRole::Broker,

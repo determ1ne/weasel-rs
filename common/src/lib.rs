@@ -1,5 +1,6 @@
 //! Shared messages and RPC transport for weasel-rs.
 
+pub mod about;
 #[cfg(windows)]
 mod bindings;
 pub mod broker_menu;
@@ -13,4 +14,4 @@ pub mod platform;
 pub mod process;
 pub mod rpc;
 pub mod runtime_paths;
-pub mod about;
+pub mod settings;

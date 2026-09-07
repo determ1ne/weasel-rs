@@ -17,11 +17,11 @@ enum PeerRole { PEER_ROLE_UNSPECIFIED = 0; PEER_ROLE_TIP = 1; PEER_ROLE_BROKER =
 message Hello { PeerRole role = 1; uint64 instance_id = 2; }
 message Request {
   uint64 id = 1;
-  oneof operation { Ping ping = 10; InputKey key = 11; ContextCommand context = 12; Shutdown shutdown = 13; OpenInput open_input = 14; GetSettings get_settings = 15; }
+  oneof operation { Ping ping = 10; InputKey key = 11; ContextCommand context = 12; Shutdown shutdown = 13; OpenInput open_input = 14; QueryConfig query_config = 15; }
 }
 message Response {
   uint64 id = 1;
-  oneof result { Pong pong = 10; InputResult input = 11; ShutdownResponse shutdown = 12; Failure failure = 13; InputOpened input_opened = 14; Settings settings = 15; }
+  oneof result { Pong pong = 10; InputResult input = 11; ShutdownResponse shutdown = 12; Failure failure = 13; InputOpened input_opened = 14; ConfigValue config_value = 15; }
 }
 message Event {
   oneof notification { LogEvent diagnostic = 10; InputResult input = 11; RenderSnapshot render = 12; RendererEvent interaction = 13; LayoutUpdate layout = 14; }

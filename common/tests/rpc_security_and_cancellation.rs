@@ -38,7 +38,7 @@ async fn pair(server: &RpcServer) -> (NamedPipeClient, RpcConnection) {
 
 fn frame(id: u64) -> Vec<u8> {
     framing::encode(&RpcFrame {
-        protocol_version: 3,
+        protocol_version: rpc::PROTOCOL_VERSION,
         body: Some(Body::Request(Request {
             id,
             operation: Some(Operation::Ping(Ping {
@@ -57,7 +57,7 @@ async fn handshake_as(client: &mut NamedPipeClient, peer: PeerRole, local: PeerR
     // Read first to prove the server writes hello without awaiting ours.
     let bytes = framing::read(client).await.unwrap().unwrap();
     let hello = RpcFrame::decode(bytes.as_slice()).unwrap();
-    assert_eq!(hello.protocol_version, 3);
+    assert_eq!(hello.protocol_version, rpc::PROTOCOL_VERSION);
     let Some(Body::Hello(hello)) = hello.body else {
         panic!("server hello required")
     };
@@ -66,7 +66,7 @@ async fn handshake_as(client: &mut NamedPipeClient, peer: PeerRole, local: PeerR
     framing::write(
         client,
         &RpcFrame {
-            protocol_version: 3,
+            protocol_version: rpc::PROTOCOL_VERSION,
             body: Some(Body::Hello(Hello {
                 role: peer as i32,
                 instance_id: 1,
@@ -168,7 +168,7 @@ async fn role_operation_allowlists_and_response_rejection() {
                 framing::write(
                     &mut client,
                     &RpcFrame {
-                        protocol_version: 3,
+                        protocol_version: rpc::PROTOCOL_VERSION,
                         body: Some(body.clone()),
                     },
                 )

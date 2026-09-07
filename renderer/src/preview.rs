@@ -91,7 +91,7 @@ pub fn run() -> Result<(), String> {
         runtime.block_on(crate::rpc::load_theme(true))?
     };
 
-    let mut ui = UiHandle::start(&settings.theme, UiMode::Preview, &settings.theme_settings)?;
+    let mut ui = UiHandle::start(&settings.theme()?, UiMode::Preview, &settings)?;
     // Preview never sends selections/page actions to the live engine.
     ui.events.close();
     ui.command_sender()

@@ -839,6 +839,8 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing-subscriber",
  "windows-bindgen",
@@ -852,6 +854,7 @@ name = "weasel-renderer"
 version = "0.1.1"
 dependencies = [
  "embed-resource",
+ "serde_json",
  "tokio",
  "weasel-common",
  "windows-bindgen",
