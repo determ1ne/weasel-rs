@@ -27,6 +27,43 @@ impl ConfigSnapshot {
             .get(&format!(".themeSettings[{key}]"))?
             .unwrap_or_default())
     }
+
+    /// Add one factory's defaults without changing the broker snapshot or other
+    /// themes. The already-merged installation/user object has final precedence.
+    pub fn with_theme_defaults(&self, name: &str, mut defaults: Value) -> Result<Self, String> {
+        if !defaults.is_object() {
+            return Err(format!("theme {name} defaults must be an object"));
+        }
+        let mut root = (*self.0).clone();
+        let root_object = root
+            .as_object_mut()
+            .ok_or("configuration root must be an object")?;
+        let themes = root_object
+            .entry("themeSettings")
+            .or_insert_with(|| Value::Object(Default::default()))
+            .as_object_mut()
+            .ok_or("themeSettings must be an object")?;
+        if let Some(overrides) = themes.get(name) {
+            if !overrides.is_object() {
+                return Err(format!("themeSettings.{name} must be an object"));
+            }
+            merge(&mut defaults, overrides.clone());
+        }
+        themes.insert(name.into(), defaults);
+        Ok(Self::new(root))
+    }
+}
+
+/// Objects merge recursively; arrays, scalars and explicit null replace values.
+pub fn merge(base: &mut Value, patch: Value) {
+    match (base, patch) {
+        (Value::Object(base), Value::Object(patch)) => {
+            for (key, value) in patch {
+                merge(base.entry(key).or_insert(Value::Null), value);
+            }
+        }
+        (base, patch) => *base = patch,
+    }
 }
 
 // Deliberately only jq-like paths, not an expression language. Validate the
@@ -108,6 +145,49 @@ pub async fn fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn theme_defaults_are_overlaid_without_changing_the_source() {
+        let source = ConfigSnapshot::new(serde_json::json!({
+            "inline_preedit": true,
+            "themeSettings": {"abc": {"antialiasing": false, "nested": {"b": 3}}}
+        }));
+        let merged = source
+            .with_theme_defaults(
+                "abc",
+                serde_json::json!({
+                    "antialiasing": true, "nested": {"a": 1, "b": 2}
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            merged
+                .get::<bool>(".themeSettings.abc.antialiasing")
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            merged.get::<i32>(".themeSettings.abc.nested.a").unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            merged.get::<i32>(".themeSettings.abc.nested.b").unwrap(),
+            Some(3)
+        );
+        assert!(
+            source
+                .query(".themeSettings.abc.nested.a")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(merged.get::<bool>(".inline_preedit").unwrap(), Some(true));
+        let fallback = source
+            .with_theme_defaults("ten", serde_json::json!({"size": 12}))
+            .unwrap();
+        assert_eq!(
+            fallback.get::<i32>(".themeSettings.ten.size").unwrap(),
+            Some(12)
+        );
+    }
     #[test]
     fn paths_preserve_objects_null_and_missing() {
         let root = serde_json::json!({"a.b": [null, {"color":"red"}]});

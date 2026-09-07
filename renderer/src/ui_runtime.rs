@@ -335,6 +335,8 @@ fn run_ui(
             .map_err(|e| e.to_string())?;
         let _apartment = Apartment;
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let config =
+            config.with_theme_defaults(registration.name(), registration.default_settings()?)?;
         let backend = registration.create(mode, &config)?;
         crate::diagnostics::record(format_args!(
             "theme {} capabilities: {:?}",

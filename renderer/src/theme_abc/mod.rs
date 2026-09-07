@@ -102,6 +102,7 @@ struct App {
 /// The stable allocation outlives its HWND. Native calls that can synchronously
 /// dispatch messages never hold a mutable reference to this object or its App.
 struct Window {
+    antialiasing: bool,
     hwnd: Cell<HWND>,
     dpi: Cell<u32>,
     app: RefCell<App>,
@@ -120,15 +121,21 @@ struct Abc {
     candidates: Rc<Window>,
 }
 
-fn create(mode: UiMode) -> Result<Box<dyn ThemeBackend>, String> {
-    let candidates = create_window(mode, Role::Candidates, None)?;
-    let input = create_window(mode, Role::Input, Some(candidates.hwnd.get()))?;
+fn create(mode: UiMode, antialiasing: bool) -> Result<Box<dyn ThemeBackend>, String> {
+    let candidates = create_window(mode, Role::Candidates, None, antialiasing)?;
+    let input = create_window(mode, Role::Input, Some(candidates.hwnd.get()), antialiasing)?;
     Ok(Box::new(Abc { input, candidates }))
 }
 
-fn create_window(mode: UiMode, role: Role, owner: Option<HWND>) -> Result<Rc<Window>, String> {
+fn create_window(
+    mode: UiMode,
+    role: Role,
+    owner: Option<HWND>,
+    antialiasing: bool,
+) -> Result<Rc<Window>, String> {
     let preview = mode != UiMode::Live;
     let window = Rc::new(Window {
+        antialiasing,
         hwnd: Cell::new(HWND::default()),
         dpi: Cell::new(96),
         app: RefCell::new(App {
@@ -409,7 +416,11 @@ impl Window {
             .ok_or_else(|| windows_core::Error::from_hresult(E_UNEXPECTED))?;
         unsafe {
             let brush = target.CreateSolidColorBrush(&color(0x000000), None)?;
-            target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
+            target.SetTextAntialiasMode(if self.antialiasing {
+                D2D1_TEXT_ANTIALIAS_MODE_DEFAULT
+            } else {
+                D2D1_TEXT_ANTIALIAS_MODE_ALIASED
+            });
             target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
             target.BeginDraw();
             let draw = DrawGuard {
@@ -914,14 +925,19 @@ impl crate::theme_api::ThemeFactory for Factory {
     fn capabilities(&self) -> crate::theme_api::ThemeCapabilities {
         crate::theme_api::ThemeCapabilities { preedit: true }
     }
+    fn default_settings(&self) -> Result<serde_json::Value, String> {
+        serde_json::from_str(include_str!("config.json"))
+            .map_err(|error| format!("invalid ABC default settings: {error}"))
+    }
     fn create(
         &self,
         mode: UiMode,
         settings: &weasel_common::settings::ConfigSnapshot,
     ) -> Result<Box<dyn ThemeBackend>, String> {
-        // Theme-local validation; style fields will be defined by this theme.
-        let _: serde_json::Map<String, serde_json::Value> = settings.theme_settings("abc")?;
-        create(mode)
+        let antialiasing = settings
+            .get::<bool>(".themeSettings.abc.antialiasing")?
+            .ok_or("missing ABC antialiasing setting")?;
+        create(mode, antialiasing)
     }
 }
 

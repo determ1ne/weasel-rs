@@ -128,6 +128,10 @@ pub trait ThemeBackend {
 pub trait ThemeFactory: Send + Sync {
     fn name(&self) -> &'static str;
     fn capabilities(&self) -> ThemeCapabilities;
+    /// Theme-local defaults, overlaid by installation/user settings before create.
+    fn default_settings(&self) -> Result<serde_json::Value, String> {
+        Ok(serde_json::Value::Object(Default::default()))
+    }
     /// Local immutable configuration; each theme interprets its own settings.
     fn create(
         &self,

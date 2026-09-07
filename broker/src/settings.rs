@@ -5,7 +5,10 @@ use std::{
     io::{self, Read},
     path::Path,
 };
-use weasel_common::{runtime_paths::RuntimePaths, settings::ConfigSnapshot};
+use weasel_common::{
+    runtime_paths::RuntimePaths,
+    settings::{ConfigSnapshot, merge},
+};
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
@@ -69,17 +72,6 @@ fn overlay(base: &mut Value, bytes: &[u8]) -> Result<(), String> {
     }
     *base = next;
     Ok(())
-}
-
-fn merge(base: &mut Value, patch: Value) {
-    match (base, patch) {
-        (Value::Object(base), Value::Object(patch)) => {
-            for (key, value) in patch {
-                merge(base.entry(key).or_insert(Value::Null), value);
-            }
-        }
-        (base, patch) => *base = patch,
-    }
 }
 
 #[cfg(test)]
