@@ -4,28 +4,20 @@
 //! snapshot into a window that is visible in the task bar and manually closable.
 //! It reads settings from broker, but never connects to server or listens on the
 //! live renderer pipe. Candidate interactions are visual only.
-use crate::{
-    theme_api::UiMode,
-    ui_runtime::{UiCommand, UiHandle},
-};
+use crate::theme_api::UiMode;
 use weasel_common::message::{RenderItem, RenderRect, RenderSnapshot};
 
 /// Synthetic connection owner and presentation sequence for the preview strip.
-const PREVIEW_OWNER: u64 = 1;
+pub(crate) const PREVIEW_OWNER: u64 = 1;
 
-/// True when launched with `--preview`. No sub-arguments are accepted: the theme
-/// is always sourced from the broker configuration.
-pub fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<bool, String> {
-    let mut preview = false;
-    for arg in args {
-        if arg != "--preview" || preview {
-            return Err(format!(
-                "unsupported renderer argument: {arg:?}; usage: weasel-renderer.exe [--preview]"
-            ));
-        }
-        preview = true;
+/// Theme selection comes from broker; preview has no input-mode overrides.
+pub fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<UiMode, String> {
+    let args: Vec<_> = args.into_iter().collect();
+    match args.as_slice() {
+        [] => Ok(UiMode::Live),
+        [arg] if arg == "--preview" => Ok(UiMode::Preview),
+        _ => Err("usage: weasel-renderer.exe [--preview]".into()),
     }
-    Ok(preview)
 }
 
 /// A representative candidate strip so the whole skin is visible: candidate rows
@@ -34,15 +26,9 @@ pub fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<
 pub fn synthetic_snapshot() -> RenderSnapshot {
     let samples = [
         ("你好", "nihao"),
-        ("你好吗", "nihaoma"),
-        ("你号码", "nihuoma"),
-        ("你好呀", "nihaoya"),
-        ("年号", "nianhao"),
-        ("鸟窝", "niaowo"),
-        ("拟好", "nihao"),
-        ("你壕", "nihao"),
-        ("女号", "nuhao"),
-        ("你嚎", "nihao"),
+        ("小狼毫", "xiaolanghao"),
+        ("Rime", ""),
+        ("中州韻", ""),
     ];
     let items = samples
         .into_iter()
@@ -77,26 +63,8 @@ pub fn synthetic_snapshot() -> RenderSnapshot {
     }
 }
 
-pub fn run() -> Result<(), String> {
-    // Run the bounded (2s) broker lookup on a throwaway runtime before the UI
-    // thread starts, so the preview reflects the configured skin. refresh re-reads
-    // the on-disk configuration so a just-edited setup is shown. The runtime is
-    // dropped here; the UI thread uses only std channels and PostThreadMessage.
-    let settings = {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .map_err(|error| format!("could not create preview runtime: {error}"))?;
-        runtime.block_on(crate::rpc::load_theme(true))?
-    };
-
-    let mut ui = UiHandle::start(&settings.theme()?, UiMode::Preview, &settings)?;
-    // Preview never sends selections/page actions to the live engine.
-    ui.events.close();
-    ui.command_sender()
-        .send(UiCommand::Render(PREVIEW_OWNER, synthetic_snapshot()))?;
-    ui.wait_for_close()
+pub fn run(_mode: UiMode) -> Result<(), String> {
+    crate::preview_window::run()
 }
 
 #[cfg(test)]
@@ -105,8 +73,10 @@ mod tests {
     #[test]
     fn arguments_are_strict() {
         let parse = |args: &[&str]| parse_args(args.iter().map(std::ffi::OsString::from));
-        assert!(!parse(&[]).unwrap());
-        assert!(parse(&["--preview"]).unwrap());
+        assert_eq!(parse(&[]).unwrap(), UiMode::Live);
+        assert_eq!(parse(&["--preview"]).unwrap(), UiMode::Preview);
+        assert!(parse(&["--preview", "--preedit"]).is_err());
+        assert!(parse(&["--preedit"]).is_err());
         assert!(parse(&["--preview", "--preview"]).is_err());
         assert!(parse(&["--preveiw"]).is_err());
         assert!(parse(&["--preview", "ten"]).is_err());

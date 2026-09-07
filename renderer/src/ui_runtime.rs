@@ -34,6 +34,7 @@ pub struct UiCommandSender {
 }
 
 pub struct UiHandle {
+    pub theme: &'static str,
     commands: UiCommandSender,
     pub events: tokio::sync::mpsc::Receiver<(Owner, RendererEvent)>,
     pub finished: tokio::sync::oneshot::Receiver<Result<(), String>>,
@@ -95,8 +96,13 @@ fn select_first<T>(
 }
 
 impl UiHandle {
-    pub fn start(theme: &str, mode: UiMode, config: &weasel_common::settings::ConfigSnapshot) -> Result<Self, String> {
-        select_first(&theme_candidates(theme), |registration| {
+    pub fn start(
+        theme: &str,
+        mode: UiMode,
+        config: &weasel_common::settings::ConfigSnapshot,
+    ) -> Result<Self, String> {
+        let candidates: Vec<_> = theme_candidates(theme).into_iter().collect();
+        select_first(&candidates, |registration| {
             Self::start_attempt(registration, mode, config)
         })
     }
@@ -159,6 +165,7 @@ impl UiHandle {
         };
         crate::diagnostics::record(format_args!("using renderer theme {}", registration.name()));
         Ok(Self {
+            theme: registration.name(),
             commands: UiCommandSender { mailbox, thread_id },
             events,
             finished,
@@ -178,19 +185,6 @@ impl UiHandle {
                 result?;
             }
             wake?;
-        }
-        Ok(())
-    }
-
-    /// Blocks until the user-driven UI thread ends (e.g. the preview window is
-    /// closed). Unlike close(), no quit is forced and no deadline is imposed: the
-    /// user controls when the window goes away.
-    pub fn wait_for_close(&mut self) -> Result<(), String> {
-        if let Some(worker) = self.thread.take() {
-            worker.join().map_err(|_| "UI thread panicked".to_owned())?;
-            if let Ok(result) = self.finished.try_recv() {
-                result?;
-            }
         }
         Ok(())
     }
@@ -353,6 +347,18 @@ fn run_ui(
             last: None,
             content_id: 0,
         };
+        // Preview startup includes its first render. Failed initialization or
+        // layout leaves the controller's previous preview alive.
+        if mode == UiMode::Preview {
+            let snapshot = crate::preview::synthetic_snapshot();
+            {
+                let mut queue = mailbox.lock().map_err(|_| "renderer mailbox poisoned")?;
+                queue.render(crate::preview::PREVIEW_OWNER, snapshot.clone());
+                queue.take_pending();
+            }
+            presentation.apply(crate::preview::PREVIEW_OWNER, Some(snapshot))?;
+            presentation.backend.check_health()?;
+        }
         let thread_id = GetCurrentThreadId();
         let _appearance =
             crate::appearance::AppearanceSubscription::new(thread_id, WM_RENDERER_THEME);
@@ -434,7 +440,11 @@ mod tests {
         fn capabilities(&self) -> crate::theme_api::ThemeCapabilities {
             crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY
         }
-        fn create(&self, _: UiMode, _: &weasel_common::settings::ConfigSnapshot) -> Result<Box<dyn ThemeBackend>, String> {
+        fn create(
+            &self,
+            _: UiMode,
+            _: &weasel_common::settings::ConfigSnapshot,
+        ) -> Result<Box<dyn ThemeBackend>, String> {
             Err("test factory must not create native resources".into())
         }
     }

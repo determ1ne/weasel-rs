@@ -5,7 +5,17 @@ pub fn generate() {
         .input_default()
         .output(out.join("d2d-bindings.rs"))
         .filters([
-
+            "Windows.Win32.GetMessageW", "Windows.Win32.TranslateMessage", "Windows.Win32.DispatchMessageW",
+            "Windows.Win32.IsDialogMessageW", "Windows.Win32.PostMessageW",
+            "Windows.Win32.EnableWindow", "Windows.Win32.SetWindowTextW", "Windows.Win32.SetFocus",
+            "Windows.Win32.MessageBoxW", "Windows.Win32.MB_OK", "Windows.Win32.MB_ICONERROR",
+            "Windows.Win32.WS_OVERLAPPEDWINDOW", "Windows.Win32.WS_VISIBLE", "Windows.Win32.WS_CHILD",
+            "Windows.Win32.WS_TABSTOP", "Windows.Win32.WS_EX_CONTROLPARENT",
+            "Windows.Win32.WM_COMMAND", "Windows.Win32.WM_APP", "Windows.Win32.WM_DESTROY",
+            "Windows.Win32.COLOR_BTNFACE", "Windows.Win32.GetSysColorBrush",
+            "Windows.Win32.WM_SETFONT", "Windows.Win32.GetStockObject", "Windows.Win32.DEFAULT_GUI_FONT",
+            "Windows.Win32.SetThreadDpiAwarenessContext", "Windows.Win32.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2",
+            "Windows.Win32.MonitorFromWindow", "Windows.Win32.MONITOR_DEFAULTTOPRIMARY", "Windows.Win32.GetMonitorInfoW",
 
             "Windows.Win32.D2D1CreateFactory", "Windows.Win32.DWriteCreateFactory",
             "Windows.Win32.ID2D1Factory::CreateHwndRenderTarget", "Windows.Win32.ID2D1HwndRenderTarget::Resize",

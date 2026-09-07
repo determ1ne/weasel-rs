@@ -15,6 +15,8 @@ mod presentation;
 #[cfg(windows)]
 mod preview;
 #[cfg(windows)]
+mod preview_window;
+#[cfg(windows)]
 mod rpc;
 mod state;
 #[cfg(windows)]
@@ -43,7 +45,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let component = if preview {
+    let component = if preview != theme_api::UiMode::Live {
         "renderer-preview"
     } else {
         "renderer"
@@ -56,8 +58,12 @@ fn main() {
         }
     };
     diagnostics::initialize();
-    diagnostics::record(format_args!("starting (preview={preview})"));
-    let result = if preview { preview::run() } else { rpc::run() };
+    diagnostics::record(format_args!("starting (mode={preview:?})"));
+    let result = if preview != theme_api::UiMode::Live {
+        preview::run(preview)
+    } else {
+        rpc::run()
+    };
     if let Err(error) = result {
         diagnostics::record(format_args!("{error}"));
         std::process::exit(1);
