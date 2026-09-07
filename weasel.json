@@ -1,4 +1,5 @@
 {
+  "$schema": "weasel.schema.json",
   "theme": "eleven",
   "inline_preedit": true,
   "themeSettings": {}

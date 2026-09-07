@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "weasel.schema.json",
+  "title": "Weasel User Settings",
+  "description": "Weasel-RS 用户设置文件",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "JSON Schema 文件的 URI",
+      "type": "string"
+    },
+    "theme": {
+      "description": "主题名称",
+      "type": "string",
+      "enum": [
+        "eleven",
+        "ten",
+        "abc"
+      ]
+    },
+    "inline_preedit": {
+      "description": "是否在宿主编辑框内联显示预编辑文本",
+      "type": "boolean"
+    },
+    "themeSettings": {
+      "description": "按主题划分的自定义设置，键为主题名称，值为该主题的设置对象",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "theme": "eleven",
+      "inline_preedit": true,
+      "themeSettings": {
+        "abc": {}
+      }
+    }
+  ]
+}
