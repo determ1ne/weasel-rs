@@ -237,7 +237,7 @@ impl TextService {
             action: action as i32,
         };
         if !self.lock(&state.rpc)?.context_command(command) {
-            self.faulted.store(true, Ordering::Release);
+            self.faulted.mark("context.enqueue_failed", action as u64);
             return Err(Error::from_hresult(boundary::E_FAIL));
         }
         Ok(())

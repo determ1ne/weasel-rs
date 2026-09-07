@@ -847,7 +847,7 @@ fn show_menu(window: HWND) {
     let menu = unsafe { CreatePopupMenu() };
     let busy = DEPLOYING.load(Ordering::Acquire);
     unsafe {
-        for &(id, label) in broker_menu::ITEMS {
+        for (id, label) in broker_menu::items(weasel_common::about::shift_pressed()) {
             let disabled = busy && matches!(id, broker_menu::DEPLOY | broker_menu::RESTART);
             let flags = if id == 0 {
                 MF_SEPARATOR as u32
@@ -884,6 +884,29 @@ fn show_menu(window: HWND) {
 
 fn handle_command(window: HWND, command: u32) {
     match command {
+        broker_menu::ABOUT => {
+            weasel_common::about::show(&weasel_common::about::information("broker"))
+        }
+        broker_menu::DIAGNOSTICS => {
+            let mut info = weasel_common::about::information("broker");
+            info.push_str(&format!(
+                "\n\n正在部署/重启：{}\n正在退出：{}\n路径：{:?}",
+                DEPLOYING.load(Ordering::Acquire),
+                STOPPING.load(Ordering::Acquire),
+                RuntimePaths::discover()
+            ));
+            if let Some(state) = BROKER_STATE.get().and_then(|state| state.try_lock().ok()) {
+                info.push_str(&format!(
+                    "\n托管 server PID：{:?}\n托管 renderer PID：{:?}",
+                    state.server.as_ref().map(Child::id),
+                    state.renderer.as_ref().map(Child::id)
+                ));
+            } else {
+                info.push_str("\n服务状态暂时不可读取。");
+            }
+            info.push_str("\n\nTIP 故障请在对应宿主的语言栏使用 Shift＋右键 → 诊断信息。\nCtrl+C 可复制此对话框。");
+            weasel_common::about::show(&info);
+        }
         broker_menu::DEPLOY => begin_deploy(window, Operation::Deploy),
         broker_menu::RESTART => begin_deploy(window, Operation::Restart),
         broker_menu::EXIT => {

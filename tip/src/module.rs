@@ -30,5 +30,6 @@ pub(crate) fn lock_server(lock: bool) {
 }
 
 pub(crate) fn can_unload() -> bool {
+    crate::diagnostics::reap_finished();
     OBJECTS.load(Ordering::Acquire) == 0 && SERVER_LOCKS.load(Ordering::Acquire) == 0
 }

@@ -25,7 +25,7 @@ fn show_broker_menu(point: &POINT) -> Result<()> {
     if menu.0.0.is_null() {
         return Err(Error::from_thread());
     }
-    for &(id, label) in weasel_common::broker_menu::ITEMS {
+    for (id, label) in weasel_common::broker_menu::items(weasel_common::about::shift_pressed()) {
         let label = HSTRING::from(label);
         let flags = if id == 0 { MF_SEPARATOR } else { MF_STRING };
         if !unsafe { AppendMenuW(menu.0, flags as u32, id as usize, PCWSTR(label.as_ptr())) }
@@ -56,6 +56,13 @@ fn show_broker_menu(point: &POINT) -> Result<()> {
 }
 
 fn send_broker_command(command: u32) -> Result<()> {
+    if matches!(
+        command,
+        weasel_common::broker_menu::ABOUT | weasel_common::broker_menu::DIAGNOSTICS
+    ) {
+        crate::diagnostics::show_dialog(command == weasel_common::broker_menu::DIAGNOSTICS);
+        return Ok(());
+    }
     if !weasel_common::broker_menu::is_command(command) {
         return Err(Error::from_hresult(E_INVALIDARG));
     }

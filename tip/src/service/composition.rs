@@ -8,8 +8,14 @@ impl TextService {
         step: EditStep,
         session: IUnknown,
     ) -> Result<()> {
+        self.faulted.event(step.name(), response.revision);
+        if let Some(token) = &response.token {
+            self.faulted.event("edit.context", token.context_id);
+            self.faulted.event("edit.epoch", token.connection_epoch);
+            self.faulted.event("edit.generation", token.generation);
+        }
         if response::validate(&response).is_err() {
-            self.faulted.store(true, Ordering::Release);
+            self.faulted.mark("response.invalid", response.revision);
             return Ok(());
         }
         let Some(state) = self.find_context(&context)? else {
@@ -34,7 +40,7 @@ impl TextService {
         {
             let mut queue = self.lock(&self.pending_edit)?;
             if queue.len() >= 64 {
-                self.faulted.store(true, Ordering::Release);
+                self.faulted.mark("edit.queue_full", queue.len() as u64);
                 return Ok(());
             }
             if matches!(step, EditStep::ApplyResponse) {
@@ -79,6 +85,7 @@ impl TextService {
         self.active_edit_context
             .store(pending.state.id, Ordering::Release);
         let ticket = self.edit_ticket.fetch_add(1, Ordering::AcqRel) + 1;
+        self.faulted.event("edit.ticket", ticket);
         weasel_common::input_trace!(
             "edit.request ticket={} token={:?} revision={} step={}",
             ticket,
@@ -104,7 +111,8 @@ impl TextService {
         }
         match request {
             Err(error) => {
-                self.faulted.store(true, Ordering::Release);
+                self.faulted
+                    .mark("edit.request_failed", error.code().0 as u32 as u64);
                 let discarded = std::mem::take(&mut *self.lock(&self.pending_edit)?);
                 drop(discarded);
                 self.edit_requested.store(false, Ordering::Release);
@@ -117,7 +125,7 @@ impl TextService {
                 );
             }
             Ok(hr) if hr.is_err() => {
-                self.faulted.store(true, Ordering::Release);
+                self.faulted.mark("edit.session_failed", hr.0 as u32 as u64);
                 let discarded = std::mem::take(&mut *self.lock(&self.pending_edit)?);
                 drop(discarded);
                 self.edit_requested.store(false, Ordering::Release);

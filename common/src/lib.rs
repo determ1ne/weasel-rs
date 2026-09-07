@@ -13,3 +13,4 @@ pub mod platform;
 pub mod process;
 pub mod rpc;
 pub mod runtime_paths;
+pub mod about;

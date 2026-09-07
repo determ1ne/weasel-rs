@@ -121,7 +121,9 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
             if let Err(error) = &result {
                 // A failed write may already have changed the document. Do not
                 // replay the response or continue with dependent edit steps.
-                service.faulted.store(true, Ordering::Release);
+                service
+                    .faulted
+                    .mark("edit.apply_failed", error.code().0 as u32 as u64);
                 let discarded = std::mem::take(&mut *service.lock(&service.pending_edit)?);
                 drop(discarded);
                 service.lock(&service.rpc)?.log(
@@ -146,8 +148,11 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
                     }
                     .as_bool()
                     {
-                        service.faulted.store(true, Ordering::Release);
-                        return Err(Error::from_thread());
+                        let error = Error::from_thread();
+                        service
+                            .faulted
+                            .mark("edit.post_failed", error.code().0 as u32 as u64);
+                        return Err(error);
                     }
                 }
             }

@@ -844,6 +844,7 @@ dependencies = [
  "windows-bindgen",
  "windows-core",
  "windows-strings",
+ "windows-version",
 ]
 
 [[package]]

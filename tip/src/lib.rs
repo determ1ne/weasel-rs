@@ -4,6 +4,7 @@
 mod bindings;
 mod boundary;
 mod class_factory;
+mod diagnostics;
 mod icons;
 mod keyboard;
 mod module;

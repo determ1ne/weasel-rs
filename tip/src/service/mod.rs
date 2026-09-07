@@ -106,7 +106,7 @@ pub(crate) struct TextService {
     focused_context: Mutex<Option<u64>>,
     tested_key: Mutex<Option<key_event::TestedKey>>,
     activated: AtomicBool,
-    faulted: AtomicBool,
+    faulted: crate::diagnostics::FaultState,
     generation: Arc<AtomicU64>,
     rpc: Arc<Mutex<RpcWorker>>,
     update_window: Mutex<Option<update_window::UpdateWindow>>,
@@ -125,12 +125,25 @@ pub(crate) struct TextService {
 }
 
 impl TextService {
-    fn lock<'a, T>(&self, state: &'a Mutex<T>) -> Result<std::sync::MutexGuard<'a, T>> {
+    #[track_caller]
+    fn lock<'a, T>(
+        &'a self,
+        state: &'a Mutex<T>,
+    ) -> Result<crate::diagnostics::TrackedGuard<'a, T>> {
         // Apartment state must never block a reentrant COM callback.
-        state.try_lock().map_err(|_| {
-            self.faulted.store(true, Ordering::Release);
-            Error::from_hresult(boundary::E_FAIL)
-        })
+        let address = state as *const Mutex<T> as usize as u64;
+        self.faulted.event("lock.try", address);
+        match state.try_lock() {
+            Ok(guard) => Ok(self.faulted.track(guard, address)),
+            Err(error) => {
+                let reason = match error {
+                    std::sync::TryLockError::WouldBlock => "lock.would_block",
+                    std::sync::TryLockError::Poisoned(_) => "lock.poisoned",
+                };
+                self.faulted.mark(reason, address);
+                Err(Error::from_hresult(boundary::E_FAIL))
+            }
+        }
     }
 
     pub(crate) fn new() -> Self {
@@ -139,7 +152,7 @@ impl TextService {
             focused_context: Mutex::new(None),
             tested_key: Mutex::new(None),
             activated: AtomicBool::new(false),
-            faulted: AtomicBool::new(false),
+            faulted: crate::diagnostics::FaultState::new(false),
             generation: Arc::new(AtomicU64::new(0)),
             rpc: Arc::new(Mutex::new(RpcWorker::default())),
             update_window: Mutex::new(None),

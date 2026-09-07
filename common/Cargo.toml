@@ -13,6 +13,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 
 windows-core = "0.100.0"
+windows-version = "0.100.0"
 windows-strings = "0.100.0"
 
 [build-dependencies]
