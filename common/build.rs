@@ -46,8 +46,12 @@ fn main() {
 
     println!("cargo:rerun-if-changed=proto/message.proto");
     println!("cargo:rerun-if-changed=proto/rpc.proto");
-    prost_build::compile_protos(&["proto/message.proto", "proto/rpc.proto"], &["proto"])
-        .expect("message.proto compiles");
+    println!("cargo:rerun-if-changed=proto/tip.proto");
+    prost_build::compile_protos(
+        &["proto/tip.proto", "proto/message.proto", "proto/rpc.proto"],
+        &["proto"],
+    )
+    .expect("protobuf definitions compile");
 }
 
 fn build_identity() {

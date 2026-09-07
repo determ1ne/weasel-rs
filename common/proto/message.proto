@@ -1,6 +1,7 @@
 syntax = "proto3";
 
 package weasel.message;
+import "tip.proto";
 
 // stdout transport of --deploy-ui. A frame is u32 LE length + DeployEvent.
 message DeployEvent {
@@ -17,10 +18,6 @@ message DeployComplete {
   bool success = 1;
   optional int32 exit_code = 2;
   string message = 3;
-}
-
-message Ping {
-  string text = 1;
 }
 
 // refresh requests a fresh read from disk for this call only (used by the
@@ -40,41 +37,6 @@ message Settings {
   string theme_settings = 2;
 }
 
-message LogEvent {
-  string level = 1;
-  string text = 2;
-}
-
-// Input context identity, pipe connection epoch and document-state generation.
-message ContextToken {
-  uint64 context_id = 1;
-  uint64 connection_epoch = 2;
-  uint64 generation = 3;
-}
-
-enum ContextAction {
-  CONTEXT_ACTION_UNSPECIFIED = 0;
-  CONTEXT_ACTION_FOCUS = 1;
-  CONTEXT_ACTION_BLUR = 2;
-  CONTEXT_ACTION_CANCEL = 3;
-  CONTEXT_ACTION_SUBMIT = 4;
-  // Host already owns the finalized text; do not insert an engine commit again.
-  CONTEXT_ACTION_HOST_TERMINATED = 5;
-  CONTEXT_ACTION_TOGGLE_ASCII = 6;
-  // Release one context without closing the shared TextService connection.
-  CONTEXT_ACTION_DESTROY = 7;
-}
-
-message ContextCommand {
-  ContextToken token = 1;
-  ContextAction action = 2;
-}
-
-message Candidate {
-  string text = 1;
-  string comment = 2;
-}
-
 message Shutdown {
   string reason = 1;
 }
@@ -82,14 +44,6 @@ message Shutdown {
 message ShutdownResponse {
   bool accepted = 1;
   string message = 2;
-}
-
-message RenderRect {
-  int32 left = 1;
-  int32 top = 2;
-  int32 right = 3;
-  int32 bottom = 4;
-  bool valid = 5;
 }
 
 message RenderItem {
@@ -132,10 +86,4 @@ message RendererEvent {
   uint32 item_index = 3;
   ContextToken token = 4;
   uint64 revision = 5;
-}
-
-message LayoutUpdate {
-  uint64 session_id = 1;
-  RenderRect anchor = 2;
-  ContextToken token = 3;
 }

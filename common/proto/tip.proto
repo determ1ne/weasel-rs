@@ -1,0 +1,98 @@
+syntax = "proto3";
+package weasel.message;
+
+// TIP/server payload contract. Keep field numbers and enum values compatible
+// with deployed TIP DLLs. Shared transport envelopes remain in rpc.proto;
+// broker/renderer configuration changes do not change this input contract.
+
+message Ping {
+  string text = 1;
+}
+
+message LogEvent {
+  string level = 1;
+  string text = 2;
+}
+
+// Input context identity, pipe connection epoch and document-state generation.
+message ContextToken {
+  uint64 context_id = 1;
+  uint64 connection_epoch = 2;
+  uint64 generation = 3;
+}
+
+enum ContextAction {
+  CONTEXT_ACTION_UNSPECIFIED = 0;
+  CONTEXT_ACTION_FOCUS = 1;
+  CONTEXT_ACTION_BLUR = 2;
+  CONTEXT_ACTION_CANCEL = 3;
+  CONTEXT_ACTION_SUBMIT = 4;
+  // Host already owns the finalized text; do not insert an engine commit again.
+  CONTEXT_ACTION_HOST_TERMINATED = 5;
+  CONTEXT_ACTION_TOGGLE_ASCII = 6;
+  // Release one context without closing the shared TextService connection.
+  CONTEXT_ACTION_DESTROY = 7;
+}
+
+message ContextCommand {
+  ContextToken token = 1;
+  ContextAction action = 2;
+}
+
+message Candidate {
+  string text = 1;
+  string comment = 2;
+}
+
+message RenderRect {
+  int32 left = 1;
+  int32 top = 2;
+  int32 right = 3;
+  int32 bottom = 4;
+  bool valid = 5;
+}
+
+message LayoutUpdate {
+  uint64 session_id = 1;
+  RenderRect anchor = 2;
+  ContextToken token = 3;
+}
+
+message OpenInput { ContextToken token = 1; }
+message InputOpened { ContextToken token = 1; }
+message InputKey {
+  ContextToken token = 1;
+  int32 keycode = 2;
+  int32 modifiers = 3;
+  bool released = 4;
+  uint32 virtual_key = 5;
+  int64 native_lparam = 6;
+}
+
+message Pong { string text = 1; }
+enum FailureCode { FAILURE_CODE_UNSPECIFIED = 0; FAILURE_CODE_INVALID_ARGUMENT = 1; FAILURE_CODE_NOT_READY = 2; FAILURE_CODE_OVERLOADED = 3; FAILURE_CODE_STALE_CONTEXT = 4; FAILURE_CODE_INTERNAL = 5; }
+message Failure { FailureCode code = 1; string message = 2; }
+
+// State is optional: an unhandled key acknowledgement must not clear preedit.
+// Effects are one-shot and must be applied once in token/revision wire order.
+message InputResult {
+  ContextToken token = 1;
+  uint64 revision = 2;
+  bool handled = 3;
+  InputState state = 4;
+  EditEffects effects = 5;
+  optional bool ascii_mode = 6;
+}
+message InputState {
+  string preedit = 1;
+  uint32 cursor_utf16 = 2;
+  bool composing = 3;
+  repeated Candidate candidates = 4;
+  uint32 selected = 5;
+  uint32 page_start = 6;
+  bool has_previous = 7;
+  bool has_next = 8;
+}
+// Commit finalizes the active preedit (or inserts when none exists); a provided
+// state may then start the next preedit. Emoji invocation cancels preedit first.
+message EditEffects { string commit = 1; bool open_emoji_panel = 2; }
