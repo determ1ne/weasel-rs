@@ -6,8 +6,31 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
 };
+
+pub(crate) struct Sender<T> {
+    queue: mpsc::SyncSender<T>,
+    wake: thread::Thread,
+}
+impl<T> Clone for Sender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            queue: self.queue.clone(),
+            wake: self.wake.clone(),
+        }
+    }
+}
+impl<T> Sender<T> {
+    pub fn try_send(&self, message: T) -> Result<(), mpsc::TrySendError<T>> {
+        let result = self.queue.try_send(message);
+        self.wake.unpark();
+        result
+    }
+    pub fn notifier(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let thread = self.wake.clone();
+        Arc::new(move || thread.unpark())
+    }
+}
 
 pub(crate) trait Processor<T> {
     fn process(&mut self, message: T);
@@ -15,7 +38,7 @@ pub(crate) trait Processor<T> {
 }
 
 pub(crate) struct Worker<T> {
-    pub sender: mpsc::SyncSender<T>,
+    pub sender: Sender<T>,
     pub ready: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<Result<(), String>>>,
@@ -41,15 +64,21 @@ impl<T: Send + 'static> Worker<T> {
                     let mut processor = create()?;
                     readiness.store(true, Ordering::Release);
                     while !stopping.load(Ordering::Acquire) {
-                        match receiver.recv_timeout(Duration::from_millis(20)) {
+                        match receiver.try_recv() {
                             Ok(message) => {
                                 if stopping.load(Ordering::Acquire) {
                                     break;
                                 }
                                 processor.process(message);
                             }
-                            Err(mpsc::RecvTimeoutError::Timeout) => (),
-                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            Err(mpsc::TryRecvError::Empty) => {
+                                processor.idle();
+                                if !stopping.load(Ordering::Acquire) {
+                                    thread::park();
+                                }
+                                continue;
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => break,
                         }
                         processor.idle();
                     }
@@ -63,7 +92,10 @@ impl<T: Send + 'static> Worker<T> {
             })
             .map_err(|error| error.to_string())?;
         Ok(Self {
-            sender,
+            sender: Sender {
+                queue: sender,
+                wake: thread.thread().clone(),
+            },
             ready,
             stop,
             thread: Some(thread),
@@ -74,6 +106,7 @@ impl<T: Send + 'static> Worker<T> {
     pub fn request_stop(&self) {
         self.ready.store(false, Ordering::Release);
         self.stop.store(true, Ordering::Release);
+        self.sender.wake.unpark();
     }
 
     pub async fn shutdown(mut self) -> Result<(), String> {
@@ -93,6 +126,7 @@ impl<T> Drop for Worker<T> {
     fn drop(&mut self) {
         self.ready.store(false, Ordering::Release);
         self.stop.store(true, Ordering::Release);
+        self.sender.wake.unpark();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -102,7 +136,26 @@ impl<T> Drop for Worker<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use std::{rc::Rc, sync::Mutex};
+
+    #[tokio::test]
+    async fn idle_engine_sleeps_until_explicit_wake_and_shutdown_needs_no_queue_slot() {
+        struct Idle(mpsc::Sender<()>);
+        impl Processor<()> for Idle {
+            fn process(&mut self, _: ()) {}
+            fn idle(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let (tx, rx) = mpsc::channel();
+        let worker = Worker::spawn(1, move || Ok(Idle(tx))).unwrap();
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(rx.recv_timeout(Duration::from_millis(80)).is_err());
+        (worker.sender.notifier())();
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.shutdown().await.unwrap();
+    }
 
     struct Probe {
         owner: thread::ThreadId,

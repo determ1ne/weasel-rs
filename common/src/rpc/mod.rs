@@ -1,5 +1,7 @@
 //! Bidirectional RPC over Windows Named Pipes.
 
+mod activity;
+pub use activity::RequestLease;
 pub mod client;
 pub mod server;
 pub(crate) mod wire;

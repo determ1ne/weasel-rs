@@ -50,6 +50,10 @@ impl TextService {
         // must not leave the previous sink registered on the thread manager.
         self.deactivate_internal();
 
+        if self.teardown_pending.load(Ordering::Acquire) {
+            return Err(Error::from_hresult(boundary::E_PENDING));
+        }
+
         let Some(thread_mgr) = thread_mgr.to_owned() else {
             return Err(Error::from_hresult(E_POINTER));
         };
@@ -121,27 +125,82 @@ impl TextService {
     pub(super) fn deactivate_internal(&self) {
         // Invalidate callbacks before any external call can reenter the service.
         self.activated.store(false, Ordering::Release);
-        self.generation.fetch_add(1, Ordering::AcqRel);
-        use boundary::{cleanup, teardown_lock};
-        let bar = teardown_lock(&self.language_bar).take();
-        cleanup(|| drop(bar));
-        // Extract owned resources under short locks; run Drop/COM outside locks.
-        let mut rpc = std::mem::take(&mut *teardown_lock(&self.rpc));
-        cleanup(|| rpc.stop());
-        let window = teardown_lock(&self.update_window).take();
-        cleanup(|| drop(window));
-        teardown_lock(&self.tested_key).take();
-        let pending = std::mem::take(&mut *teardown_lock(&self.pending_edit));
-        cleanup(|| drop(pending));
-        self.edit_requested.store(false, Ordering::Release);
-        teardown_lock(&self.display_attribute_atom).take();
-        teardown_lock(&self.focused_context).take();
-        let states = std::mem::take(&mut *teardown_lock(&self.contexts));
-        for state in states {
-            cleanup(|| state.stop());
+        if self.tearing_down.swap(true, Ordering::AcqRel) {
+            return;
         }
-        let keys = teardown_lock(&self.keystroke_mgr).take();
-        let tid = teardown_lock(&self.keystroke_client_id).take();
+        struct Reset<'a>(&'a AtomicBool);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _reset = Reset(&self.tearing_down);
+        if !self.teardown_pending.swap(true, Ordering::AcqRel) {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
+        self.faulted.request_maintenance();
+        use boundary::{cleanup, try_teardown};
+        let states = match try_teardown(&self.contexts) {
+            Some(states) => states.clone(),
+            None => return,
+        };
+        for state in &states {
+            if !state.stop() {
+                return;
+            }
+        }
+        // Acquire every service lock before extracting anything. A reentrant
+        // call leaves all resources owned and retries on the apartment timer.
+        let extracted = (|| {
+            let mut bar = try_teardown(&self.language_bar)?;
+            let mut rpc = try_teardown(&self.rpc)?;
+            let mut window = try_teardown(&self.update_window)?;
+            let mut tested = try_teardown(&self.tested_key)?;
+            let mut pending = try_teardown(&self.pending_edit)?;
+            let mut atom = try_teardown(&self.display_attribute_atom)?;
+            let mut focus = try_teardown(&self.focused_context)?;
+            let mut contexts = try_teardown(&self.contexts)?;
+            let mut keys = try_teardown(&self.keystroke_mgr)?;
+            let mut tid = try_teardown(&self.keystroke_client_id)?;
+            let mut cookie = try_teardown(&self.thread_mgr_event_sink_cookie)?;
+            let mut focus_cookie = try_teardown(&self.thread_focus_sink_cookie)?;
+            let mut manager = try_teardown(&self.thread_mgr)?;
+            tested.take();
+            atom.take();
+            focus.take();
+            Some((
+                bar.take(),
+                std::mem::take(&mut *rpc),
+                window.take(),
+                std::mem::take(&mut *pending),
+                std::mem::take(&mut *contexts),
+                keys.take(),
+                tid.take(),
+                cookie.take(),
+                focus_cookie.take(),
+                manager.take(),
+            ))
+        })();
+        let Some((
+            bar,
+            mut rpc,
+            window,
+            pending,
+            contexts,
+            keys,
+            tid,
+            cookie,
+            focus_cookie,
+            manager,
+        )) = extracted
+        else {
+            return;
+        };
+        self.edit_requested.store(false, Ordering::Release);
+        cleanup(|| drop(bar));
+        cleanup(|| rpc.stop());
+        cleanup(|| drop(pending));
+        cleanup(|| drop(contexts));
         cleanup(|| {
             if let (Some(keys), Some(tid)) = (keys, tid) {
                 unsafe {
@@ -149,9 +208,6 @@ impl TextService {
                 }
             }
         });
-        let cookie = teardown_lock(&self.thread_mgr_event_sink_cookie).take();
-        let focus_cookie = teardown_lock(&self.thread_focus_sink_cookie).take();
-        let manager = teardown_lock(&self.thread_mgr).take();
         cleanup(|| {
             if let (Some(manager), Some(cookie)) = (manager, cookie) {
                 if let Ok(source) = manager.cast::<ITfSource>() {
@@ -164,6 +220,9 @@ impl TextService {
                 }
             }
         });
+        self.teardown_pending.store(false, Ordering::Release);
+        self.faulted.set_window(0);
+        cleanup(|| drop(window));
     }
 
     pub(super) fn start_update_window(&self, session: IUnknown) -> Result<()> {
@@ -173,6 +232,24 @@ impl TextService {
         // explicitly released by Deactivate before any service state is freed.
         let window = update_window::UpdateWindow::new(move || unsafe {
             let service = &*service;
+            if service.teardown_pending.load(Ordering::Acquire) {
+                service.deactivate_internal();
+                return;
+            }
+            service.faulted.retry_report();
+            if let Ok(states) = service.lock(&service.contexts).map(|states| states.clone()) {
+                for state in states {
+                    if !state.alive.load(Ordering::Acquire) {
+                        let _ = service.remove_context(&state.context);
+                    }
+                }
+            }
+            if service.faulted.load(Ordering::Acquire) {
+                if boundary::guard(None, || service.refresh_language_bar()).is_err() {
+                    service.faulted.request_maintenance();
+                }
+                return;
+            }
             let _ = boundary::guard(Some(&service.faulted), || {
                 if !service.activated.load(Ordering::Acquire) {
                     return Ok(());
@@ -183,6 +260,7 @@ impl TextService {
                 Ok(())
             });
         })?;
+        self.faulted.set_window(window.hwnd.0 as usize);
         self.lock(&self.rpc)?
             .set_update_window(window.hwnd.0 as usize);
         let states = self.lock(&self.contexts)?.clone();

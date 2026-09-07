@@ -4,7 +4,7 @@ use std::{
     process::Stdio,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use tokio::io::AsyncReadExt;
@@ -24,6 +24,7 @@ pub struct Preview {
 pub struct UiMailbox {
     pending: Mutex<Preview>,
     window: AtomicUsize,
+    wake_pending: AtomicBool,
 }
 
 impl UiMailbox {
@@ -43,11 +44,16 @@ impl UiMailbox {
             state.bytes -= state.chunks.pop_front().unwrap().len();
             state.omitted = true;
         }
+        drop(state);
+        self.notify();
     }
     pub fn finish(&self, done: DeployComplete) {
         self.pending.lock().unwrap().complete = Some(done);
+        self.notify();
+    }
+    fn notify(&self) {
         let hwnd = self.window.load(Ordering::Acquire);
-        if hwnd != 0 {
+        if hwnd != 0 && !self.wake_pending.swap(true, Ordering::AcqRel) {
             use crate::ui_bindings::Windows::Win32::*;
             let posted = unsafe {
                 PostMessageW(
@@ -58,12 +64,15 @@ impl UiMailbox {
                 )
             };
             if !posted.as_bool() {
-                diagnostic("could not post completion to UI; timer will consume it");
+                self.wake_pending.store(false, Ordering::Release);
+                diagnostic("could not post deployment update; next UI message will consume it");
             }
         }
     }
     pub fn take(&self) -> Preview {
-        std::mem::take(&mut *self.pending.lock().unwrap())
+        let mut state = self.pending.lock().unwrap();
+        self.wake_pending.store(false, Ordering::Release);
+        std::mem::take(&mut *state)
     }
 }
 

@@ -1,4 +1,5 @@
 use std::{
+    os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
@@ -31,6 +32,15 @@ static LOGGER: OnceLock<ComponentLogger> = OnceLock::new();
 static TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 static BROKER_STATE: OnceLock<Arc<Mutex<BrokerState>>> = OnceLock::new();
+static MONITOR_WAKE: OnceLock<OwnedHandle> = OnceLock::new();
+
+fn wake_monitor() {
+    if let Some(event) = MONITOR_WAKE.get() {
+        unsafe {
+            let _ = SetEvent(HANDLE(event.as_raw_handle()));
+        }
+    }
+}
 
 struct BrokerState {
     settings: crate::settings_rpc::SettingsStore,
@@ -57,6 +67,11 @@ impl Drop for TrayIcon {
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let event = unsafe { CreateEventW(None, false, false, None) };
+    if event.0.is_null() {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let _ = MONITOR_WAKE.set(unsafe { OwnedHandle::from_raw_handle(event.0) });
     let _instance = match SingleInstance::acquire("broker") {
         Ok(instance) => instance,
         Err(error) => {
@@ -109,6 +124,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Ok(tray) => tray,
         Err(error) => {
             stop_monitor.store(true, Ordering::Release);
+            wake_monitor();
             let _ = monitor.join();
             shutdown_broker(&state);
             return Err(error);
@@ -117,6 +133,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     message_loop();
 
     stop_monitor.store(true, Ordering::Release);
+    wake_monitor();
     STOPPING.store(true, Ordering::Release);
     let _ = monitor.join();
     // Operations observe STOPPING while awaiting deployment/lock release.
@@ -170,7 +187,6 @@ fn shutdown_broker(state: &Mutex<BrokerState>) {
 
 fn monitor_children(state: Arc<Mutex<BrokerState>>, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(500));
         let mut state = state.lock().expect("broker state mutex poisoned");
         if stop.load(Ordering::Acquire) || state.operation == Operation::Shutdown {
             break;
@@ -180,6 +196,54 @@ fn monitor_children(state: Arc<Mutex<BrokerState>>, stop: Arc<AtomicBool>) {
         }
         if state.operation.monitors_renderer() {
             monitor_child(&mut state, false);
+        }
+        // Duplicate child handles while ownership is locked; operations can then
+        // move/drop Child without invalidating this wait set.
+        let mut handles = Vec::new();
+        let mut timeout = INFINITE as u32;
+        for (enabled, child, retry) in [
+            (
+                state.operation.monitors_server(),
+                &state.server,
+                &state.server_retry,
+            ),
+            (
+                state.operation.monitors_renderer(),
+                &state.renderer,
+                &state.renderer_retry,
+            ),
+        ] {
+            if !enabled {
+                continue;
+            }
+            if let Some(child) = child {
+                match unsafe { BorrowedHandle::borrow_raw(child.as_raw_handle()) }
+                    .try_clone_to_owned()
+                {
+                    Ok(handle) => handles.push(handle),
+                    Err(_) => timeout = timeout.min(1000), // bounded retry only after an OS error
+                }
+            } else {
+                timeout = timeout.min(
+                    retry
+                        .remaining(Instant::now())
+                        .as_millis()
+                        .max(1)
+                        .min(u32::MAX as u128 - 1) as u32,
+                );
+            }
+        }
+        drop(state);
+        let mut raw = vec![HANDLE(
+            MONITOR_WAKE
+                .get()
+                .expect("monitor event initialized")
+                .as_raw_handle(),
+        )];
+        raw.extend(handles.iter().map(|handle| HANDLE(handle.as_raw_handle())));
+        let result = unsafe { WaitForMultipleObjects(&raw, false, timeout) };
+        if result == WAIT_FAILED as u32 {
+            break;
         }
     }
 }
@@ -206,6 +270,7 @@ fn monitor_child(state: &mut BrokerState, server: bool) {
                 return;
             }
             Ok(Some(status)) => {
+                retry.healthy(now);
                 deployment_diagnostic(&state.directory, &format!("{executable} exited: {status}"));
                 *slot = None;
                 retry.failed(now);
@@ -304,16 +369,11 @@ fn shutdown_component(child: &mut Option<Child>, pipe: String, reason: &str) -> 
     if !response.accepted {
         return Err(response.message);
     }
-    for _ in 0..50 {
-        if server
-            .try_wait()
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
-            *child = None;
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(100));
+    if unsafe { WaitForSingleObject(HANDLE(server.as_raw_handle()), 5000) } == WAIT_OBJECT_0 as u32
+    {
+        server.wait().map_err(|error| error.to_string())?;
+        *child = None;
+        return Ok(());
     }
     Err("component did not exit after shutdown acknowledgement".to_owned())
 }
@@ -638,6 +698,7 @@ fn begin_deploy(window: HWND, operation: Operation) {
             let mut owned = {
                 let mut shared = state.lock().unwrap_or_else(|e| e.into_inner());
                 shared.operation = operation;
+                wake_monitor();
                 BrokerState {
                     settings: shared.settings.clone(),
                     directory: shared.directory.clone(),
@@ -675,6 +736,7 @@ fn begin_deploy(window: HWND, operation: Operation) {
                     shared.renderer_retry.started(Instant::now());
                 }
                 shared.operation = Operation::Idle;
+                wake_monitor();
             }
             *DEPLOY_RESULT.lock().unwrap() = Some(result);
             post_deploy_complete(HWND(hwnd as *mut _));

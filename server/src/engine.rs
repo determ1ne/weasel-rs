@@ -29,11 +29,13 @@ pub(crate) enum Work {
         connection: Arc<RpcConnection>,
         alive: Arc<AtomicBool>,
         envelope: Envelope,
+        _request: weasel_common::rpc::RequestLease,
     },
     Renderer(RendererEvent),
 }
 
 struct ClientSession {
+    connection_id: u64,
     connection: Arc<RpcConnection>,
     alive: Arc<AtomicBool>,
     session: librime::RimeSession,
@@ -51,6 +53,7 @@ pub(crate) struct Engine {
     _data_lock: crate::data_lock::DataLock,
     active_client: Option<u64>,
     renderer: RendererPublisher,
+    next_session: u64,
 }
 
 fn reply(connection: &RpcConnection, request_id: u64, response: KeyEventResponse) {
@@ -90,6 +93,7 @@ impl Engine {
             _data_lock: data_lock,
             active_client: None,
             renderer,
+            next_session: 1,
         })
     }
 
@@ -101,6 +105,108 @@ impl Engine {
         envelope: Envelope,
     ) {
         if !alive.load(Ordering::Acquire) {
+            return;
+        }
+        let connection_id = client_id;
+        let context = match envelope.payload.as_ref() {
+            Some(Payload::OpenInput(v)) => v.token.as_ref(),
+            Some(Payload::KeyEvent(v)) => v.token.as_ref(),
+            Some(Payload::ContextCommand(v)) => v.token.as_ref(),
+            _ => None,
+        };
+        if !valid_token(context) {
+            failure(
+                &connection,
+                envelope.request_id,
+                FailureCode::InvalidArgument,
+                "input token required",
+            );
+            return;
+        }
+        let context_id = context.unwrap().context_id;
+        let existing = self.clients.iter().find_map(|(id, client)| {
+            (client.connection_id == connection_id
+                && client
+                    .route
+                    .token
+                    .as_ref()
+                    .is_some_and(|t| t.context_id == context_id))
+            .then_some(*id)
+        });
+        let client_id = match existing {
+            Some(id) => id,
+            None if matches!(envelope.payload, Some(Payload::OpenInput(_))) => {
+                if self
+                    .clients
+                    .values()
+                    .filter(|c| c.connection_id == connection_id)
+                    .count()
+                    >= 32
+                {
+                    failure(
+                        &connection,
+                        envelope.request_id,
+                        FailureCode::InvalidArgument,
+                        "too many input contexts",
+                    );
+                    return;
+                }
+                let id = self.next_session;
+                self.next_session = self
+                    .next_session
+                    .checked_add(1)
+                    .expect("session identity exhausted");
+                id
+            }
+            None => {
+                failure(
+                    &connection,
+                    envelope.request_id,
+                    FailureCode::InvalidArgument,
+                    "OpenInput required before input",
+                );
+                return;
+            }
+        };
+        if let Some(Payload::ContextCommand(command)) = envelope.payload.as_ref()
+            && command.action == weasel_common::message::ContextAction::Destroy as i32
+        {
+            if let Some(client) = self.clients.get_mut(&client_id)
+                && client.route.observe(command.token.as_ref())
+            {
+                let response = KeyEventResponse {
+                    token: command.token,
+                    revision: client.revision + 1,
+                    ..Default::default()
+                };
+                reply(&connection, envelope.request_id, response);
+                if self.active_client == Some(client_id) {
+                    self.renderer.publish(RenderSnapshot {
+                        session_id: client_id,
+                        token: command.token,
+                        revision: client.revision + 1,
+                        ..Default::default()
+                    });
+                    self.active_client = None;
+                }
+                self.clients.remove(&client_id);
+                connection.forget_layout(context_id);
+                connection.set_input_state(
+                    self.clients
+                        .values()
+                        .any(|c| c.connection_id == connection_id && c.route.focused),
+                    self.clients
+                        .values()
+                        .any(|c| c.connection_id == connection_id && c.last_response.composing),
+                );
+            } else {
+                failure(
+                    &connection,
+                    envelope.request_id,
+                    FailureCode::StaleContext,
+                    "stale destroy context",
+                );
+            }
             return;
         }
         // Only explicit OpenInput allocates a native session. Reopening is idempotent
@@ -142,6 +248,7 @@ impl Engine {
                 self.clients.insert(
                     client_id,
                     ClientSession {
+                        connection_id,
                         connection: connection.clone(),
                         alive,
                         session,
@@ -366,6 +473,7 @@ impl Engine {
             return;
         };
         if self.active_client != Some(event.session_id)
+            || !client.alive.load(Ordering::Acquire)
             || !client.route.accepts_ui(&event, client.revision)
         {
             return;
@@ -385,21 +493,26 @@ impl Engine {
 
 impl Processor<Work> for Engine {
     fn process(&mut self, work: Work) {
-        self.idle();
         match work {
             Work::Message {
                 client_id,
                 connection,
                 alive,
                 envelope,
-            } => self.message(client_id, connection, alive, envelope),
+                _request,
+            } => {
+                self.message(client_id, connection, alive, envelope);
+                // Reclassify input before dropping the request's eviction guard.
+                self.idle();
+                drop(_request);
+            }
             Work::Renderer(event) => self.renderer_event(event),
         }
     }
 
     fn idle(&mut self) {
         // Poll the active connection's latest geometry, never the input FIFO.
-        // idle() also runs every 20ms, so a final drag position needs no next key.
+        // Layout arrival explicitly wakes the engine, including the final drag position.
         if let Some(client_id) = self.active_client
             && let Some(client) = self.clients.get_mut(&client_id)
             && client.alive.load(Ordering::Acquire)
@@ -433,6 +546,19 @@ impl Processor<Work> for Engine {
         });
         self.clients
             .retain(|_, client| client.alive.load(Ordering::Acquire));
+        let mut connections = HashMap::new();
+        for client in self.clients.values() {
+            let entry = connections.entry(client.connection_id).or_insert((
+                &client.connection,
+                false,
+                false,
+            ));
+            entry.1 |= client.route.focused;
+            entry.2 |= client.last_response.composing;
+        }
+        for (connection, focused, composing) in connections.values() {
+            connection.set_input_state(*focused, *composing);
+        }
         if let Some(client_id) = self.active_client {
             if !self.clients.contains_key(&client_id) {
                 self.active_client = None;

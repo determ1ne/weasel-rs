@@ -29,6 +29,7 @@ impl LayoutSchedule {
 impl TextService {
     pub(super) fn request_composition_layout(&self, state: &Arc<ContextState>) -> Result<()> {
         if !self.activated.load(Ordering::Acquire)
+            || state.suspended.load(Ordering::Acquire)
             || self.faulted.load(Ordering::Acquire)
             || *self.lock(&self.focused_context)? != Some(state.id)
             || self.lock(&state.composition)?.is_none()

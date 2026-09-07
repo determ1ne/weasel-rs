@@ -4,7 +4,6 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
-        mpsc::SyncSender,
     },
     time::Duration,
 };
@@ -48,12 +47,19 @@ impl RendererPublisher {
 
 pub(crate) fn spawn(
     mut snapshots: watch::Receiver<Option<RenderSnapshot>>,
-    engine: SyncSender<Work>,
+    engine: crate::worker::Sender<Work>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            if snapshots.borrow().is_none() && snapshots.changed().await.is_err() {
-                return;
+            if snapshots
+                .borrow()
+                .as_ref()
+                .is_none_or(|snapshot| !snapshot.visible)
+            {
+                if snapshots.changed().await.is_err() {
+                    return;
+                }
+                continue;
             }
             let client = match RpcClient::connect_as(
                 default_renderer_pipe_name(),
@@ -96,9 +102,7 @@ pub(crate) fn spawn(
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => (),
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
-                    _ = tokio::time::sleep(Duration::from_millis(250)) => {
-                        if !client.is_connected() { break; }
-                    }
+                    _ = client.disconnected() => break,
                 }
             }
             client.disconnect().await;

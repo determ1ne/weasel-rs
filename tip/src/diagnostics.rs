@@ -39,11 +39,14 @@ struct Recorder {
     id: usize,
     events: Mutex<VecDeque<Event>>,
     first_fault: Mutex<Option<Event>>,
+    saved: Arc<AtomicBool>,
 }
 
 pub(crate) struct FaultState {
     flag: AtomicBool,
     recorder: Arc<Recorder>,
+    window: AtomicUsize,
+    report_attempts: AtomicUsize,
 }
 
 pub(crate) struct TrackedGuard<'a, T> {
@@ -88,11 +91,14 @@ impl FaultState {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             events: Mutex::new(VecDeque::with_capacity(CAPACITY)),
             first_fault: Mutex::new(None),
+            saved: Arc::new(AtomicBool::new(false)),
         });
         let _ = CURRENT.try_with(|current| *current.borrow_mut() = Arc::downgrade(&recorder));
         Self {
             flag: AtomicBool::new(false),
             recorder,
+            window: AtomicUsize::new(0),
+            report_attempts: AtomicUsize::new(0),
         }
     }
 
@@ -135,7 +141,46 @@ impl FaultState {
         if let Ok(mut first) = self.recorder.first_fault.try_lock() {
             *first = Some(fault.clone());
         }
-        self.recorder.save(Some(fault), None);
+        self.retry_report();
+        self.request_maintenance();
+    }
+
+    pub(crate) fn set_window(&self, hwnd: usize) {
+        self.window.store(hwnd, Ordering::Release);
+    }
+    pub(crate) fn request_maintenance(&self) {
+        let hwnd = self.window.load(Ordering::Acquire);
+        if hwnd != 0 {
+            unsafe {
+                let _ = crate::bindings::SetTimer(
+                    Some(crate::bindings::HWND(hwnd as *mut _)),
+                    crate::update_window::MAINTENANCE_TIMER,
+                    250,
+                    None,
+                );
+            }
+        }
+    }
+    pub(crate) fn retry_report(&self) {
+        if cfg!(test)
+            || !self.load(Ordering::Acquire)
+            || self.recorder.saved.load(Ordering::Acquire)
+        {
+            return;
+        }
+        if self.report_attempts.fetch_add(1, Ordering::AcqRel) >= 4 {
+            return;
+        }
+        if let Some(first) = self
+            .recorder
+            .first_fault
+            .try_lock()
+            .ok()
+            .and_then(|v| v.clone())
+        {
+            self.recorder.save(Some(first), None);
+        }
+        self.request_maintenance();
     }
 }
 
@@ -182,6 +227,7 @@ impl Recorder {
         // Rust epilogue/TLS destructors. Never join from a host callback.
         let lease = crate::module::ModuleLease::new();
         let id = self.id;
+        let report_saved = self.saved.clone();
         let slot = id % 4 * 2 + usize::from(dialog.is_some());
         let fault = fault.or_else(|| self.first_fault.try_lock().ok().and_then(|v| v.clone()));
         let thread = std::thread::Builder::new()
@@ -236,6 +282,7 @@ impl Recorder {
                         .is_ok()
                         {
                             saved = Some(dir.join(format!("tip-{}-{slot}.log", std::process::id())));
+                            if dialog.is_none() { report_saved.store(true, Ordering::Release); }
                             break;
                         }
                     }
@@ -302,6 +349,26 @@ pub(crate) fn show_dialog(diagnostics: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn injected_faults_stay_in_memory_and_preserve_first_cause() {
+        let fault = FaultState::new(false);
+        fault.mark("first", 1);
+        fault.mark("second", 2);
+        assert_eq!(
+            fault
+                .recorder
+                .first_fault
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .kind,
+            "first"
+        );
+        assert_eq!(fault.report_attempts.load(Ordering::Acquire), 0);
+        assert!(!fault.recorder.saved.load(Ordering::Acquire));
+    }
 
     #[test]
     fn report_is_bounded_and_rotation_preserves_other_files() {

@@ -36,6 +36,10 @@ fn main() {
         .input_default()
         .output(&bindings)
         .filters([
+            "Windows.Win32.E_PENDING",
+            "Windows.Win32.SetTimer",
+            "Windows.Win32.KillTimer",
+            "Windows.Win32.WM_TIMER",
             "Windows.Win32.OutputDebugStringW",
             "Windows.Win32.WaitForSingleObject",
             "Windows.Win32.WAIT_OBJECT_0",

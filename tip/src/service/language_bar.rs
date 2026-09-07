@@ -103,6 +103,7 @@ impl LanguageBar {
             mode_known: AtomicBool::new(false),
             connected: AtomicBool::new(true),
             available: AtomicBool::new(false),
+            suspended: AtomicBool::new(false),
             light_background: AtomicBool::new(taskbar_is_light()),
             _module: ModuleLease::new(),
         });
@@ -116,7 +117,10 @@ impl LanguageBar {
         context: Option<&Arc<ContextState>>,
         ascii: Option<bool>,
         connection_failed: bool,
+        suspended: bool,
     ) -> Result<()> {
+        let suspended_changed =
+            self.button.suspended.swap(suspended, Ordering::AcqRel) != suspended;
         {
             let mut target = self
                 .button
@@ -125,10 +129,10 @@ impl LanguageBar {
                 .map_err(|_| Error::from_hresult(E_FAIL))?;
             *target = context.map(Arc::downgrade);
         }
-        let available = context.is_some();
+        let available = context.is_some() && !suspended;
         // Unknown is neither English nor a connection failure. Only the
         // focused context's current epoch may supply a known input mode.
-        let connected = !connection_failed;
+        let connected = !connection_failed && !suspended;
         let connection_changed =
             self.button.connected.swap(connected, Ordering::AcqRel) != connected;
         let known = ascii.is_some();
@@ -143,7 +147,8 @@ impl LanguageBar {
             .light_background
             .swap(light_background, Ordering::AcqRel)
             != light_background;
-        let changed = known_changed
+        let changed = suspended_changed
+            || known_changed
             || mode_changed
             || connection_changed
             || availability_changed
@@ -168,15 +173,23 @@ impl LanguageBar {
     }
 }
 
+impl LanguageBar {
+    fn suspend(&self) -> Result<()> {
+        self.update(None, None, true, true)
+    }
+}
+
 impl Drop for LanguageBar {
     fn drop(&mut self) {
         self.button.available.store(false, Ordering::Release);
-        boundary::teardown_lock(&self.button.target).take();
+        if let Some(mut target) = boundary::try_teardown(&self.button.target) {
+            target.take();
+        }
         let item: ITfLangBarItemButton = self.button.to_interface();
         unsafe {
             let _ = self.manager.RemoveItem(&item);
         }
-        let sink = boundary::teardown_lock(&self.button.sink).take();
+        let sink = boundary::try_teardown(&self.button.sink).and_then(|mut sink| sink.take());
         drop(sink);
     }
 }
@@ -189,13 +202,16 @@ struct ModeButton {
     mode_known: AtomicBool,
     connected: AtomicBool,
     available: AtomicBool,
+    suspended: AtomicBool,
     light_background: AtomicBool,
     _module: ModuleLease,
 }
 
 impl ModeButton {
     fn text(&self) -> &'static str {
-        if !self.mode_known.load(Ordering::Acquire) {
+        if self.suspended.load(Ordering::Acquire) {
+            "!"
+        } else if !self.mode_known.load(Ordering::Acquire) {
             "…"
         } else if self.ascii.load(Ordering::Acquire) {
             "英"
@@ -228,11 +244,14 @@ impl ITfLangBarItem_Impl for ModeButton_Impl {
 
     fn GetStatus(&self) -> Result<u32> {
         boundary::guard(None, || {
-            Ok(if self.available.load(Ordering::Acquire) {
-                0
-            } else {
-                TF_LBI_STATUS_DISABLED as u32
-            })
+            Ok(
+                if self.available.load(Ordering::Acquire) || self.suspended.load(Ordering::Acquire)
+                {
+                    0
+                } else {
+                    TF_LBI_STATUS_DISABLED as u32
+                },
+            )
         })
     }
 
@@ -242,7 +261,9 @@ impl ITfLangBarItem_Impl for ModeButton_Impl {
 
     fn GetTooltipString(&self) -> Result<BSTR> {
         boundary::guard(None, || {
-            Ok(BSTR::from(if !self.connected.load(Ordering::Acquire) {
+            Ok(BSTR::from(if self.suspended.load(Ordering::Acquire) {
+                "输入服务已暂停；Shift＋右键可查看诊断信息"
+            } else if !self.connected.load(Ordering::Acquire) {
                 "无法连接到 Rime"
             } else if !self.mode_known.load(Ordering::Acquire) {
                 "正在同步输入模式"
@@ -261,7 +282,10 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
             if click == TF_LBI_CLK_RIGHT {
                 return show_broker_menu(point);
             }
-            if click != TF_LBI_CLK_LEFT || !self.available.load(Ordering::Acquire) {
+            if click != TF_LBI_CLK_LEFT
+                || !self.available.load(Ordering::Acquire)
+                || self.suspended.load(Ordering::Acquire)
+            {
                 return Ok(());
             }
             let target = self
@@ -285,7 +309,7 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
                 .rpc
                 .try_lock()
                 .map_err(|_| Error::from_hresult(E_FAIL))?;
-            if !rpc.context_command(command) {
+            if rpc.context_command(command).is_err() {
                 return Err(Error::from_hresult(E_FAIL));
             }
             Ok(())
@@ -427,6 +451,7 @@ mod tests {
             mode_known: AtomicBool::new(true),
             connected: AtomicBool::new(true),
             available: AtomicBool::new(false),
+            suspended: AtomicBool::new(false),
             light_background: AtomicBool::new(taskbar_is_light()),
             _module: ModuleLease::new(),
         })
@@ -451,6 +476,20 @@ mod tests {
         }
         button.ascii.store(false, Ordering::Release);
         assert_eq!(unsafe { item.GetText().unwrap() }, BSTR::from("中"));
+    }
+
+    #[test]
+    fn suspended_indicator_keeps_menu_access_and_disables_toggle() {
+        let button = button();
+        button.suspended.store(true, Ordering::Release);
+        button.available.store(false, Ordering::Release);
+        let item: ITfLangBarItemButton = button.to_interface();
+        unsafe {
+            assert_eq!(item.GetStatus().unwrap(), 0);
+            assert!(String::from_utf16_lossy(&item.GetTooltipString().unwrap()).contains("暂停"));
+            item.OnClick(TF_LBI_CLK_LEFT, POINT::default(), ptr::null())
+                .unwrap();
+        }
     }
 
     #[test]
@@ -569,6 +608,9 @@ impl TextService {
         let Some(bar) = bar else {
             return Ok(());
         };
+        if self.faulted.load(Ordering::Acquire) {
+            return bar.suspend();
+        }
         let focus = *self.lock(&self.focused_context)?;
         let state = self
             .lock(&self.contexts)?
@@ -590,7 +632,10 @@ impl TextService {
             None => (None, false),
         };
         // Presentation failures must not disable typing in the host.
-        if let Err(error) = bar.update(state.as_ref(), ascii, connection_failed) {
+        let suspended = state
+            .as_ref()
+            .is_some_and(|state| state.suspended.load(Ordering::Acquire));
+        if let Err(error) = bar.update(state.as_ref(), ascii, connection_failed, suspended) {
             self.lock(&self.rpc)?
                 .log("warn", format!("language bar update failed: {error}"));
         }

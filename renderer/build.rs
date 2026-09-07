@@ -34,6 +34,8 @@ fn main() {
             "Windows.Win32.DestroyWindow",
             "Windows.Win32.GetMessageW",
             "Windows.Win32.SetTimer",
+            "Windows.Win32.WaitForSingleObject",
+            "Windows.Win32.WAIT_OBJECT_0",
             "Windows.Win32.KillTimer",
             "Windows.Win32.TranslateMessage",
             "Windows.Win32.DispatchMessageW",

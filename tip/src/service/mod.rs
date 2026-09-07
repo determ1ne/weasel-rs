@@ -16,6 +16,7 @@ mod layout;
 mod lifecycle;
 mod range;
 mod response;
+mod safety;
 use display_attribute::{DisplayAttributeEnumerator, DisplayAttributeInfo};
 
 use std::{
@@ -60,6 +61,7 @@ enum EditStep {
     UpdateComposition,
     CommitComposition,
     InsertCommit,
+    DisconnectComposition,
     EndComposition { clear: bool, restart: bool },
 }
 
@@ -71,6 +73,7 @@ impl EditStep {
             Self::UpdateComposition => "UpdateComposition",
             Self::CommitComposition => "CommitComposition",
             Self::InsertCommit => "InsertCommit",
+            Self::DisconnectComposition => "DisconnectComposition",
             Self::EndComposition { .. } => "EndComposition",
         }
     }
@@ -86,6 +89,19 @@ struct PendingEdit {
 
 fn not_implemented<T>() -> Result<T> {
     Err(Error::from_hresult(E_NOTIMPL))
+}
+
+impl PendingEdit {
+    fn matches(&self) -> Result<bool> {
+        if matches!(self.step, EditStep::DisconnectComposition) {
+            return Ok(self.state.alive.load(Ordering::Acquire)
+                && !self.state.suspended.load(Ordering::Acquire)
+                && self.response.token.as_ref().is_some_and(|t| {
+                    t.generation == self.state.generation.load(Ordering::Acquire)
+                }));
+        }
+        self.state.matches(self.response.token.as_ref())
+    }
 }
 
 #[implement(
@@ -106,6 +122,9 @@ pub(crate) struct TextService {
     focused_context: Mutex<Option<u64>>,
     tested_key: Mutex<Option<key_event::TestedKey>>,
     activated: AtomicBool,
+    teardown_pending: AtomicBool,
+    tearing_down: AtomicBool,
+    edit_mutated: AtomicBool,
     faulted: crate::diagnostics::FaultState,
     generation: Arc<AtomicU64>,
     rpc: Arc<Mutex<RpcWorker>>,
@@ -137,7 +156,11 @@ impl TextService {
             Ok(guard) => Ok(self.faulted.track(guard, address)),
             Err(error) => {
                 let reason = match error {
-                    std::sync::TryLockError::WouldBlock => "lock.would_block",
+                    std::sync::TryLockError::WouldBlock => {
+                        self.faulted.event("lock.would_block", address);
+                        self.faulted.request_maintenance();
+                        return Err(Error::from_hresult(boundary::E_PENDING));
+                    }
                     std::sync::TryLockError::Poisoned(_) => "lock.poisoned",
                 };
                 self.faulted.mark(reason, address);
@@ -152,6 +175,9 @@ impl TextService {
             focused_context: Mutex::new(None),
             tested_key: Mutex::new(None),
             activated: AtomicBool::new(false),
+            teardown_pending: AtomicBool::new(false),
+            tearing_down: AtomicBool::new(false),
+            edit_mutated: AtomicBool::new(false),
             faulted: crate::diagnostics::FaultState::new(false),
             generation: Arc::new(AtomicU64::new(0)),
             rpc: Arc::new(Mutex::new(RpcWorker::default())),
@@ -210,8 +236,26 @@ mod tests {
     fn reentrant_state_access_fails_without_waiting() {
         let service = TextService::new();
         let guard = service.tested_key.lock().unwrap();
-        assert!(service.lock(&service.tested_key).is_err());
-        assert!(service.faulted.load(Ordering::Acquire));
+        assert_eq!(
+            service.lock(&service.tested_key).err().unwrap().code(),
+            boundary::E_PENDING
+        );
+        assert!(!service.faulted.load(Ordering::Acquire));
         drop(guard);
+        assert!(service.lock(&service.tested_key).is_ok());
+    }
+
+    #[test]
+    fn teardown_busy_state_is_retained_until_retry() {
+        let service = TextService::new();
+        service.activated.store(true, Ordering::Release);
+        let guard = service.tested_key.lock().unwrap();
+        service.deactivate_internal();
+        assert!(service.teardown_pending.load(Ordering::Acquire));
+        assert!(!service.activated.load(Ordering::Acquire));
+        assert!(!service.faulted.load(Ordering::Acquire));
+        drop(guard);
+        service.deactivate_internal();
+        assert!(!service.teardown_pending.load(Ordering::Acquire));
     }
 }

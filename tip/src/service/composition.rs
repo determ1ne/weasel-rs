@@ -15,13 +15,17 @@ impl TextService {
             self.faulted.event("edit.generation", token.generation);
         }
         if response::validate(&response).is_err() {
-            self.faulted.mark("response.invalid", response.revision);
+            if let Some(state) = self.find_context(&context)? {
+                self.quarantine(&state, "response.invalid", response.revision);
+            }
             return Ok(());
         }
         let Some(state) = self.find_context(&context)? else {
             return Ok(());
         };
-        if !state.matches(response.token.as_ref())? {
+        if !matches!(step, EditStep::DisconnectComposition)
+            && !state.matches(response.token.as_ref())?
+        {
             return Ok(());
         }
         let pending = PendingEdit {
@@ -40,7 +44,7 @@ impl TextService {
         {
             let mut queue = self.lock(&self.pending_edit)?;
             if queue.len() >= 64 {
-                self.faulted.mark("edit.queue_full", queue.len() as u64);
+                self.quarantine(&pending.state, "edit.queue_full", queue.len() as u64);
                 return Ok(());
             }
             if matches!(step, EditStep::ApplyResponse) {
@@ -60,13 +64,27 @@ impl TextService {
         if self.edit_requested.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        let generation = self.generation.load(Ordering::Acquire);
+        let ticket = self.edit_ticket.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut reservation = safety::EditReservation::new(self, ticket, generation);
         let pending = loop {
             let next = self.lock(&self.pending_edit)?.pop_front();
             let Some(pending) = next else {
                 self.edit_requested.store(false, Ordering::Release);
                 return Ok(());
             };
-            if pending.state.matches(pending.response.token.as_ref())? {
+            let matches = match pending.matches() {
+                Ok(matches) => matches,
+                Err(error) => {
+                    self.quarantine(
+                        &pending.state,
+                        "edit.prepare_failed",
+                        error.code().0 as u32 as u64,
+                    );
+                    return Err(error);
+                }
+            };
+            if matches {
                 break pending;
             }
         };
@@ -81,10 +99,9 @@ impl TextService {
 
         let context = pending.context.clone();
         let step = pending.step;
-        let generation = self.generation.load(Ordering::Acquire);
+        let state = pending.state.clone();
         self.active_edit_context
             .store(pending.state.id, Ordering::Release);
-        let ticket = self.edit_ticket.fetch_add(1, Ordering::AcqRel) + 1;
         self.faulted.event("edit.ticket", ticket);
         weasel_common::input_trace!(
             "edit.request ticket={} token={:?} revision={} step={}",
@@ -111,10 +128,8 @@ impl TextService {
         }
         match request {
             Err(error) => {
-                self.faulted
-                    .mark("edit.request_failed", error.code().0 as u32 as u64);
-                let discarded = std::mem::take(&mut *self.lock(&self.pending_edit)?);
-                drop(discarded);
+                self.quarantine(&state, "edit.request_failed", error.code().0 as u32 as u64);
+                self.discard_context_edits(state.id)?;
                 self.edit_requested.store(false, Ordering::Release);
                 self.lock(&self.rpc)?.log(
                     "error",
@@ -125,9 +140,8 @@ impl TextService {
                 );
             }
             Ok(hr) if hr.is_err() => {
-                self.faulted.mark("edit.session_failed", hr.0 as u32 as u64);
-                let discarded = std::mem::take(&mut *self.lock(&self.pending_edit)?);
-                drop(discarded);
+                self.quarantine(&state, "edit.session_failed", hr.0 as u32 as u64);
+                self.discard_context_edits(state.id)?;
                 self.edit_requested.store(false, Ordering::Release);
                 self.lock(&self.rpc)?.log(
                     "error",
@@ -137,7 +151,7 @@ impl TextService {
                     ),
                 );
             }
-            Ok(_) => {}
+            Ok(_) => reservation.hand_off(),
         }
         Ok(())
     }
@@ -160,8 +174,13 @@ impl TextService {
         let insert: ITfInsertAtSelection = context.cast()?;
         let range = unsafe { insert.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, ptr::null(), 0)? };
         let context_composition: ITfContextComposition = context.cast()?;
+        self.edit_mutated.store(true, Ordering::Release);
         let composition = unsafe { context_composition.StartComposition(ec, &range, sink)? };
         let previous = self.lock(&state.composition)?.replace(composition);
+        state.composition_epoch.store(
+            response.token.as_ref().map_or(0, |t| t.connection_epoch),
+            Ordering::Release,
+        );
         self.lock(&state.rpc)?.reset_layout();
         drop(previous);
         self.lock(&state.composition_text)?.clear();
@@ -226,6 +245,7 @@ impl TextService {
 
         let insert: ITfInsertAtSelection = context.cast()?;
         let utf16: Vec<u16> = response.commit_text.encode_utf16().collect();
+        self.edit_mutated.store(true, Ordering::Release);
         let range = unsafe {
             insert.InsertTextAtSelection(
                 ec,
@@ -310,6 +330,7 @@ impl TextService {
             }
             self.lock(&state.composition_text)?.clear();
             *self.lock(&state.composition_cursor)? = 0;
+            self.edit_mutated.store(true, Ordering::Release);
             let hr = unsafe { active.EndComposition(ec) };
             if hr.is_err() {
                 return Err(Error::from_hresult(hr));
@@ -384,6 +405,34 @@ impl TextService {
                 self.commit_composition(&context, &response, ec, &session)
             }
             EditStep::InsertCommit => self.insert_commit(&context, &response, ec, &session),
+            EditStep::DisconnectComposition => {
+                struct Reset<'a>(&'a AtomicBool);
+                impl Drop for Reset<'_> {
+                    fn drop(&mut self) {
+                        self.0.store(false, Ordering::Release);
+                    }
+                }
+                let _reset = Reset(&state.disconnect_requested);
+                // Preserve preedit as plain text, without committing a candidate,
+                // deleting host text, or restoring an obsolete selection.
+                let active = self.lock(&state.composition)?.clone();
+                if let Some(active) = active {
+                    let range = unsafe { active.GetRange()? };
+                    let owned = self.lock(&state.composition)?.take();
+                    drop(owned);
+                    self.clear_display_attribute_best_effort(&context, ec, &range);
+                    self.edit_mutated.store(true, Ordering::Release);
+                    unsafe {
+                        active.EndComposition(ec).ok()?;
+                    }
+                }
+                self.lock(&state.composition_text)?.clear();
+                *self.lock(&state.composition_cursor)? = 0;
+                let saved = self.lock(&state.host_selection)?.take();
+                drop(saved);
+                state.composition_epoch.store(0, Ordering::Release);
+                Ok(())
+            }
             EditStep::EndComposition { clear, restart } => {
                 self.end_composition(&context, &response, ec, clear, restart, &session)?;
                 if response.open_emoji_panel {

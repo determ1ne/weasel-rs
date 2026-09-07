@@ -5,6 +5,17 @@ use std::sync::{Mutex, MutexGuard, atomic::Ordering};
 use windows_core::{Error, Result};
 
 pub(crate) use crate::bindings::E_FAIL;
+pub(crate) use crate::bindings::E_PENDING;
+
+/// Non-blocking teardown acquisition. Poisoned state may be extracted only for
+/// disposal. Busy state must stay owned until a later apartment callback.
+pub(crate) fn try_teardown<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
 
 #[track_caller]
 pub(crate) fn guard<T>(
@@ -38,13 +49,6 @@ pub(crate) fn guard<T>(
         );
     }
     result
-}
-
-/// Poison recovery is ONLY for dismantling state, never for resuming input.
-pub(crate) fn teardown_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub(crate) fn cleanup(operation: impl FnOnce()) {

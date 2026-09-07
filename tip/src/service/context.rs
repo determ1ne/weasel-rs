@@ -10,9 +10,12 @@ pub(super) struct ContextState {
     identity: IUnknown,
     pub id: u64,
     pub alive: AtomicBool,
+    pub suspended: AtomicBool,
     pub generation: AtomicU64,
-    pub rpc: Mutex<RpcWorker>,
+    pub rpc: Arc<Mutex<RpcWorker>>,
     pub composition: Mutex<Option<ITfComposition>>,
+    pub composition_epoch: AtomicU64,
+    pub disconnect_requested: AtomicBool,
     pub composition_text: Mutex<String>,
     pub composition_cursor: Mutex<usize>,
     pub layout: Mutex<layout::LayoutSchedule>,
@@ -62,13 +65,30 @@ impl ContextState {
     }
 
     pub fn matches(&self, token: Option<&ContextToken>) -> Result<bool> {
-        Ok(self.alive.load(Ordering::Acquire) && token == Some(&self.token()?))
+        Ok(self.alive.load(Ordering::Acquire)
+            && !self.suspended.load(Ordering::Acquire)
+            && token == Some(&self.token()?))
     }
 
-    pub fn stop(&self) {
+    pub fn stop(&self) -> bool {
         self.alive.store(false, Ordering::Release);
+        if self.editing.load(Ordering::Acquire) {
+            return false;
+        }
         self.generation.fetch_add(1, Ordering::AcqRel);
-        let cookies = std::mem::take(&mut *boundary::teardown_lock(&self.cookies));
+        let resources = (|| {
+            let mut cookies = boundary::try_teardown(&self.cookies)?;
+            let mut composition = boundary::try_teardown(&self.composition)?;
+            let mut selection = boundary::try_teardown(&self.host_selection)?;
+            Some((
+                std::mem::take(&mut *cookies),
+                composition.take(),
+                selection.take(),
+            ))
+        })();
+        let Some((cookies, composition, selection)) = resources else {
+            return false;
+        };
         if let Ok(source) = self.context.cast::<ITfSource>() {
             for cookie in cookies {
                 unsafe {
@@ -76,18 +96,17 @@ impl ContextState {
                 }
             }
         }
-        let mut worker = std::mem::take(&mut *boundary::teardown_lock(&self.rpc));
-        worker.stop();
-        let composition = boundary::teardown_lock(&self.composition).take();
         drop(composition);
-        let selection = boundary::teardown_lock(&self.host_selection).take();
         drop(selection);
+        true
     }
 }
 
 impl Drop for ContextState {
     fn drop(&mut self) {
-        boundary::cleanup(|| self.stop());
+        boundary::cleanup(|| {
+            self.stop();
+        });
     }
 }
 
@@ -118,9 +137,12 @@ impl TextService {
             context,
             id: NEXT_CONTEXT.fetch_add(1, Ordering::AcqRel),
             alive: AtomicBool::new(true),
+            suspended: AtomicBool::new(false),
             generation: AtomicU64::new(1),
-            rpc: Mutex::new(RpcWorker::default()),
+            rpc: self.rpc.clone(),
             composition: Mutex::new(None),
+            composition_epoch: AtomicU64::new(0),
+            disconnect_requested: AtomicBool::new(false),
             composition_text: Mutex::new(String::new()),
             composition_cursor: Mutex::new(0),
             layout: Mutex::default(),
@@ -137,7 +159,6 @@ impl TextService {
                 let cookie = unsafe { source.AdviseSink(&iid, owner)? };
                 self.lock(&state.cookies)?.push(cookie);
             }
-            self.lock(&state.rpc)?.start();
             let hwnd = self
                 .lock(&self.update_window)?
                 .as_ref()
@@ -190,6 +211,15 @@ impl TextService {
         if was_focused {
             self.focus_context(None)?;
         }
+        if !state.stop() {
+            self.faulted.request_maintenance();
+            return Ok(());
+        }
+        let token = state.token()?;
+        let _ = self.lock(&self.rpc)?.context_command(ContextCommand {
+            token: Some(token),
+            action: ContextAction::Destroy as i32,
+        });
         let removed = {
             let mut states = self.lock(&self.contexts)?;
             states
@@ -197,7 +227,6 @@ impl TextService {
                 .position(|s| s.id == state.id)
                 .map(|index| states.remove(index))
         };
-        state.stop();
         if self.active_edit_context.load(Ordering::Acquire) == state.id {
             self.edit_ticket.fetch_add(1, Ordering::AcqRel);
             self.edit_requested.store(false, Ordering::Release);
@@ -223,6 +252,9 @@ impl TextService {
         action: ContextAction,
         invalidate: bool,
     ) -> Result<()> {
+        if state.suspended.load(Ordering::Acquire) && action != ContextAction::Blur {
+            return Ok(());
+        }
         if invalidate {
             state.reconciling.store(true, Ordering::Release);
             state.generation.fetch_add(1, Ordering::AcqRel);
@@ -236,17 +268,39 @@ impl TextService {
             token: Some(state.token()?),
             action: action as i32,
         };
-        if !self.lock(&state.rpc)?.context_command(command) {
-            self.faulted.mark("context.enqueue_failed", action as u64);
-            return Err(Error::from_hresult(boundary::E_FAIL));
+        let result = self.lock(&state.rpc)?.context_command(command);
+        if let Err(error) = result {
+            self.faulted.event(error.name(), action as u64);
+            // The worker invalidates its epoch on rejection. A failed context
+            // transition is not replayable while a composition may exist.
+            if self.lock(&state.composition)?.is_some() || invalidate {
+                self.quarantine(state, "context.transition_failed", action as u64);
+            }
+            return Ok(());
         }
         Ok(())
     }
 
     pub(super) fn drain_context_updates(&self, owner: &IUnknown) -> Result<()> {
         let states = self.lock(&self.contexts)?.clone();
+        // Remove dead destinations, but leave other contexts queued if one
+        // context's fallible TSF processing exits early during reentrancy.
+        let destinations: Vec<_> = states
+            .iter()
+            .filter(|state| {
+                state.alive.load(Ordering::Acquire) && !state.suspended.load(Ordering::Acquire)
+            })
+            .map(|state| state.id)
+            .collect();
+        self.lock(&self.rpc)?.retain_context_updates(&destinations);
         for state in states {
-            let responses = self.lock(&state.rpc)?.take_updates();
+            if state.suspended.load(Ordering::Acquire) || !state.alive.load(Ordering::Acquire) {
+                continue;
+            }
+            if self.cleanup_disconnected_composition(&state, owner)? {
+                continue;
+            }
+            let responses = self.lock(&self.rpc)?.take_context_updates(state.id);
             for response in responses {
                 let token = state.token()?;
                 if !state.alive.load(Ordering::Acquire)
@@ -298,6 +352,45 @@ impl TextService {
             }
         }
         Ok(())
+    }
+}
+
+impl TextService {
+    pub(super) fn cleanup_disconnected_composition(
+        &self,
+        state: &Arc<ContextState>,
+        owner: &IUnknown,
+    ) -> Result<bool> {
+        let epoch = state.token()?.connection_epoch;
+        if self.lock(&state.composition)?.is_none() {
+            return Ok(false);
+        }
+        if state.composition_epoch.load(Ordering::Acquire) == epoch {
+            return Ok(false);
+        }
+        if state.disconnect_requested.swap(true, Ordering::AcqRel) {
+            return Ok(true);
+        }
+        state.generation.fetch_add(1, Ordering::AcqRel);
+        let result = (|| {
+            self.lock(&self.tested_key)?.take();
+            self.discard_context_edits(state.id)?;
+            let response = KeyEventResponse {
+                token: Some(state.token()?),
+                ..Default::default()
+            };
+            self.request_edit_session(
+                state.context.clone(),
+                response,
+                EditStep::DisconnectComposition,
+                owner.clone(),
+            )
+        })();
+        if let Err(error) = result {
+            state.disconnect_requested.store(false, Ordering::Release);
+            return Err(error);
+        }
+        Ok(self.lock(&state.composition)?.is_some())
     }
 }
 

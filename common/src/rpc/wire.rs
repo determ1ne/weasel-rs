@@ -3,7 +3,7 @@ use super::RpcError;
 use crate::message::{self as m, envelope::Payload as P};
 use prost::Message;
 
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 fn invalid(text: &str) -> RpcError {
     RpcError::Protocol(text.into())
 }

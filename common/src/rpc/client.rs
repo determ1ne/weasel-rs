@@ -110,7 +110,7 @@ pub struct RpcClient {
     key_responses: broadcast::Sender<KeyEventResponse>,
     next_request_id: Arc<std::sync::atomic::AtomicU64>,
     tasks: Arc<ClientTasks>,
-    input_open: Arc<tokio::sync::Mutex<bool>>,
+    input_open: Arc<tokio::sync::Mutex<std::collections::HashSet<u64>>>,
 }
 
 impl RpcClient {
@@ -262,8 +262,13 @@ impl RpcClient {
             key_responses,
             next_request_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             tasks: Arc::new(ClientTasks(Mutex::new(vec![reader_task, writer_task]))),
-            input_open: Arc::new(tokio::sync::Mutex::new(false)),
+            input_open: Arc::default(),
         })
+    }
+
+    pub async fn disconnected(&self) {
+        let mut closed = self.closed.subscribe();
+        let _ = closed.wait_for(|closed| *closed).await;
     }
 
     pub fn is_connected(&self) -> bool {
@@ -405,9 +410,19 @@ impl RpcClient {
         &self,
         command: crate::message::ContextCommand,
     ) -> Result<KeyEventResponse, RpcError> {
+        let destroy = command.action == crate::message::ContextAction::Destroy as i32;
+        let id = command.token.as_ref().map(|t| t.context_id).unwrap_or(0);
+        if destroy && !self.input_open.lock().await.contains(&id) {
+            return Ok(KeyEventResponse::default());
+        }
         self.ensure_input_session(command.token).await?;
-        self.request_key_response(Payload::ContextCommand(command))
-            .await
+        let response = self
+            .request_key_response(Payload::ContextCommand(command))
+            .await;
+        if destroy && response.is_ok() {
+            self.input_open.lock().await.remove(&id);
+        }
+        response
     }
 
     async fn request_key_response(&self, payload: Payload) -> Result<KeyEventResponse, RpcError> {
@@ -426,7 +441,11 @@ impl RpcClient {
             return Err(RpcError::Disconnected);
         }
         let mut opened = self.input_open.lock().await;
-        if *opened {
+        let id = token
+            .as_ref()
+            .ok_or_else(|| RpcError::Protocol("input token required".into()))?
+            .context_id;
+        if opened.contains(&id) {
             return Ok(());
         }
         let reply = self
@@ -434,7 +453,7 @@ impl RpcClient {
             .await?;
         match reply.payload {
             Some(Payload::InputOpened(v)) if v.token == token => {
-                *opened = true;
+                opened.insert(id);
                 Ok(())
             }
             _ => Err(RpcError::UnexpectedResponse),

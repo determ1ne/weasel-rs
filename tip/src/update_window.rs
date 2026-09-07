@@ -5,6 +5,7 @@ use windows_core::{Error, Result};
 use windows_strings::{HSTRING, PCWSTR};
 
 pub const UPDATE_MESSAGE: u32 = WM_APP as u32 + 23;
+pub const MAINTENANCE_TIMER: usize = 1;
 const EMOJI_MESSAGE: u32 = UPDATE_MESSAGE + 1;
 const THEME_MESSAGE: u32 = UPDATE_MESSAGE + 2;
 
@@ -90,6 +91,7 @@ impl UpdateWindow {
 impl Drop for UpdateWindow {
     fn drop(&mut self) {
         unsafe {
+            let _ = KillTimer(Some(self.hwnd), MAINTENANCE_TIMER);
             SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
             let _ = DestroyWindow(self.hwnd);
             let _ = UnregisterClassW(
@@ -124,7 +126,15 @@ unsafe fn dispatch(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT 
     } else if message == EMOJI_MESSAGE {
         crate::keyboard::open_emoji_panel();
         LRESULT(0)
-    } else if message == UPDATE_MESSAGE || message == THEME_MESSAGE {
+    } else if message == UPDATE_MESSAGE
+        || message == THEME_MESSAGE
+        || (message == WM_TIMER as u32 && wp.0 == MAINTENANCE_TIMER)
+    {
+        if message == WM_TIMER as u32 {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), MAINTENANCE_TIMER);
+            }
+        }
         let callback = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const Callback;
         if !callback.is_null() {
             if message == THEME_MESSAGE {

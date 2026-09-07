@@ -344,9 +344,6 @@ unsafe fn run_initialized(guard: &mut Option<SingleInstance>) -> Result<(), Stri
     let mut theme = None;
     apply_theme(hwnd, &root, &settings, mica, &mut theme);
     layout.0.resize()?;
-    if SetTimer(Some(hwnd), 1, 200, None) == 0 {
-        return Err("无法创建部署 UI 定时器".into());
-    }
     let _ = ShowWindow(hwnd, SW_SHOW);
     // Bring the interactive window to the foreground
     let _ = SetForegroundWindow(hwnd);
@@ -371,10 +368,12 @@ unsafe fn run_initialized(guard: &mut Option<SingleInstance>) -> Result<(), Stri
     let mut message = MSG::default();
     let mut scroll_pending = false;
     while GetMessageW(&mut message, None, 0, 0).0 > 0 {
-        if message.hwnd == hwnd
-            && ((message.message == WM_TIMER as u32 && message.wParam.0 == 1)
-                || message.message == WM_DEPLOY_FINISHED)
         {
+            // Drain on native events, not a permanent polling timer. A short
+            // one-shot timer below only defers scrolling until XAML laid out text.
+            if message.hwnd == hwnd && message.message == WM_TIMER as u32 && message.wParam.0 == 1 {
+                let _ = KillTimer(Some(hwnd), 1);
+            }
             apply_theme(hwnd, &root, &settings, mica, &mut theme);
             if scroll_pending {
                 if let Ok(height) = scroll.ScrollableHeight() {
@@ -401,6 +400,7 @@ unsafe fn run_initialized(guard: &mut Option<SingleInstance>) -> Result<(), Stri
             if dirty {
                 let _ = log.SetText(&HSTRING::from(text.text()));
                 scroll_pending = true;
+                let _ = SetTimer(Some(hwnd), 1, 16, None);
             }
         }
         // The input layer uses native mouse messages, not XAML input.

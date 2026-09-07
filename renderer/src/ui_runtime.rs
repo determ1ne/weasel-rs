@@ -46,14 +46,15 @@ pub struct EventSender {
 }
 
 fn join_ui_thread(thread: thread::JoinHandle<()>, timeout: Duration) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + timeout;
-    while !thread.is_finished() {
-        if std::time::Instant::now() >= deadline {
-            // The standalone renderer exits on this error. Never interrupt a
-            // native call or make its RPC shutdown path join without a bound.
-            return Err("UI shutdown timed out; renderer process must exit".into());
-        }
-        thread::sleep(Duration::from_millis(10));
+    use std::os::windows::io::AsRawHandle;
+    let status = unsafe {
+        WaitForSingleObject(
+            HANDLE(thread.as_raw_handle()),
+            timeout.as_millis().min(u32::MAX as u128 - 1) as u32,
+        )
+    };
+    if status != WAIT_OBJECT_0 as u32 {
+        return Err("UI shutdown timed out or wait failed; renderer process must exit".into());
     }
     thread.join().map_err(|_| "UI thread panicked".to_owned())
 }
@@ -264,14 +265,6 @@ impl Drop for Apartment {
         }
     }
 }
-struct Timer(usize);
-impl Drop for Timer {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = KillTimer(None, self.0);
-        }
-    }
-}
 
 struct Presentation {
     backend: Box<dyn ThemeBackend>,
@@ -337,11 +330,6 @@ fn run_ui(
             last: None,
         };
         let thread_id = GetCurrentThreadId();
-        let timer = SetTimer(None, 0, 100, None);
-        if timer == 0 {
-            return Err("could not create UI shutdown timer".into());
-        }
-        let _timer = Timer(timer);
         let _appearance =
             crate::appearance::AppearanceSubscription::new(thread_id, WM_RENDERER_THEME);
         ready

@@ -155,7 +155,14 @@ impl TextService {
             return Ok(BOOL(0));
         };
         let state = self.ensure_context(context, &session)?;
+        if !state.alive.load(Ordering::Acquire) || state.suspended.load(Ordering::Acquire) {
+            self.lock(&self.tested_key)?.take();
+            return Ok(BOOL(0));
+        }
         self.focus_context(Some(state.clone()))?;
+        if self.cleanup_disconnected_composition(&state, &session)? {
+            return Ok(BOOL(0));
+        }
         let token = state.token()?;
         weasel_common::input_trace!(
             "key.identity context={} vk={} lp={} up={} test={} message_time={}",

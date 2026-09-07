@@ -44,6 +44,10 @@ impl RestartBackoff {
         now >= self.next
     }
 
+    pub fn remaining(&self, now: Instant) -> Duration {
+        self.next.saturating_duration_since(now)
+    }
+
     pub fn started(&mut self, now: Instant) {
         self.started = now;
     }

@@ -40,6 +40,27 @@ mod tests {
     }
 }
 
+impl Drop for ResponseEdit {
+    fn drop(&mut self) {
+        if let Some(pending) = self
+            .pending
+            .get_mut()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            let service = unsafe { &*self.service };
+            let _reservation = safety::EditReservation::new(service, self.ticket, self.generation);
+            if matches!(pending.step, EditStep::DisconnectComposition) {
+                pending
+                    .state
+                    .disconnect_requested
+                    .store(false, Ordering::Release);
+            }
+            service.faulted.request_maintenance();
+        }
+    }
+}
+
 impl ResponseEdit {
     pub(super) fn new(
         service: &TextService,
@@ -63,6 +84,7 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
         // TSF dispatches this session on the requesting apartment; _owner keeps
         // the pointed-to COM allocation alive throughout this callback.
         let service = unsafe { &*self.service };
+        let _reservation = safety::EditReservation::new(service, self.ticket, self.generation);
         let started = std::time::Instant::now();
         weasel_common::input_trace!(
             "edit.enter ticket={} activation={} cookie={:?}",
@@ -90,7 +112,29 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
                 return Ok(());
             };
             let state = pending.state.clone();
-            let valid = state.matches(pending.response.token.as_ref())?;
+            struct CleanupFlag<'a>(Option<&'a AtomicBool>);
+            impl Drop for CleanupFlag<'_> {
+                fn drop(&mut self) {
+                    if let Some(flag) = self.0 {
+                        flag.store(false, Ordering::Release);
+                    }
+                }
+            }
+            let _cleanup_flag = CleanupFlag(
+                matches!(pending.step, EditStep::DisconnectComposition)
+                    .then_some(&state.disconnect_requested),
+            );
+            let valid = match pending.matches() {
+                Ok(valid) => valid,
+                Err(error) => {
+                    service.quarantine(
+                        &state,
+                        "edit.validate_failed",
+                        error.code().0 as u32 as u64,
+                    );
+                    return Err(error);
+                }
+            };
             weasel_common::input_trace!(
                 "edit.apply ticket={} token={:?} revision={} step={} valid={}",
                 self.ticket,
@@ -100,6 +144,7 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
                 valid
             );
             let result = if valid {
+                service.edit_mutated.store(false, Ordering::Release);
                 state.editing.store(true, Ordering::Release);
                 struct Editing<'a>(&'a AtomicBool);
                 impl Drop for Editing<'_> {
@@ -121,14 +166,26 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
             if let Err(error) = &result {
                 // A failed write may already have changed the document. Do not
                 // replay the response or continue with dependent edit steps.
-                service
-                    .faulted
-                    .mark("edit.apply_failed", error.code().0 as u32 as u64);
-                let discarded = std::mem::take(&mut *service.lock(&service.pending_edit)?);
-                drop(discarded);
+                if service.edit_mutated.load(Ordering::Acquire) {
+                    service
+                        .faulted
+                        .mark("edit.write_uncertain", error.code().0 as u32 as u64);
+                } else {
+                    service.quarantine(
+                        &state,
+                        "edit.before_write_failed",
+                        error.code().0 as u32 as u64,
+                    );
+                }
+                if service.faulted.load(Ordering::Acquire) {
+                    let discarded = std::mem::take(&mut *service.lock(&service.pending_edit)?);
+                    drop(discarded);
+                } else {
+                    service.discard_context_edits(state.id)?;
+                }
                 service.lock(&service.rpc)?.log(
                     "error",
-                    format!("edit failed; service suspended: {error:?}"),
+                    format!("edit failed; input quarantined: {error:?}"),
                 );
             } else {
                 // Avoid recursively requesting another write lock from inside
@@ -151,7 +208,8 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
                         let error = Error::from_thread();
                         service
                             .faulted
-                            .mark("edit.post_failed", error.code().0 as u32 as u64);
+                            .event("edit.post_failed", error.code().0 as u32 as u64);
+                        service.faulted.request_maintenance();
                         return Err(error);
                     }
                 }

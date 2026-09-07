@@ -12,6 +12,8 @@ pub(crate) struct Telemetry {
     logs: mpsc::SyncSender<DeployLog>,
     completion: Arc<Mutex<Option<DeployComplete>>>,
     finished: mpsc::Receiver<()>,
+    wake: Option<std::thread::Thread>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Telemetry {
@@ -29,6 +31,8 @@ impl Telemetry {
         let completion = Arc::new(Mutex::new(None));
         let pending = completion.clone();
         let (finished_sender, finished) = mpsc::sync_channel(1);
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = closed.clone();
         let spawned = std::thread::Builder::new()
             .name("deploy-telemetry".into())
             .spawn(move || {
@@ -43,10 +47,19 @@ impl Telemetry {
                         }
                         break;
                     }
-                    let log = match receiver.recv_timeout(Duration::from_millis(20)) {
+                    let log = match receiver.try_recv() {
                         Ok(log) => log,
-                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        Err(mpsc::TryRecvError::Empty) => {
+                            if stopped.load(std::sync::atomic::Ordering::Acquire) {
+                                if pending.lock().unwrap().is_some() {
+                                    continue;
+                                }
+                                break;
+                            }
+                            std::thread::park();
+                            continue;
+                        }
+                        Err(mpsc::TryRecvError::Disconnected) => {
                             if pending.lock().unwrap().is_some() {
                                 continue;
                             }
@@ -71,6 +84,8 @@ impl Telemetry {
         }
         // Intentionally detach: an inherited stdout handle can block forever.
         Self {
+            wake: spawned.as_ref().ok().map(|thread| thread.thread().clone()),
+            closed,
             logs,
             completion,
             finished,
@@ -82,9 +97,15 @@ impl Telemetry {
             stream: stream.into(),
             text,
         });
+        if let Some(thread) = &self.wake {
+            thread.unpark();
+        }
     }
     pub fn finish(&self, done: DeployComplete) {
         *self.completion.lock().unwrap() = Some(done);
+        if let Some(thread) = &self.wake {
+            thread.unpark();
+        }
     }
 
     pub fn finish_and_wait(&self, done: DeployComplete) {
@@ -92,6 +113,16 @@ impl Telemetry {
         // An inherited pipe can stall forever; never join its writer thread.
         if self.finished.recv_timeout(Duration::from_secs(2)).is_err() {
             tracing::warn!("deployment completion could not be flushed before exit");
+        }
+    }
+}
+
+impl Drop for Telemetry {
+    fn drop(&mut self) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(thread) = &self.wake {
+            thread.unpark();
         }
     }
 }

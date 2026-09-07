@@ -17,7 +17,8 @@ impl TextService {
         };
         // Start/Update/End are separate write sessions. Do not interpret the
         // temporary empty range between our own steps as a host cancellation.
-        if state.editing.load(Ordering::Acquire)
+        if state.suspended.load(Ordering::Acquire)
+            || state.editing.load(Ordering::Acquire)
             || state.reconciling.load(Ordering::Acquire)
             || self.edit_requested.load(Ordering::Acquire)
             || self

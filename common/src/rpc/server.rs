@@ -106,7 +106,8 @@ pub struct RpcServer {
 
 /// A connected client/server RPC stream.
 pub struct RpcConnection {
-    layout: std::sync::Arc<std::sync::Mutex<Option<LayoutUpdate>>>,
+    activity: std::sync::Arc<super::activity::Activity>,
+    layout: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<LayoutUpdate>>>,
     incoming: Mutex<mpsc::Receiver<Result<Envelope, RpcError>>>,
     outgoing: mpsc::Sender<(Envelope, oneshot::Sender<Result<(), RpcError>>)>,
     closed: watch::Sender<bool>,
@@ -222,8 +223,12 @@ impl RpcConnection {
         let (closed, mut read_closed) = watch::channel(false);
         let mut write_closed = closed.subscribe();
         let reader_signal = closed.clone();
-        let layout = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let layout = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<
+            LayoutUpdate,
+        >::new()));
         let reader_layout = layout.clone();
+        let activity = std::sync::Arc::new(super::activity::Activity::default());
+        let reader_activity = activity.clone();
         let reader_task = tokio::spawn(async move {
             tokio::select! {
                 _ = read_closed.changed() => {}
@@ -242,16 +247,26 @@ impl RpcConnection {
                         };
                         let failed = result.is_err();
                         if let Ok(Envelope { payload: Some(Payload::LayoutUpdate(update)), .. }) = &result {
-                            *reader_layout.lock().unwrap_or_else(|p| p.into_inner()) = Some(update.clone());
+                            {
+                                let context_id = update.token.as_ref().map_or(0, |token| token.context_id);
+                                let mut latest = reader_layout.lock().unwrap_or_else(|p| p.into_inner());
+                                latest.retain(|v| v.token.as_ref().map_or(0, |t| t.context_id) != context_id);
+                                if latest.len() >= 32 { latest.pop_front(); }
+                                latest.push_back(update.clone());
+                            }
+                            reader_activity.notify();
                             continue;
                         }
+                        if result.is_ok() && !reader_activity.request() { break; }
                         if tx.send(result).await.is_err() || failed { break; }
                     }
                 } => {}
             }
             reader_signal.send_replace(true);
+            reader_activity.notify();
         });
         let writer_signal = closed.clone();
+        let writer_activity = activity.clone();
         let writer_task = tokio::spawn(async move {
             tokio::select! {
                 _ = write_closed.changed() => {}
@@ -267,14 +282,17 @@ impl RpcConnection {
                         let result = tokio::time::timeout(std::time::Duration::from_secs(2),
                             write_frame(&mut writer, &message)).await.unwrap_or(Err(RpcError::Timeout));
                         let failed = result.is_err();
+                        writer_activity.finish_write();
                         let _ = ack.send(result);
                         if failed { break; }
                     }
                 } => {}
             }
             writer_signal.send_replace(true);
+            writer_activity.notify();
         });
         Self {
+            activity,
             layout,
             incoming: Mutex::new(incoming),
             outgoing,
@@ -284,7 +302,51 @@ impl RpcConnection {
     }
 
     pub async fn recv(&self) -> Result<Option<Envelope>, RpcError> {
-        self.incoming.lock().await.recv().await.transpose()
+        Ok(self
+            .recv_tracked()
+            .await?
+            .map(|(envelope, _lease)| envelope))
+    }
+
+    pub async fn recv_tracked(&self) -> Result<Option<(Envelope, super::RequestLease)>, RpcError> {
+        Ok(self
+            .incoming
+            .lock()
+            .await
+            .recv()
+            .await
+            .transpose()?
+            .map(|envelope| (envelope, super::RequestLease(self.activity.clone()))))
+    }
+
+    pub fn set_notifier(&self, notify: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.activity.set_notifier(notify);
+    }
+    pub fn set_idle(&self, idle: bool) {
+        self.activity.set_idle(idle);
+    }
+    pub fn set_input_state(&self, focused: bool, composing: bool) {
+        self.activity.set_input_state(focused, composing);
+    }
+    pub fn reclaim_candidate(&self) -> Option<(u8, std::time::Instant)> {
+        self.activity.candidate()
+    }
+    pub fn reclaim(&self, expected: (u8, std::time::Instant)) -> bool {
+        self.activity.reclaim(expected, || {
+            self.closed.send_replace(true);
+        })
+    }
+    pub async fn disconnected(&self) {
+        let mut closed = self.closed.subscribe();
+        let _ = closed.wait_for(|closed| *closed).await;
+    }
+    pub fn stale_since(&self, age: std::time::Duration) -> Option<std::time::Instant> {
+        self.activity.stale_since(age)
+    }
+    pub fn evict_if_stale(&self, age: std::time::Duration) -> bool {
+        self.activity.evict(age, || {
+            self.closed.send_replace(true);
+        })
     }
 
     /// Layout events bypass recv()'s ordered input queue. Keep a future token's
@@ -294,14 +356,22 @@ impl RpcConnection {
         token: Option<&crate::message::ContextToken>,
     ) -> Option<LayoutUpdate> {
         let mut latest = self.layout.lock().unwrap_or_else(|p| p.into_inner());
-        if latest
-            .as_ref()
-            .is_some_and(|update| update.token.as_ref() == token)
-        {
-            latest.take()
-        } else {
-            None
-        }
+        let index = latest
+            .iter()
+            .position(|update| update.token.as_ref() == token)?;
+        latest.remove(index)
+    }
+
+    pub fn forget_layout(&self, context_id: u64) {
+        self.layout
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|update| {
+                update
+                    .token
+                    .as_ref()
+                    .is_none_or(|token| token.context_id != context_id)
+            });
     }
 
     /// Queue in wire order without waiting on a slow peer.
@@ -313,15 +383,19 @@ impl RpcConnection {
             return Err(RpcError::Disconnected);
         }
         let (tx, rx) = oneshot::channel();
-        self.outgoing
-            .try_send((envelope, tx))
-            .map_err(|error| match error {
+        if !self.activity.write() {
+            return Err(RpcError::Disconnected);
+        }
+        self.outgoing.try_send((envelope, tx)).map_err(|error| {
+            self.activity.finish_write();
+            match error {
                 mpsc::error::TrySendError::Full(_) => {
                     self.closed.send_replace(true);
                     RpcError::Overloaded
                 }
                 mpsc::error::TrySendError::Closed(_) => RpcError::Disconnected,
-            })?;
+            }
+        })?;
         Ok(rx)
     }
 

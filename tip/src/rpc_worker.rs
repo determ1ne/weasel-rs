@@ -25,6 +25,22 @@ static NEXT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 const COMMAND_TIMEOUT: Duration = Duration::from_millis(80);
 const STOP_TIMEOUT_MS: u32 = 100;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CommandError {
+    NotStarted,
+    Closed,
+    Full,
+}
+impl CommandError {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::NotStarted => "context.worker_absent",
+            Self::Closed => "context.queue_closed",
+            Self::Full => "context.queue_full",
+        }
+    }
+}
+
 enum RpcCommand {
     Log {
         level: String,
@@ -75,7 +91,9 @@ impl PushTarget {
         self.cancellation.fetch_add(1, Ordering::AcqRel);
         self.epoch.store(0, Ordering::Release);
         self.connection_failed.store(true, Ordering::Release);
-        crate::boundary::teardown_lock(&self.updates).clear();
+        if let Some(mut updates) = crate::boundary::try_teardown(&self.updates) {
+            updates.clear();
+        }
         self.notify();
     }
 
@@ -193,7 +211,13 @@ async fn connect_client(pipe_name: &str, target: &Arc<PushTarget>) -> Option<Con
     let push_client = client.clone();
     let updates = tokio::spawn(async move {
         loop {
-            let response = match updates.recv().await {
+            let response = match tokio::select! {
+                _ = push_client.disconnected() => {
+                    if target.current_epoch() == epoch { target.invalidate(); }
+                    break;
+                }
+                response = updates.recv() => response,
+            } {
                 Ok(response) => response,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -392,7 +416,7 @@ impl WorkerState {
     async fn handle_context(&mut self, mut command: ContextCommand) {
         let blur_only = matches!(
             ContextAction::try_from(command.action),
-            Ok(ContextAction::Blur)
+            Ok(ContextAction::Blur | ContextAction::Destroy)
         );
         // Focus establishes the session and queries its actual input mode in
         // this private runtime, never synchronously on the host COM thread.
@@ -550,17 +574,62 @@ impl RpcWorker {
             || (self.push.epoch.load(Ordering::Acquire) != 0 && self.push.current_epoch() == 0)
     }
 
-    pub fn context_command(&self, command: ContextCommand) -> bool {
+    pub fn context_command(&self, command: ContextCommand) -> Result<(), CommandError> {
         self.reset_layout();
-        self.commands
-            .as_ref()
-            .is_some_and(|sender| sender.try_send(RpcCommand::Context(command)).is_ok())
+        let result = match &self.commands {
+            None => Err(CommandError::NotStarted),
+            Some(sender) => sender
+                .try_send(RpcCommand::Context(command))
+                .map_err(|e| match e {
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => CommandError::Full,
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => CommandError::Closed,
+                }),
+        };
+        if result.is_err() {
+            self.push.invalidate();
+        }
+        result
     }
 
     pub fn set_update_window(&self, hwnd: usize) {
         self.push.window.store(hwnd, Ordering::Release);
     }
 
+    pub fn retain_context_updates(&self, contexts: &[u64]) {
+        if let Ok(mut updates) = self.push.updates.lock() {
+            updates.retain(|response| {
+                response
+                    .token
+                    .as_ref()
+                    .is_some_and(|token| contexts.contains(&token.context_id))
+            });
+        }
+    }
+
+    pub fn take_context_updates(&self, context_id: u64) -> Vec<KeyEventResponse> {
+        let Ok(mut updates) = self.push.updates.lock() else {
+            return Vec::new();
+        };
+        let epoch = self.push.current_epoch();
+        let mut selected = Vec::new();
+        updates.retain(|response| {
+            let Some(token) = response.token.as_ref() else {
+                return false;
+            };
+            if epoch == 0 || token.connection_epoch != epoch {
+                return false;
+            }
+            if token.context_id == context_id {
+                selected.push(response.clone());
+                false
+            } else {
+                true
+            }
+        });
+        selected
+    }
+
+    #[cfg(test)]
     pub fn take_updates(&self) -> Vec<KeyEventResponse> {
         match self.push.updates.lock() {
             Ok(mut updates) => {
@@ -671,6 +740,43 @@ impl Drop for RpcWorker {
 mod tests {
     use super::*;
     use weasel_common::rpc::RpcServer;
+
+    #[test]
+    fn shared_worker_preserves_other_context_replies() {
+        let worker = RpcWorker::default();
+        worker.push.epoch.store(1, Ordering::Release);
+        let a = update(1);
+        let mut b = a.clone();
+        b.token.as_mut().unwrap().context_id = 2;
+        assert!(enqueue_update(&worker.push, 1, a));
+        assert!(enqueue_update(&worker.push, 1, b));
+        assert_eq!(worker.take_context_updates(1).len(), 1);
+        assert_eq!(worker.take_context_updates(2).len(), 1);
+        assert!(worker.take_updates().is_empty());
+    }
+
+    #[test]
+    fn context_command_reports_queue_failure_and_invalidates_connection() {
+        let mut worker = RpcWorker::default();
+        assert_eq!(
+            worker.context_command(ContextCommand::default()),
+            Err(CommandError::NotStarted)
+        );
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        worker.commands = Some(Arc::new(tx));
+        assert_eq!(worker.context_command(ContextCommand::default()), Ok(()));
+        worker.push.epoch.store(42, Ordering::Release);
+        assert_eq!(
+            worker.context_command(ContextCommand::default()),
+            Err(CommandError::Full)
+        );
+        assert_eq!(worker.connection_epoch(), 0);
+        drop(rx);
+        assert_eq!(
+            worker.context_command(ContextCommand::default()),
+            Err(CommandError::Closed)
+        );
+    }
 
     #[test]
     fn layout_flood_retains_latest_without_using_command_queue() {

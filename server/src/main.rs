@@ -1,5 +1,6 @@
 //! Out-of-process Rime service with an independent control plane.
 #![cfg_attr(windows, windows_subsystem = "windows")]
+mod admission;
 mod bindings;
 mod data_lock;
 mod deploy_drag;
@@ -18,7 +19,6 @@ use engine::Work;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
-    mpsc::SyncSender,
 };
 use weasel_common::{
     logging::ComponentLogger,
@@ -29,10 +29,11 @@ use weasel_common::{
 };
 const MAX_CONNECTIONS: usize = 128;
 
-struct ClientLife(Arc<AtomicBool>);
+struct ClientLife(Arc<AtomicBool>, Arc<dyn Fn() + Send + Sync>);
 impl Drop for ClientLife {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
+        (self.1)();
     }
 }
 struct ShutdownNotice {
@@ -64,21 +65,30 @@ fn control_reply(envelope: &Envelope, ready: bool) -> Option<Envelope> {
 async fn read_connection(
     client_id: u64,
     connection: Arc<RpcConnection>,
-    engine: SyncSender<Work>,
+    engine: worker::Sender<Work>,
     ready: Arc<AtomicBool>,
     shutdown: tokio::sync::mpsc::Sender<ShutdownNotice>,
+    mut admission: Option<admission::Admission>,
 ) {
-    let life = ClientLife(Arc::new(AtomicBool::new(true)));
+    let life = ClientLife(Arc::new(AtomicBool::new(true)), engine.notifier());
+    connection.set_notifier(
+        admission
+            .as_ref()
+            .map_or_else(|| engine.notifier(), |a| a.notifier(engine.notifier())),
+    );
+    let mut pending_opened = None;
     loop {
-        let envelope = tokio::select! {
-            result = connection.recv() => match result {
-                Ok(Some(envelope)) => envelope,
-                _ => break,
-            },
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                if !life.0.load(Ordering::Acquire) { break; }
-                continue;
+        let received = if let Some(a) = admission.as_ref().filter(|a| a.pending()) {
+            match tokio::time::timeout_at(a.deadline, connection.recv_tracked()).await {
+                Ok(result) => result,
+                Err(_) => break,
             }
+        } else {
+            connection.recv_tracked().await
+        };
+        let (envelope, request) = match received {
+            Ok(Some(received)) => received,
+            _ => break,
         };
         if let Some(reply) = control_reply(&envelope, ready.load(Ordering::Acquire)) {
             let written = connection.enqueue(reply);
@@ -94,6 +104,37 @@ async fn read_connection(
             }
             continue;
         }
+        if let Some(a) = admission.as_mut().filter(|a| a.pending()) {
+            use weasel_common::message::ContextAction;
+            match envelope.payload.as_ref() {
+                Some(Payload::OpenInput(open)) if pending_opened.is_none() => {
+                    pending_opened = open.token
+                }
+                Some(Payload::LogEvent(_)) => {}
+                Some(Payload::KeyEvent(_) | Payload::ContextCommand(_)) => {
+                    let token = match envelope.payload.as_ref() {
+                        Some(Payload::KeyEvent(key)) if !key.test && key.keycode.is_some() => {
+                            key.token
+                        }
+                        Some(Payload::ContextCommand(command))
+                            if command.action == ContextAction::Focus as i32 =>
+                        {
+                            command.token
+                        }
+                        _ => None,
+                    };
+                    let valid = pending_opened.zip(token).is_some_and(|(opened, token)| {
+                        token.context_id == opened.context_id
+                            && token.connection_epoch == opened.connection_epoch
+                            && token.generation >= opened.generation
+                    });
+                    if !valid || !a.promote(client_id, &connection).await {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
         match envelope.payload.as_ref() {
             Some(Payload::OpenInput(_) | Payload::KeyEvent(_) | Payload::ContextCommand(_)) => {
                 if engine
@@ -102,6 +143,7 @@ async fn read_connection(
                         connection: connection.clone(),
                         alive: life.0.clone(),
                         envelope,
+                        _request: request,
                     })
                     .is_err()
                 {
@@ -210,6 +252,9 @@ async fn serve(paths: RuntimePaths) -> Result<(), String> {
     );
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel(1);
     let mut readers = tokio::task::JoinSet::new();
+    let mut connections = std::collections::HashMap::<u64, Arc<RpcConnection>>::new();
+    let gate = admission::Gate::new(MAX_CONNECTIONS);
+    let mut task_clients = std::collections::HashMap::new();
     let mut next_client_id = 1_u64;
     let mut notice = None;
     let mut listener_error = None;
@@ -219,16 +264,32 @@ async fn serve(paths: RuntimePaths) -> Result<(), String> {
             biased;
             request = shutdown_rx.recv() => { notice = request; break; }
             _ = &mut engine.finished => { break; }
-            Some(_) = readers.join_next(), if !readers.is_empty() => (),
+            Some(result) = readers.join_next_with_id(), if !readers.is_empty() => {
+                let task = match result { Ok((task, _)) => task, Err(error) => error.id() };
+                if let Some(id) = task_clients.remove(&task) {
+                    connections.remove(&id);
+                    gate.peers.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+                }
+            },
             accepted = server.accept() => {
                 let connection = match accepted {
                     Ok(connection) => Arc::new(connection),
                     Err(error) => { listener_error = Some(error.to_string()); break; }
                 };
-                if readers.len() >= MAX_CONNECTIONS { continue; }
+                if connections.len() >= MAX_CONNECTIONS + admission::PENDING_LIMIT { continue; }
                 let client_id = next_client_id;
                 next_client_id = next_client_id.wrapping_add(1).max(1);
-                readers.spawn(read_connection(client_id, connection, engine.sender.clone(), engine.ready.clone(), shutdown_tx.clone()));
+                let Some(admission) = gate.start(client_id) else { continue; };
+                connections.insert(client_id, connection.clone());
+                gate.peers.lock().unwrap_or_else(|p| p.into_inner()).insert(client_id, connection.clone());
+                let sender = engine.sender.clone();
+                let ready = engine.ready.clone();
+                let shutdown = shutdown_tx.clone();
+                let task = readers.spawn(async move {
+                    read_connection(client_id, connection, sender, ready, shutdown, Some(admission)).await;
+                    client_id
+                });
+                task_clients.insert(task.id(), client_id);
             }
         }
     }
@@ -314,6 +375,7 @@ mod control_tests {
             engine.sender.clone(),
             engine.ready.clone(),
             shutdown_tx,
+            None,
         ));
         assert!(
             tokio::time::timeout(Duration::from_secs(1), client.ping("ready"))

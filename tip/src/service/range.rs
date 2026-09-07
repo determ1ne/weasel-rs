@@ -12,6 +12,7 @@ impl TextService {
             range: std::mem::ManuallyDrop::new(Some(range)),
             style,
         };
+        self.edit_mutated.store(true, Ordering::Release);
         let result = unsafe { context.SetSelection(ec, 1, &selection) };
         unsafe {
             std::mem::ManuallyDrop::drop(&mut selection.range);
@@ -32,6 +33,7 @@ impl TextService {
             utf16.as_ptr()
         };
         let len = i32::try_from(utf16.len()).map_err(|_| Error::from_hresult(boundary::E_FAIL))?;
+        self.edit_mutated.store(true, Ordering::Release);
         let hr = unsafe { range.SetText(ec, 0, text_ptr, len) };
         if hr.is_ok() {
             Ok(())
@@ -69,6 +71,7 @@ impl TextService {
                 fInterimChar: BOOL(0),
             },
         };
+        self.edit_mutated.store(true, Ordering::Release);
         let hr = unsafe { context.SetSelection(ec, 1, &selection) };
         // TF_SELECTION is an ABI structure, not an owning Rust wrapper.
         unsafe { std::mem::ManuallyDrop::drop(&mut selection.range) };

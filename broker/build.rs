@@ -10,6 +10,13 @@ fn main() {
         .output(out.join("bindings.rs"))
         .input_default()
         .filters([
+            "Windows.Win32.CreateEventW",
+            "Windows.Win32.SetEvent",
+            "Windows.Win32.WaitForMultipleObjects",
+            "Windows.Win32.WaitForSingleObject",
+            "Windows.Win32.WAIT_OBJECT_0",
+            "Windows.Win32.WAIT_FAILED",
+            "Windows.Win32.INFINITE",
             "Windows.Win32.ShellExecuteW",
             "Windows.Win32.SW_SHOWNORMAL",
             "Windows.Win32.CoInitializeEx",
