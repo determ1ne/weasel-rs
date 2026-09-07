@@ -80,7 +80,7 @@ struct RimeLibraryApi {
 
 impl Librime {
     pub fn load(base_dir: &Path) -> Result<Self, String> {
-        let library = RimeLibrary::load(&base_dir.join("x64").join("rime.dll"))?;
+        let library = RimeLibrary::load(&base_dir.join("rime.dll"))?;
         let api = unsafe { RimeLibraryApi::load(library.api().as_ptr(), false)? };
         let app_name = CString::new("rime.weasel-rs").expect("static app name has no NUL");
         let shared_data_dir = CString::new(base_dir.join("rime-data").to_string_lossy().as_bytes())
@@ -109,7 +109,7 @@ impl Librime {
     }
 
     pub fn deploy(base_dir: &Path) -> Result<(), String> {
-        let library = RimeLibrary::load(&base_dir.join("x64").join("rime.dll"))?;
+        let library = RimeLibrary::load(&base_dir.join("rime.dll"))?;
         let api = unsafe { RimeLibraryApi::load(library.api().as_ptr(), true)? };
         let app_name = CString::new("rime.weasel-rs").expect("static app name has no NUL");
         let shared_data_dir = CString::new(base_dir.join("rime-data").to_string_lossy().as_bytes())

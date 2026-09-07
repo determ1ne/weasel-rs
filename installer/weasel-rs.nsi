@@ -53,9 +53,6 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "Weasel-RS contributors"
 !define MUI_FINISHPAGE_REBOOTLATER_DEFAULT
 !define MUI_FINISHPAGE_TEXT_REBOOT "小狼毫RS 已安装。部分正在使用的 DLL 或运行库需要重启后才能完成更新。请保存工作后重启计算机。"
 !define MUI_FINISHPAGE_TEXT "小狼毫RS 已安装。"
-!define MUI_FINISHPAGE_RUN
-!define MUI_FINISHPAGE_RUN_FUNCTION LaunchBrokerUnelevated
-!define MUI_FINISHPAGE_RUN_TEXT "启动算法服务"
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
@@ -147,6 +144,7 @@ Function .onInit
     Goto foreign_registration
   ${EndIf}
   ${If} $1 != ""
+  ${AndIf} $1 != "$INSTDIR\x64\weasel_tip.dll"
   ${AndIf} $1 != "$INSTDIR\weasel_tip.dll"
     Goto foreign_registration
   ${EndIf}
@@ -237,12 +235,16 @@ FunctionEnd
   Delete /REBOOTOK "$INSTDIR\weasel-server.exe"
   Delete /REBOOTOK "$INSTDIR\weasel-renderer.exe"
   Delete /REBOOTOK "$INSTDIR\x64\rime.dll"
+  Delete /REBOOTOK "$INSTDIR\rime.dll"
+  Delete /REBOOTOK "$INSTDIR\x64\weasel_tip.dll"
   Delete /REBOOTOK "$INSTDIR\weasel_tip.dll"
   Delete /REBOOTOK "$INSTDIR\x86\weasel_tip.dll"
   Delete /REBOOTOK "$INSTDIR\weasel_broker.pdb"
   Delete /REBOOTOK "$INSTDIR\weasel_server.pdb"
   Delete /REBOOTOK "$INSTDIR\weasel_renderer.pdb"
   Delete /REBOOTOK "$INSTDIR\weasel_tip.pdb"
+  Delete /REBOOTOK "$INSTDIR\x64\weasel_tip.pdb"
+  Delete /REBOOTOK "$INSTDIR\rime.pdb"
   Delete /REBOOTOK "$INSTDIR\x86\weasel_tip.pdb"
   Delete /REBOOTOK "$INSTDIR\x64\rime.pdb"
   Delete /REBOOTOK "$INSTDIR\styles-LICENSE.txt"
@@ -266,13 +268,15 @@ Section "Weasel-RS" SEC_MAIN
   Call InstallRuntime_x64
   InitPluginsDir
   Call StopApplicationProcesses
+  StrCpy $OldDll "$INSTDIR\x64\weasel_tip.dll"
+  Call RetireDll
+  ; Retire both the current layout and DLLs left by older installers.
   StrCpy $OldDll "$INSTDIR\weasel_tip.dll"
   Call RetireDll
   StrCpy $OldDll "$INSTDIR\x86\weasel_tip.dll"
   Call RetireDll
   StrCpy $OldDll "$INSTDIR\x64\rime.dll"
   Call RetireDll
-  ; Migrate installations that placed the native engine at the root.
   StrCpy $OldDll "$INSTDIR\rime.dll"
   Call RetireDll
   SetOverwrite on
@@ -282,12 +286,13 @@ Section "Weasel-RS" SEC_MAIN
   File "${X64_RELEASE}\weasel-broker.exe"
   File "${X64_RELEASE}\weasel-server.exe"
   File "${X64_RELEASE}\weasel-renderer.exe"
-  File "${X64_RELEASE}\weasel_tip.dll"
   File "${PROJECT_ROOT}\server\src\styles-LICENSE.txt"
   File "${PROJECT_ROOT}\LICENSE"
   File "${PROJECT_ROOT}\weasel.json"
   File "${PROJECT_ROOT}\THIRD-PARTY-LICENSES.txt"
   File "${PROJECT_ROOT}\THIRD-PARTY-GPL-3.0.txt"
+  SetOutPath "$INSTDIR\x64"
+  File "${X64_RELEASE}\weasel_tip.dll"
   SetOutPath "$INSTDIR\x86"
   File "${X86_RELEASE}\weasel_tip.dll"
   CreateDirectory "$INSTDIR\rime-data"
@@ -302,7 +307,7 @@ Section "librime" SEC_LIBRIME
   SectionIn RO
   Call StopApplicationProcesses
   ClearErrors
-  SetOutPath "$INSTDIR\x64"
+  SetOutPath "$INSTDIR"
   File "${PROJECT_ROOT}\artifacts\librime\dist\lib\rime.dll"
   SetOutPath "$INSTDIR\rime-data"
   File /r "${PROJECT_ROOT}\assets\rime-data\*"
@@ -319,9 +324,9 @@ Section /o "调试符号" SEC_SYMBOLS
   File "${X64_RELEASE}\weasel_broker.pdb"
   File "${X64_RELEASE}\weasel_server.pdb"
   File "${X64_RELEASE}\weasel_renderer.pdb"
-  File "${X64_RELEASE}\weasel_tip.pdb"
-  SetOutPath "$INSTDIR\x64"
   File "${PROJECT_ROOT}\artifacts\librime\dist\lib\rime.pdb"
+  SetOutPath "$INSTDIR\x64"
+  File "${X64_RELEASE}\weasel_tip.pdb"
   SetOutPath "$INSTDIR\x86"
   File "${X86_RELEASE}\weasel_tip.pdb"
   ${If} ${Errors}
@@ -343,7 +348,7 @@ Section "-注册与安装信息" SEC_REGISTER
   StrCmp $0 0 0 install_failed
   ${DisableX64FSRedirection}
   ClearErrors
-  ExecWait '"$SYSDIR\regsvr32.exe" /s "$INSTDIR\weasel_tip.dll"' $0
+  ExecWait '"$SYSDIR\regsvr32.exe" /s "$INSTDIR\x64\weasel_tip.dll"' $0
   ${EnableX64FSRedirection}
   IfErrors install_failed
   StrCmp $0 0 0 install_failed
@@ -383,6 +388,8 @@ Section "-注册与安装信息" SEC_REGISTER
     Abort
   ${EndIf}
   Call DeleteRetiredDlls
+  DetailPrint "正在启动算法服务……"
+  Call LaunchBrokerUnelevated
   Goto install_done
   install_failed:
     MessageBox MB_OK|MB_ICONSTOP "安装或 TIP 注册失败。请检查文件权限和 x86/x64 VC++ 运行库。" /SD IDOK
@@ -430,7 +437,7 @@ Function .onInstFailed
     ${EndIf}
     ${DisableX64FSRedirection}
     ClearErrors
-    ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\weasel_tip.dll"' $1
+    ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\x64\weasel_tip.dll"' $1
     ${EnableX64FSRedirection}
     ${If} ${Errors}
       StrCpy $1 1
@@ -478,7 +485,7 @@ Section "Uninstall"
   ${EndIf}
   ${DisableX64FSRedirection}
   ClearErrors
-  ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\weasel_tip.dll"' $0
+  ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\x64\weasel_tip.dll"' $0
   ${EnableX64FSRedirection}
   IfErrors uninstall_failed
   StrCmp $0 0 0 uninstall_failed
