@@ -178,14 +178,29 @@ impl FaultState {
             .ok()
             .and_then(|v| v.clone())
         {
-            self.recorder.save(Some(first), None);
+            self.recorder.save(Some(first), None, None);
         }
         self.request_maintenance();
+    }
+
+    #[track_caller]
+    pub(crate) fn report_quarantine(&self, context_id: u64, reason: &'static str, code: u64) {
+        let cause = Event {
+            time: SystemTime::now(),
+            thread: std::thread::current().id(),
+            site: Location::caller(),
+            kind: reason,
+            value: code,
+        };
+        self.event(reason, code);
+        if !cfg!(test) {
+            self.recorder.save(None, None, Some((context_id, cause)));
+        }
     }
 }
 
 impl Recorder {
-    fn save(&self, fault: Option<Event>, dialog: Option<bool>) {
+    fn save(&self, fault: Option<Event>, dialog: Option<bool>, quarantine: Option<(u64, Event)>) {
         let Ok(mut threads) = THREADS.try_lock() else {
             return;
         };
@@ -228,7 +243,11 @@ impl Recorder {
         let lease = crate::module::ModuleLease::new();
         let id = self.id;
         let report_saved = self.saved.clone();
-        let slot = id % 4 * 2 + usize::from(dialog.is_some());
+        // Keep quarantine reports separate from first-fault and manual reports.
+        let slot = quarantine.as_ref().map_or_else(
+            || id % 4 * 2 + usize::from(dialog.is_some()),
+            |(context, _)| 8 + (*context % 32) as usize,
+        );
         let fault = fault.or_else(|| self.first_fault.try_lock().ok().and_then(|v| v.clone()));
         let thread = std::thread::Builder::new()
             .name("weasel-tip-diagnostic".into())
@@ -253,6 +272,10 @@ impl Recorder {
                         std::process::id(),
                         id
                     );
+                    if let Some((context, cause)) = &quarantine {
+                        use std::fmt::Write;
+                        let _ = writeln!(report, "quarantine_context={context}\nquarantine_cause={cause:?}");
+                    }
                     for event in events {
                         use std::fmt::Write;
                         let _ = writeln!(
@@ -282,7 +305,7 @@ impl Recorder {
                         .is_ok()
                         {
                             saved = Some(dir.join(format!("tip-{}-{slot}.log", std::process::id())));
-                            if dialog.is_none() { report_saved.store(true, Ordering::Release); }
+                            if dialog.is_none() && quarantine.is_none() { report_saved.store(true, Ordering::Release); }
                             break;
                         }
                     }
@@ -341,7 +364,7 @@ fn write_report(dir: &std::path::Path, id: usize, report: &[u8]) -> std::io::Res
 pub(crate) fn show_dialog(diagnostics: bool) {
     let _ = CURRENT.try_with(|current| {
         if let Some(recorder) = current.borrow().upgrade() {
-            recorder.save(None, Some(diagnostics));
+            recorder.save(None, Some(diagnostics), None);
         }
     });
 }
@@ -349,6 +372,31 @@ pub(crate) fn show_dialog(diagnostics: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quarantine_does_not_mark_or_suppress_instance_fault() {
+        let fault = FaultState::new(false);
+        fault.report_quarantine(7, "edit.request_failed", 0x80004005);
+        assert!(!fault.load(Ordering::Acquire));
+        assert!(!fault.recorder.saved.load(Ordering::Acquire));
+        assert!(fault.recorder.first_fault.lock().unwrap().is_none());
+        assert_eq!(
+            fault.recorder.events.lock().unwrap().back().unwrap().kind,
+            "edit.request_failed"
+        );
+        fault.mark("edit.write_uncertain", 1);
+        assert_eq!(
+            fault
+                .recorder
+                .first_fault
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .kind,
+            "edit.write_uncertain"
+        );
+    }
 
     #[test]
     fn injected_faults_stay_in_memory_and_preserve_first_cause() {

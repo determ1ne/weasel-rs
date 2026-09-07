@@ -32,10 +32,36 @@ impl Drop for EditReservation<'_> {
 }
 
 impl TextService {
-    pub(super) fn quarantine(&self, state: &ContextState, reason: &'static str, code: u64) {
-        state.suspended.store(true, Ordering::Release);
+    pub(super) fn reject_readonly_edit(&self, state: &ContextState) -> Result<()> {
+        self.faulted.event("edit.readonly", state.id);
+        self.lock(&self.tested_key)?.take();
+        self.discard_context_edits(state.id)?;
         state.generation.fetch_add(1, Ordering::AcqRel);
-        self.faulted.event(reason, code);
+        let command = weasel_common::message::ContextCommand {
+            token: Some(state.token()?),
+            action: weasel_common::message::ContextAction::Cancel as i32,
+        };
+        // Invalidate the cancellation reply too: it must not request another
+        // write session against this read-only document.
+        state.generation.fetch_add(1, Ordering::AcqRel);
+        state.composition_epoch.store(0, Ordering::Release);
+        state.disconnect_requested.store(false, Ordering::Release);
+        self.edit_requested.store(false, Ordering::Release);
+        let result = self.lock(&state.rpc)?.context_command(command);
+        if let Err(error) = result {
+            self.faulted.event(error.name(), state.id);
+        }
+        // Existing host text is left untouched. Once writable, the normal
+        // disconnected-composition path ends any remaining composition.
+        Ok(())
+    }
+
+    pub(super) fn quarantine(&self, state: &ContextState, reason: &'static str, code: u64) {
+        if state.suspended.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        state.generation.fetch_add(1, Ordering::AcqRel);
+        self.faulted.report_quarantine(state.id, reason, code);
         self.faulted.request_maintenance();
         // Generation/suspended reject this context's replies. Do not invalidate
         // the shared transport and unrelated contexts for a local edit failure.

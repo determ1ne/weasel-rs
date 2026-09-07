@@ -164,6 +164,12 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
             }
             service.edit_requested.store(false, Ordering::Release);
             if let Err(error) = &result {
+                if error.code().0 == bindings::TF_E_READONLY
+                    && !service.edit_mutated.load(Ordering::Acquire)
+                {
+                    service.reject_readonly_edit(&state)?;
+                    return Ok(());
+                }
                 // A failed write may already have changed the document. Do not
                 // replay the response or continue with dependent edit steps.
                 if service.edit_mutated.load(Ordering::Acquire) {

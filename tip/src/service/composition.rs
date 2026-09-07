@@ -1,4 +1,5 @@
 use super::*;
+use crate::bindings::TF_E_READONLY;
 
 impl TextService {
     pub(super) fn request_edit_session(
@@ -127,6 +128,12 @@ impl TextService {
             return Ok(());
         }
         match request {
+            Ok(hr) if hr.0 == TF_E_READONLY => {
+                self.reject_readonly_edit(&state)?;
+            }
+            Err(ref error) if error.code().0 == TF_E_READONLY => {
+                self.reject_readonly_edit(&state)?;
+            }
             Err(error) => {
                 self.quarantine(&state, "edit.request_failed", error.code().0 as u32 as u64);
                 self.discard_context_edits(state.id)?;

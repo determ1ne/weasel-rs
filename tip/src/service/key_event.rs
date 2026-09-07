@@ -154,6 +154,13 @@ impl TextService {
             self.lock(&self.tested_key)?.take();
             return Ok(BOOL(0));
         };
+        // A document context can represent a non-editable part of a web page.
+        // Query on each callback: the same context may later become writable.
+        let writable = context_is_writable(unsafe { context.GetStatus() });
+        if !writable {
+            self.lock(&self.tested_key)?.take();
+            return Ok(BOOL(0));
+        }
         let state = self.ensure_context(context, &session)?;
         if !state.alive.load(Ordering::Acquire) || state.suspended.load(Ordering::Acquire) {
             self.lock(&self.tested_key)?.take();
@@ -224,6 +231,33 @@ impl TextService {
         // Responses, including this one, are delivered on one ordered stream.
         // Do not apply a direct reply ahead of a queued renderer commit.
         self.drain_context_updates(&session)?;
+        if !state.matches(response.token.as_ref())? {
+            return Ok(BOOL(0));
+        }
         Ok(BOOL(eaten as i32))
+    }
+}
+
+fn context_is_writable(status: Result<bindings::TF_STATUS>) -> bool {
+    status
+        .map(|status| status.dwDynamicFlags & bindings::TF_SD_READONLY == 0)
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod readonly_tests {
+    use super::*;
+
+    #[test]
+    fn readonly_and_unavailable_contexts_pass_keys_through() {
+        assert!(!context_is_writable(Ok(bindings::TF_STATUS {
+            dwDynamicFlags: bindings::TF_SD_READONLY,
+            ..Default::default()
+        })));
+        assert!(!context_is_writable(Err(Error::from_hresult(
+            boundary::E_FAIL
+        ))));
+        // No cached disable flag: a subsequent writable status allows input.
+        assert!(context_is_writable(Ok(bindings::TF_STATUS::default())));
     }
 }

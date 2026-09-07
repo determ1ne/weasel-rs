@@ -245,6 +245,7 @@ fn main() {
             "Windows.Win32.UI.TextServices.TF_ES_READWRITE",
             "Windows.Win32.UI.TextServices.TF_ES_ASYNC",
             "Windows.Win32.UI.TextServices.TF_SD_READONLY",
+            "Windows.Win32.TF_E_READONLY",
             "Windows.Win32.UI.TextServices.TF_SD_LOADING",
             "Windows.Win32.UI.TextServices.TF_SD_RESERVED",
             "Windows.Win32.UI.TextServices.TF_SD_TKBAUTOCORRECTENABLE",
