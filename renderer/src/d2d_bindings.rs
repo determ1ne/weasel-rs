@@ -5,5 +5,5 @@
     non_upper_case_globals,
     clippy::all
 )]
-include!(concat!(env!("OUT_DIR"), "/ten-bindings.rs"));
+include!(concat!(env!("OUT_DIR"), "/d2d-bindings.rs"));
 pub use Windows::Win32::*;

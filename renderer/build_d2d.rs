@@ -1,15 +1,22 @@
-/// Called by the renderer's shared build.rs.
+/// Shared native projection for D2D candidate themes.
 pub fn generate() {
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     windows_bindgen::builder()
         .input_default()
-        .output(out.join("ten-bindings.rs"))
+        .output(out.join("d2d-bindings.rs"))
         .filters([
+
+
             "Windows.Win32.D2D1CreateFactory", "Windows.Win32.DWriteCreateFactory",
             "Windows.Win32.ID2D1Factory::CreateHwndRenderTarget", "Windows.Win32.ID2D1HwndRenderTarget::Resize",
             "Windows.Win32.ID2D1SolidColorBrush::SetColor", "Windows.Win32.IDWriteFactory::{CreateTextFormat,CreateTextLayout}",
             "Windows.Win32.IDWriteTextFormat::{SetTextAlignment,SetParagraphAlignment,SetWordWrapping}",
             "Windows.Win32.IDWriteTextLayout::GetMetrics",
+            "Windows.Win32.IDWriteTextLayout::HitTestTextPosition",
+            "Windows.Win32.ID2D1RenderTarget::{DrawTextLayout,PushAxisAlignedClip,PopAxisAlignedClip}",
+            "Windows.Win32.D2D1_ANTIALIAS_MODE",
+            "Windows.Win32.ID2D1RenderTarget::{SetTextAntialiasMode,SetAntialiasMode}",
+            "Windows.Win32.D2D1_TEXT_ANTIALIAS_MODE",
             "Windows.Win32.ID2D1RenderTarget::{SetDpi,CreateSolidColorBrush,BeginDraw,EndDraw,Clear,FillRectangle,DrawText}",
             "Windows.Win32.D2D1_FACTORY_TYPE", "Windows.Win32.D2D1_PRESENT_OPTIONS",
             "Windows.Win32.D2D1_DRAW_TEXT_OPTIONS", "Windows.Win32.D2D1_ALPHA_MODE",
@@ -46,5 +53,5 @@ pub fn generate() {
             "Windows.Win32.CREATESTRUCTW",
         ])
         .write();
-    println!("cargo:rerun-if-changed=build_ten.rs");
+    println!("cargo:rerun-if-changed=build_d2d.rs");
 }

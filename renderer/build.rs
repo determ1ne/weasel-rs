@@ -1,11 +1,11 @@
 use std::path::PathBuf;
-mod build_ten;
+mod build_d2d;
 #[path = "../build_support/icon.rs"]
 mod icon;
 
 fn main() {
     icon::embed();
-    build_ten::generate();
+    build_d2d::generate();
     let manifest_dir = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is not set"),
     );

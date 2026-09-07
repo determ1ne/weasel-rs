@@ -29,6 +29,8 @@ pub struct CandidateItem {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CandidateView {
+    /// None means inline input: show candidates without an input field.
+    pub preedit: Option<Preedit>,
     /// Opaque presentation identity. Changes on content or routing changes,
     /// but not on geometry-only updates. Not an RPC revision or session ID.
     pub content_id: u64,
@@ -44,12 +46,40 @@ pub struct CandidateView {
 
 pub fn same_content(a: &CandidateView, b: &CandidateView) -> bool {
     a.content_id == b.content_id
+        && a.preedit == b.preedit
         && a.items == b.items
         && a.selected_index == b.selected_index
         && a.page_start == b.page_start
         && a.total_item_count == b.total_item_count
         && a.can_page_previous == b.can_page_previous
         && a.can_page_next == b.can_page_next
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Preedit {
+    pub text: String,
+    /// UTF-16 code-unit offset, on a Unicode scalar boundary.
+    pub cursor: u32,
+}
+
+impl Preedit {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.text.len() > 65536 || self.text.contains('\0') {
+            return Err("invalid preedit text".into());
+        }
+        let mut offset = 0;
+        for ch in self.text.chars() {
+            if offset == self.cursor {
+                return Ok(());
+            }
+            offset += ch.len_utf16() as u32;
+        }
+        if offset == self.cursor {
+            Ok(())
+        } else {
+            Err("invalid preedit cursor".into())
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,4 +142,46 @@ pub trait ThemeFactory: Send + Sync {
 pub enum UiMode {
     Live,
     Preview,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn preedit_cursor_uses_utf16_boundaries() {
+        for (cursor, valid) in [
+            (0, true),
+            (1, true),
+            (2, false),
+            (3, true),
+            (4, true),
+            (5, false),
+        ] {
+            assert_eq!(
+                Preedit {
+                    text: "a😀中".into(),
+                    cursor
+                }
+                .validate()
+                .is_ok(),
+                valid
+            );
+        }
+        assert!(
+            Preedit {
+                text: String::new(),
+                cursor: 0
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            Preedit {
+                text: "\0".into(),
+                cursor: 0
+            }
+            .validate()
+            .is_err()
+        );
+    }
 }

@@ -5,6 +5,7 @@ use weasel_common::message::{RenderSnapshot, RendererEvent, RendererEventAction}
 
 pub fn view(snapshot: &RenderSnapshot, content_id: u64) -> CandidateView {
     CandidateView {
+        preedit: None,
         content_id,
         visible: snapshot.visible,
         anchor: snapshot.anchor.as_ref().map(|r| Anchor {

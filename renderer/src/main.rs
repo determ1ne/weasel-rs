@@ -7,6 +7,8 @@ mod backend;
 #[cfg(windows)]
 mod bindings;
 #[cfg(windows)]
+mod d2d_bindings;
+#[cfg(windows)]
 mod diagnostics;
 #[cfg(windows)]
 mod presentation;
@@ -15,6 +17,8 @@ mod preview;
 #[cfg(windows)]
 mod rpc;
 mod state;
+#[cfg(windows)]
+mod theme_abc;
 #[cfg(windows)]
 mod theme_adapter;
 mod theme_api;

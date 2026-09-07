@@ -1,4 +1,5 @@
-//! Windows 10 candidate strip. All HWND and graphics types are private to this backend.
+//! Classic ABC-inspired candidate window. No legacy code or resource assets are embedded.
+//! Native lifetime/paint handling follows our D2D backend; input remains owned by TIP.
 mod logic;
 
 use crate::d2d_bindings::*;
@@ -7,7 +8,7 @@ use crate::{
     theme_api::EventSink,
     theme_api::{ThemeBackend, UiMode},
 };
-use logic::{Gesture, HEIGHT, Hit, Layout, NUMBER, Palette, Recovery, SCALE, enabled, pixels};
+use logic::{Gesture, Hit, Layout, PAD, Recovery, Role, enabled, pixels};
 use std::{
     cell::{Cell, RefCell},
     panic::{AssertUnwindSafe, catch_unwind},
@@ -15,16 +16,14 @@ use std::{
 };
 use windows_strings::w;
 
-const CLASS: windows_strings::PCWSTR = w!("Weasel.ThemeTen.D2D");
+const CLASS: windows_strings::PCWSTR = w!("Weasel.ThemeAbc.D2D");
 const RETRY_TIMER: usize = 1;
 
 struct Graphics {
     factory: ID2D1Factory,
     write: IDWriteFactory,
-    number: IDWriteTextFormat,
     text: IDWriteTextFormat,
-    comment: IDWriteTextFormat,
-    icon: IDWriteTextFormat,
+    label: IDWriteTextFormat,
     target: Option<ID2D1HwndRenderTarget>,
 }
 
@@ -40,7 +39,7 @@ impl Graphics {
                     DWRITE_FONT_WEIGHT_NORMAL,
                     DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL,
-                    size * SCALE,
+                    size,
                     w!("zh-CN"),
                 )?;
                 f.SetTextAlignment(align).ok()?;
@@ -51,32 +50,11 @@ impl Graphics {
             };
             Ok(Self {
                 factory,
-                number: format(w!("Segoe UI"), 27.0, DWRITE_TEXT_ALIGNMENT_TRAILING)?,
-                text: format(
-                    w!("Microsoft YaHei UI"),
-                    27.0,
-                    DWRITE_TEXT_ALIGNMENT_LEADING,
-                )?,
-                comment: format(
-                    w!("Microsoft YaHei UI"),
-                    20.0,
-                    DWRITE_TEXT_ALIGNMENT_LEADING,
-                )?,
-                icon: format(w!("Segoe MDL2 Assets"), 20.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+                text: format(w!("SimSun"), 16.0, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+                label: format(w!("SimSun"), 12.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
                 write,
                 target: None,
             })
-        }
-    }
-    fn measure(&self, text: &str, format: &IDWriteTextFormat) -> windows_core::Result<f32> {
-        unsafe {
-            let text: Vec<u16> = text.encode_utf16().collect();
-            let layout = self
-                .write
-                .CreateTextLayout(&text, format, 1_000_000.0, HEIGHT)?;
-            let mut metrics = DWRITE_TEXT_METRICS::default();
-            layout.GetMetrics(&mut metrics).ok()?;
-            Ok(metrics.widthIncludingTrailingWhitespace)
         }
     }
     fn ensure_target(&mut self, hwnd: HWND, dpi: u32) -> windows_core::Result<()> {
@@ -114,13 +92,11 @@ struct Content {
     snapshot: CandidateView,
     events: EventSink,
     layout: Layout,
-    primary_widths: Vec<f32>,
 }
 struct App {
     graphics: Graphics,
     content: Option<Content>,
     gesture: Gesture,
-    palette: Palette,
 }
 
 /// The stable allocation outlives its HWND. Native calls that can synchronously
@@ -133,17 +109,24 @@ struct Window {
     recovery: RefCell<Recovery>,
     positioning: Cell<bool>,
     preview: bool,
+    role: Role,
 }
 
 // Keep the native callback's allocation behind a shared reference even while
 // ThemeBackend is called through &mut self.
-struct Ten {
-    // Shared allocation keeps the HWND's pointer stable without creating an
-    // exclusive reference to Window when the backend is moved or rendered.
-    window: Rc<Window>,
+struct Abc {
+    // Input is owned by candidates and must be destroyed first.
+    input: Rc<Window>,
+    candidates: Rc<Window>,
 }
 
 fn create(mode: UiMode) -> Result<Box<dyn ThemeBackend>, String> {
+    let candidates = create_window(mode, Role::Candidates, None)?;
+    let input = create_window(mode, Role::Input, Some(candidates.hwnd.get()))?;
+    Ok(Box::new(Abc { input, candidates }))
+}
+
+fn create_window(mode: UiMode, role: Role, owner: Option<HWND>) -> Result<Rc<Window>, String> {
     let preview = mode != UiMode::Live;
     let window = Rc::new(Window {
         hwnd: Cell::new(HWND::default()),
@@ -152,12 +135,12 @@ fn create(mode: UiMode) -> Result<Box<dyn ThemeBackend>, String> {
             graphics: Graphics::new().map_err(|e| e.to_string())?,
             content: None,
             gesture: Gesture::default(),
-            palette: Palette::new(crate::appearance::is_dark()),
         }),
         error: RefCell::new(None),
         recovery: RefCell::new(Recovery::default()),
         positioning: Cell::new(false),
         preview,
+        role,
     });
     unsafe {
         let instance = GetModuleHandleW(None);
@@ -185,7 +168,7 @@ fn create(mode: UiMode) -> Result<Box<dyn ThemeBackend>, String> {
         // The preview keeps the borderless strip identical to input but must be
         // findable and closable: no WS_EX_TOOLWINDOW (task-bar button) and no
         // WS_EX_NOACTIVATE (activatable, so it can be closed).
-        let (ex_style, title) = if preview {
+        let (ex_style, title) = if preview && role == Role::Candidates {
             ((WS_EX_TOPMOST) as u32, w!("Weasel-RS 皮肤预览"))
         } else {
             (
@@ -202,7 +185,7 @@ fn create(mode: UiMode) -> Result<Box<dyn ThemeBackend>, String> {
             0,
             1,
             1,
-            None,
+            owner,
             None,
             Some(instance),
             Some(Rc::as_ptr(&window).cast()),
@@ -224,7 +207,7 @@ fn create(mode: UiMode) -> Result<Box<dyn ThemeBackend>, String> {
             .map_err(|e| e.to_string())?;
     }
     window.health()?;
-    Ok(Box::new(Ten { window }))
+    Ok(window)
 }
 
 /// Sets the window's small and big icons so the preview window's task-bar button
@@ -286,30 +269,80 @@ impl Window {
             let dpi = self.dpi.get();
             let bounds = {
                 let app = self.app.borrow();
-                if self.preview {
-                    // The preview has no caret; center the strip on the primary
-                    // monitor instead of anchoring to a rect.
-                    app.content.as_ref().map(|c| {
-                        let width = pixels(c.layout.width, dpi);
-                        let height = pixels(HEIGHT, dpi);
-                        let (x, y) = crate::presentation::preview_position(width, height);
-                        (x, y, width, height)
-                    })
-                } else {
-                    app.content.as_ref().and_then(|c| {
-                        c.snapshot
-                            .anchor
-                            .as_ref()
-                            .filter(|a| a.valid)
-                            .map(|anchor| {
-                                let width = pixels(c.layout.width, dpi);
-                                let height = pixels(HEIGHT, dpi);
-                                let (x, y) =
-                                    crate::presentation::popup_position(anchor, width, height);
-                                (x, y, width, height)
-                            })
-                    })
-                }
+                app.content.as_ref().and_then(|c| {
+                    let candidate = Layout::new(c.snapshot.items.len(), Role::Candidates);
+                    let input = c.snapshot.preedit.is_some();
+                    let candidates = !c.snapshot.items.is_empty();
+                    let candidate_offset = if input && candidates {
+                        logic::INPUT_WIDTH + logic::GAP
+                    } else {
+                        0.0
+                    };
+                    let group_width = if candidates {
+                        candidate_offset + candidate.width
+                    } else {
+                        logic::INPUT_WIDTH
+                    };
+                    let group_height = if candidates {
+                        candidate.height
+                    } else {
+                        logic::INPUT_HEIGHT
+                    };
+                    if self.preview {
+                        let (x, y) = crate::presentation::preview_position(
+                            pixels(group_width, dpi),
+                            pixels(group_height, dpi),
+                        );
+                        return Some((
+                            x + if self.role == Role::Candidates && input {
+                                pixels(candidate_offset, dpi)
+                            } else {
+                                0
+                            },
+                            y,
+                            pixels(c.layout.width, dpi),
+                            pixels(c.layout.height, dpi),
+                        ));
+                    }
+                    let anchor = c.snapshot.anchor.as_ref().filter(|a| a.valid)?;
+                    let (x, y) = if input {
+                        let input_position = crate::presentation::popup_position(
+                            anchor,
+                            pixels(logic::INPUT_WIDTH, dpi),
+                            pixels(logic::INPUT_HEIGHT, dpi),
+                        );
+                        if self.role == Role::Candidates {
+                            if let Some(work) = crate::presentation::work_area(anchor) {
+                                logic::candidate_position(
+                                    input_position,
+                                    pixels(logic::INPUT_WIDTH, dpi),
+                                    (pixels(candidate.width, dpi), pixels(candidate.height, dpi)),
+                                    pixels(logic::GAP, dpi),
+                                    &work,
+                                )
+                            } else {
+                                (
+                                    input_position.0 + pixels(candidate_offset, dpi),
+                                    input_position.1,
+                                )
+                            }
+                        } else {
+                            input_position
+                        }
+                    } else {
+                        crate::presentation::popup_position(
+                            anchor,
+                            pixels(candidate.width, dpi),
+                            pixels(candidate.height, dpi),
+                        )
+                    };
+                    Some((
+                        x,
+                        y,
+                        pixels(c.layout.width, dpi),
+                        pixels(c.layout.height, dpi),
+                    ))
+                })
             };
             let Some((x, y, width, height)) = bounds else {
                 return Ok(());
@@ -374,101 +407,139 @@ impl Window {
             .target
             .as_ref()
             .ok_or_else(|| windows_core::Error::from_hresult(E_UNEXPECTED))?;
-        let p = app.palette;
         unsafe {
-            // Allocate fallible resources before BeginDraw; EndDraw is RAII too.
-            let brush = target.CreateSolidColorBrush(&color(p.text), None)?;
+            let brush = target.CreateSolidColorBrush(&color(0x000000), None)?;
+            target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
+            target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
             target.BeginDraw();
             let draw = DrawGuard {
                 target,
                 ended: false,
             };
-            target.Clear(Some(&color(p.background)));
+            target.Clear(Some(&color(0xC0C0C0)));
             if let Some(c) = &app.content {
+                let width = c.layout.width;
+                let height = c.layout.height;
+                draw_frame(target, &brush, width, height);
+                if self.role == Role::Input
+                    && let Some(preedit) = &c.snapshot.preedit
+                {
+                    let area = rect(PAD, PAD, width - 6.0, height - PAD);
+                    let chars: Vec<u16> = preedit.text.encode_utf16().collect();
+                    let layout = app.graphics.write.CreateTextLayout(
+                        &chars,
+                        &app.graphics.text,
+                        1_000_000.0,
+                        height - 2.0 * PAD,
+                    )?;
+                    let mut x = 0.0;
+                    let mut y = 0.0;
+                    let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+                    layout
+                        .HitTestTextPosition(preedit.cursor, false, &mut x, &mut y, &mut metrics)
+                        .ok()?;
+                    let scroll = (x - (area.right - area.left - 3.0)).max(0.0);
+                    target.PushAxisAlignedClip(&area, D2D1_ANTIALIAS_MODE_ALIASED);
+                    brush.SetColor(&color(0x000000));
+                    target.DrawTextLayout(
+                        windows_numerics::Vector2 {
+                            x: area.left - scroll,
+                            y: area.top,
+                        },
+                        &layout,
+                        &brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                    brush.SetColor(&color(0x3FC0C0));
+                    let scale = self.dpi.get() as f32 / 96.0;
+                    let caret_x = ((area.left + x - scroll) * scale).round() / scale;
+                    let caret_width = (2.0 * scale).round().max(1.0) / scale;
+                    target.FillRectangle(
+                        &rect(
+                            caret_x,
+                            ((area.top + 1.0) * scale).round() / scale,
+                            caret_x + caret_width,
+                            ((area.bottom - 1.0) * scale).round() / scale,
+                        ),
+                        &brush,
+                    );
+                    target.PopAxisAlignedClip();
+                }
+                if self.role == Role::Candidates {
+                    text(
+                        target,
+                        &brush,
+                        &app.graphics.label,
+                        "数字",
+                        rect(
+                            (width - 32.0) / 2.0,
+                            height - 18.0,
+                            (width + 32.0) / 2.0,
+                            height - 4.0,
+                        ),
+                        0x000080,
+                    );
+                }
                 for cell in &c.layout.cells {
-                    let selected = matches!(cell.hit, Hit::Candidate(i) if i == c.snapshot.selected_index as usize);
                     let usable = enabled(&c.snapshot, cell.hit);
-                    let rect = rect(cell.left, 0.0, cell.right, HEIGHT);
-                    if selected || (usable && app.gesture.hovered == Some(cell.hit)) {
-                        brush.SetColor(&color(if selected { p.active } else { p.hover }));
-                        target.FillRectangle(&rect, &brush);
+
+                    let pressed = app.gesture.pressed == Some(cell.hit);
+                    let bounds = rect(cell.left, cell.top, cell.right, cell.bottom);
+                    if pressed {
+                        brush.SetColor(&color(0xA0A0A0));
+                        target.FillRectangle(&bounds, &brush);
                     }
-                    match cell.hit {
+                    let (label, rgb) = match cell.hit {
                         Hit::Candidate(i) => {
                             let item = &c.snapshot.items[i];
-                            text(
+                            (
+                                format!("{}:{}", i + 1, item.primary_text),
+                                if !usable { 0x808080 } else { 0x800080 },
+                            )
+                        }
+                        Hit::Previous
+                        | Hit::Next
+                        | Hit::PreviousDecorative
+                        | Hit::NextDecorative => {
+                            draw_arrow(
                                 target,
                                 &brush,
-                                &app.graphics.number,
-                                &(i + 1).to_string(),
-                                rect_with(rect, cell.left, cell.left + NUMBER - 8.0 * SCALE),
-                                if !usable {
-                                    p.disabled
-                                } else if selected {
-                                    p.active_number
-                                } else {
-                                    p.secondary
-                                },
+                                cell.left,
+                                cell.top,
+                                matches!(cell.hit, Hit::Previous | Hit::PreviousDecorative),
+                                usable,
+                                pressed,
                             );
-                            text(
-                                target,
-                                &brush,
-                                &app.graphics.text,
-                                &item.primary_text,
-                                rect_with(rect, cell.left + NUMBER, cell.right - logic::PAD),
-                                if usable { p.text } else { p.disabled },
-                            );
-                            if !item.secondary_text.is_empty() {
-                                text(
-                                    target,
-                                    &brush,
-                                    &app.graphics.comment,
-                                    &item.secondary_text,
-                                    rect_with(
-                                        rect,
-                                        cell.left + NUMBER + c.primary_widths[i] + 8.0 * SCALE,
-                                        cell.right - logic::PAD,
+                            if matches!(cell.hit, Hit::PreviousDecorative | Hit::NextDecorative) {
+                                let y = cell.top
+                                    + if cell.hit == Hit::PreviousDecorative {
+                                        3.0
+                                    } else {
+                                        10.0
+                                    };
+                                let offset = if pressed { 1.0 } else { 0.0 };
+                                brush.SetColor(&color(if usable { 0x000000 } else { 0x808080 }));
+                                target.FillRectangle(
+                                    &rect(
+                                        cell.left + 3.0 + offset,
+                                        y + offset,
+                                        cell.left + 10.0 + offset,
+                                        y + 1.0 + offset,
                                     ),
-                                    if usable { p.secondary } else { p.disabled },
+                                    &brush,
                                 );
                             }
+                            continue;
                         }
-                        hit => {
-                            let glyph = match hit {
-                                Hit::Previous => "\u{E76B}",
-                                Hit::Next => "\u{E76C}",
-                                _ => "\u{E76E}",
-                            };
-                            let mut icon_rect = rect;
-                            icon_rect.top -= 2.0 * SCALE;
-                            icon_rect.bottom -= 2.0 * SCALE;
-                            text(
-                                target,
-                                &brush,
-                                &app.graphics.icon,
-                                glyph,
-                                icon_rect,
-                                if usable { p.text } else { p.disabled },
-                            );
-                        }
-                    }
-                }
-                brush.SetColor(&color(p.border));
-                for cell in &c.layout.cells {
-                    if matches!(cell.hit, Hit::Previous | Hit::Emoji) {
-                        target.FillRectangle(
-                            &rect(cell.left, 0.0, cell.left + SCALE, HEIGHT),
-                            &brush,
-                        );
-                    }
-                }
-                for edge in [
-                    rect(0.0, 0.0, c.layout.width, SCALE),
-                    rect(0.0, HEIGHT - SCALE, c.layout.width, HEIGHT),
-                    rect(0.0, 0.0, SCALE, HEIGHT),
-                    rect(c.layout.width - SCALE, 0.0, c.layout.width, HEIGHT),
-                ] {
-                    target.FillRectangle(&edge, &brush);
+                    };
+                    text(
+                        target,
+                        &brush,
+                        &app.graphics.text,
+                        &label,
+                        rect(cell.left, cell.top, cell.right, cell.bottom),
+                        rgb,
+                    );
                 }
             }
             draw.finish()?;
@@ -487,25 +558,37 @@ impl Window {
     }
 }
 
-impl ThemeBackend for Ten {
+impl ThemeBackend for Abc {
     fn render(&mut self, snapshot: &CandidateView, events: &EventSink) -> Result<(), String> {
-        self.window.render(snapshot, events)
+        // Failure of either window hides the whole presentation.
+        let result = self
+            .candidates
+            .render(snapshot, events)
+            .and_then(|_| self.input.render(snapshot, events));
+        if result.is_err() {
+            self.hide();
+        }
+        result
     }
     fn hide(&mut self) {
-        self.window.hide();
+        self.input.hide();
+        self.candidates.hide();
     }
     fn refresh_appearance(&mut self) -> Result<(), String> {
-        self.window.app.borrow_mut().palette = Palette::new(crate::appearance::is_dark());
-        self.window.invalidate();
-        self.window.health()
+        self.input.invalidate();
+        self.candidates.invalidate();
+        self.check_health()
     }
     fn check_health(&mut self) -> Result<(), String> {
-        self.window.health()
+        self.input.health().and_then(|_| self.candidates.health())
     }
 }
 
 impl Window {
     fn render(&self, snapshot: &CandidateView, events: &EventSink) -> Result<(), String> {
+        if let Some(preedit) = &snapshot.preedit {
+            preedit.validate()?;
+        }
         // Layout-only snapshots must not cancel a pressed candidate, rebuild
         // text layouts, or repaint content. position() handles DPI transitions.
         let moved = {
@@ -527,43 +610,27 @@ impl Window {
         }
         self.cancel();
         self.health()?;
-        if !snapshot.visible || !snapshot.anchor.as_ref().is_some_and(|a| a.valid) {
+        if !snapshot.visible
+            || !snapshot.anchor.as_ref().is_some_and(|a| a.valid)
+            || (self.role == Role::Input && snapshot.preedit.is_none())
+            || (self.role == Role::Candidates && snapshot.items.is_empty())
+        {
             self.hide();
             return Ok(());
         }
         {
             let mut app = self.app.borrow_mut();
-            let mut primary_widths = Vec::with_capacity(snapshot.items.len());
-            let mut widths = Vec::with_capacity(snapshot.items.len());
-            for item in &snapshot.items {
-                let primary = app
-                    .graphics
-                    .measure(&item.primary_text, &app.graphics.text)
-                    .map_err(|e| e.to_string())?;
-                let secondary = if item.secondary_text.is_empty() {
-                    0.0
-                } else {
-                    8.0 * SCALE
-                        + app
-                            .graphics
-                            .measure(&item.secondary_text, &app.graphics.comment)
-                            .map_err(|e| e.to_string())?
-                };
-                primary_widths.push(primary);
-                widths.push(primary + secondary);
-            }
             app.content = Some(Content {
                 snapshot: snapshot.clone(),
                 events: events.clone(),
-                layout: Layout::new(widths),
-                primary_widths,
+                layout: Layout::new(snapshot.items.len(), self.role),
             });
         }
         self.position().map_err(|e| e.to_string())?;
         unsafe {
             let _ = ShowWindow(
                 self.hwnd.get(),
-                if self.preview {
+                if self.preview && self.role == Role::Candidates {
                     SW_SHOW
                 } else {
                     SW_SHOWNOACTIVATE
@@ -654,7 +721,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Window;
                 if let Some(window) = ptr.as_ref() {
                     if let Ok(mut error) = window.error.try_borrow_mut() {
-                        *error = Some("theme_ten native callback panicked".into());
+                        *error = Some("theme_abc native callback panicked".into());
                     }
                 }
             }
@@ -704,7 +771,7 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 WM_MOUSEACTIVATE => {
                     // The preview window must be activatable so it can be closed
                     // (Alt+F4); the live strip never activates the host.
-                    if window.preview {
+                    if window.preview && window.role == Role::Candidates {
                         return DefWindowProcW(hwnd, msg, wp, lp);
                     }
                     return LRESULT(MA_NOACTIVATE as isize);
@@ -748,6 +815,7 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     if pressed {
                         let _ = SetCapture(hwnd);
                     }
+                    window.invalidate();
                     return LRESULT(0);
                 }
                 WM_LBUTTONUP => {
@@ -815,11 +883,6 @@ fn rect(left: f32, top: f32, right: f32, bottom: f32) -> D2D_RECT_F {
         bottom,
     }
 }
-fn rect_with(mut rect: D2D_RECT_F, left: f32, right: f32) -> D2D_RECT_F {
-    rect.left = left;
-    rect.right = right;
-    rect
-}
 unsafe fn text(
     target: &ID2D1HwndRenderTarget,
     brush: &ID2D1SolidColorBrush,
@@ -846,10 +909,10 @@ pub struct Factory;
 
 impl crate::theme_api::ThemeFactory for Factory {
     fn name(&self) -> &'static str {
-        "ten"
+        "abc"
     }
     fn capabilities(&self) -> crate::theme_api::ThemeCapabilities {
-        crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY
+        crate::theme_api::ThemeCapabilities { preedit: true }
     }
     fn create(
         &self,
@@ -857,7 +920,77 @@ impl crate::theme_api::ThemeFactory for Factory {
         settings: &weasel_common::settings::ConfigSnapshot,
     ) -> Result<Box<dyn ThemeBackend>, String> {
         // Theme-local validation; style fields will be defined by this theme.
-        let _: serde_json::Map<String, serde_json::Value> = settings.theme_settings("ten")?;
+        let _: serde_json::Map<String, serde_json::Value> = settings.theme_settings("abc")?;
         create(mode)
+    }
+}
+
+// Classic bevel: outer gray/black, inner white/gray, inset gray/white.
+unsafe fn draw_frame(target: &ID2D1HwndRenderTarget, brush: &ID2D1SolidColorBrush, w: f32, h: f32) {
+    unsafe {
+        for (inset, light, dark) in [
+            (0.0, 0xC0C0C0, 0x000000),
+            (1.0, 0xFFFFFF, 0x808080),
+            (3.0, 0x808080, 0xFFFFFF),
+        ] {
+            for (edge, rgb) in [
+                (rect(inset, inset, w - inset - 1.0, inset + 1.0), light),
+                (rect(inset, inset, inset + 1.0, h - inset - 1.0), light),
+                (rect(inset, h - inset - 1.0, w - inset, h - inset), dark),
+                (rect(w - inset - 1.0, inset, w - inset, h - inset), dark),
+            ] {
+                brush.SetColor(&color(rgb));
+                target.FillRectangle(&edge, brush);
+            }
+        }
+    }
+}
+unsafe fn draw_arrow(
+    target: &ID2D1HwndRenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    x: f32,
+    y: f32,
+    up: bool,
+    enabled: bool,
+    pressed: bool,
+) {
+    unsafe {
+        // Separate button identities preserve cancellation when moving between
+        // the two controls which happen to invoke the same page action.
+        for (edge, rgb) in [
+            (
+                rect(x, y, x + 13.0, y + 1.0),
+                if pressed { 0x404040 } else { 0xFFFFFF },
+            ),
+            (
+                rect(x, y, x + 1.0, y + 13.0),
+                if pressed { 0x404040 } else { 0xFFFFFF },
+            ),
+            (
+                rect(x, y + 13.0, x + 14.0, y + 14.0),
+                if pressed { 0xFFFFFF } else { 0x404040 },
+            ),
+            (
+                rect(x + 13.0, y, x + 14.0, y + 14.0),
+                if pressed { 0xFFFFFF } else { 0x404040 },
+            ),
+        ] {
+            brush.SetColor(&color(rgb));
+            target.FillRectangle(&edge, brush);
+        }
+        brush.SetColor(&color(if enabled { 0x000000 } else { 0x808080 }));
+        let offset = if pressed { 1.0 } else { 0.0 };
+        for row in 0..4 {
+            let span = if up { row } else { 3 - row } as f32;
+            target.FillRectangle(
+                &rect(
+                    x + 6.0 - span + offset,
+                    y + 5.0 + row as f32 + offset,
+                    x + 7.0 + span + offset,
+                    y + 6.0 + row as f32 + offset,
+                ),
+                brush,
+            );
+        }
     }
 }

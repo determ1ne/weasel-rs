@@ -57,9 +57,9 @@ fn overlay(base: &mut Value, bytes: &[u8]) -> Result<(), String> {
     }
     if !matches!(
         next.get("theme").and_then(Value::as_str),
-        Some("eleven" | "ten")
+        Some("eleven" | "ten" | "abc")
     ) {
-        return Err("theme must be eleven or ten".into());
+        return Err("theme must be eleven, ten or abc".into());
     }
     if next.get("inline_preedit").is_some_and(|v| !v.is_boolean()) {
         return Err("inline_preedit must be a boolean".into());

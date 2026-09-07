@@ -6,7 +6,7 @@ use crate::theme_api::{Anchor as RenderRect, CandidateView};
 
 pub fn is_visible(snapshot: &CandidateView) -> bool {
     snapshot.visible
-        && !snapshot.items.is_empty()
+        && (!snapshot.items.is_empty() || snapshot.preedit.is_some())
         && snapshot.anchor.as_ref().is_some_and(|anchor| anchor.valid)
 }
 
@@ -54,6 +54,33 @@ pub fn popup_position(anchor: &RenderRect, width: i32, height: i32) -> (i32, i32
             return (anchor.left, anchor.bottom);
         }
         within_work_area(anchor, width, height, &info.rcWork)
+    }
+}
+
+/// Device-pixel work area for multi-window themes.
+pub fn work_area(anchor: &RenderRect) -> Option<RenderRect> {
+    unsafe {
+        let rect = RECT {
+            left: anchor.left,
+            top: anchor.top,
+            right: anchor.right,
+            bottom: anchor.bottom,
+        };
+        let monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST as u32);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if monitor.0.is_null() || !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        Some(RenderRect {
+            left: info.rcWork.left,
+            top: info.rcWork.top,
+            right: info.rcWork.right,
+            bottom: info.rcWork.bottom,
+            valid: true,
+        })
     }
 }
 
@@ -105,5 +132,24 @@ mod tests {
         assert!(is_visible(&snapshot));
         snapshot.visible = false;
         assert!(!is_visible(&snapshot));
+    }
+
+    #[test]
+    fn preedit_can_be_visible_without_candidates() {
+        let mut view = CandidateView {
+            visible: true,
+            preedit: Some(crate::theme_api::Preedit {
+                text: "ni".into(),
+                cursor: 2,
+            }),
+            anchor: Some(RenderRect {
+                valid: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(is_visible(&view));
+        view.preedit = None;
+        assert!(!is_visible(&view));
     }
 }
