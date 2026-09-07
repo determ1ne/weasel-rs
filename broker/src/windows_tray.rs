@@ -70,7 +70,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let settings = crate::settings::load(&paths, |warning| {
         deployment_diagnostic(&paths.executable_directory, &warning);
     });
-    let _settings_service = crate::settings_rpc::SettingsService::start(settings)?;
+    // A preview re-reads the on-disk configuration via this same runtime layout.
+    let _settings_service = crate::settings_rpc::SettingsService::start(settings, paths.clone())?;
     let directory = paths.executable_directory;
     let server = start_child(&directory, "weasel-server.exe", &[])?;
     let renderer = match start_child(&directory, "weasel-renderer.exe", &[]) {

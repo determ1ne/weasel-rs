@@ -16,10 +16,20 @@ pub trait ThemeBackend {
     }
 }
 
+/// How the renderer is running. Live is the normal per-candidate strip driven
+/// by the server; Preview is a standalone, closable stand-in showing the skin.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UiMode {
+    Live,
+    Preview,
+}
+
 #[derive(Clone, Copy)]
 pub struct ThemeRegistration {
     pub name: &'static str,
-    pub create: fn() -> Result<Box<dyn ThemeBackend>, String>,
+    /// `theme_settings` is the broker's configuration as JSON, forwarded verbatim
+    /// so a theme can render the user's configured skin.
+    pub create: fn(UiMode, &str) -> Result<Box<dyn ThemeBackend>, String>,
 }
 
 /// Prefer the configured backend, retaining the other initialization fallback.

@@ -26,6 +26,8 @@ pub fn load(paths: &RuntimePaths, mut warn: impl FnMut(String)) -> Settings {
     }
     Settings {
         theme: value["theme"].as_str().unwrap_or("eleven").into(),
+        // Canonical merged object; not the original JSON file formatting.
+        theme_settings: value.to_string(),
     }
 }
 
@@ -53,6 +55,10 @@ fn overlay(base: &mut Value, bytes: &[u8]) -> Result<(), String> {
     }
     let mut next = base.clone();
     merge(&mut next, patch);
+    // Leave room for protobuf fields when two individually valid files merge.
+    if next.to_string().len() > weasel_common::framing::MAX_FRAME_SIZE - 4096 {
+        return Err("merged configuration exceeds RPC size limit".into());
+    }
     if !matches!(
         next.get("theme").and_then(Value::as_str),
         Some("eleven" | "ten")
@@ -78,6 +84,16 @@ fn merge(base: &mut Value, patch: Value) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn merged_size_limit_is_atomic() {
+        let mut base = json!({"theme":"ten", "first":"x".repeat(600_000)});
+        let original = base.clone();
+        let patch = serde_json::to_vec(&json!({"second":"y".repeat(600_000)})).unwrap();
+        assert!(patch.len() < MAX_CONFIG_BYTES as usize);
+        assert!(overlay(&mut base, &patch).unwrap_err().contains("RPC size"));
+        assert_eq!(base, original);
+    }
 
     #[test]
     fn merges_objects_and_replaces_arrays() {

@@ -22,6 +22,9 @@ pub fn generate() {
             "Windows.Win32.BeginPaint", "Windows.Win32.EndPaint", "Windows.Win32.InvalidateRect",
             "Windows.Win32.GetModuleHandleW", "Windows.Win32.RegisterClassW",
             "Windows.Win32.GetClassInfoW", "Windows.Win32.LoadCursorW", "Windows.Win32.IDC_ARROW",
+            "Windows.Win32.LoadIconW",
+            "Windows.Win32.SW_SHOW",
+            "Windows.Win32.WS_SYSMENU",
             "Windows.Win32.CreateWindowExW", "Windows.Win32.DestroyWindow",
             "Windows.Win32.DefWindowProcW", "Windows.Win32.GetWindowLongPtrW",
             "Windows.Win32.SetWindowLongPtrW", "Windows.Win32.GWLP_USERDATA",
@@ -37,6 +40,9 @@ pub fn generate() {
             "Windows.Win32.WM_LBUTTONDOWN", "Windows.Win32.WM_LBUTTONUP", "Windows.Win32.WM_MOUSEMOVE",
             "Windows.Win32.WM_MOUSELEAVE", "Windows.Win32.WM_CAPTURECHANGED", "Windows.Win32.WM_CANCELMODE",
             "Windows.Win32.WM_MOUSEACTIVATE", "Windows.Win32.MA_NOACTIVATE", "Windows.Win32.WM_TIMER",
+            "Windows.Win32.WM_CLOSE", "Windows.Win32.PostQuitMessage",
+            "Windows.Win32.WM_SETICON", "Windows.Win32.ICON_SMALL", "Windows.Win32.ICON_BIG",
+            "Windows.Win32.SendMessageW",
             "Windows.Win32.CREATESTRUCTW",
         ])
         .write();

@@ -9,9 +9,9 @@ use windows_strings::{PCWSTR, w};
 use windows_version::OsVersion;
 
 use crate::{
-    backend::ThemeBackend,
+    backend::{ThemeBackend, UiMode},
     bindings::*,
-    presentation::{is_visible, popup_position},
+    presentation::{is_visible, popup_position, preview_position},
     state::same_content,
     ui_runtime::EventSender,
 };
@@ -71,25 +71,52 @@ struct UiState {
     _window_guard: WindowGuard,
     window: HWND,
     xaml_window: HWND,
+    preview: bool,
+    // Broker configuration (JSON) forwarded to the theme so it can render the
+    // user's configured skin. Rendering reads it once theme-specific settings
+    // are supported; carried (not yet consumed) for now.
+    #[allow(dead_code)]
+    theme_settings: String,
     last_snapshot: Option<RenderSnapshot>,
     measured_size: Option<Size>,
 }
 
 /// Called and dropped on the UI runtime's initialized STA.
-pub fn create() -> Result<Box<dyn crate::backend::ThemeBackend>, String> {
-    // The XAML Island backend requires Windows 10 1903 (build 18362) or later.
-    const REQUIRED_VERSION: OsVersion = OsVersion::new(10, 0, 0, 18362);
-    if REQUIRED_VERSION > OsVersion::current() {
-        return Err(format!(
-            "XAML Island backend requires Windows 10 1903 (build 18362) or later, but the current version is {}",
-            OsVersion::current().pack
-        ));
-    }
-    unsafe { create_initialized() }
+fn supports_xaml(version: OsVersion) -> bool {
+    version >= OsVersion::new(10, 0, 0, 18362)
 }
 
-unsafe fn create_initialized() -> Result<Box<dyn ThemeBackend>, String> {
-    let window = create_window()?;
+pub fn create(
+    mode: UiMode,
+    theme_settings: &str,
+) -> Result<Box<dyn crate::backend::ThemeBackend>, String> {
+    // The XAML Island backend requires Windows 10 1903 (build 18362) or later.
+    if !supports_xaml(OsVersion::current()) {
+        return Err(format!(
+            "XAML Island backend requires Windows 10 1903 (build 18362) or later, but the current version is {}",
+            OsVersion::current().build
+        ));
+    }
+    unsafe { create_initialized(mode, theme_settings) }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+    #[test]
+    fn checks_build_not_service_pack() {
+        assert!(!supports_xaml(OsVersion::new(10, 0, 0, 17763)));
+        assert!(supports_xaml(OsVersion::new(10, 0, 0, 18362)));
+        assert!(supports_xaml(OsVersion::new(10, 0, 0, 19044)));
+        assert!(supports_xaml(OsVersion::new(10, 0, 0, 22621)));
+    }
+}
+
+unsafe fn create_initialized(
+    mode: UiMode,
+    theme_settings: &str,
+) -> Result<Box<dyn ThemeBackend>, String> {
+    let window = create_window(mode)?;
     let window_guard = WindowGuard(window);
     apply_dwm_corner_preference(window);
     let xaml_manager = WindowsXamlManager::InitializeForCurrentThread()
@@ -186,6 +213,8 @@ unsafe fn create_initialized() -> Result<Box<dyn ThemeBackend>, String> {
         _window_guard: window_guard,
         window,
         xaml_window,
+        preview: mode == UiMode::Preview,
+        theme_settings: theme_settings.to_owned(),
         last_snapshot: None,
         measured_size: None,
     }))
@@ -220,20 +249,39 @@ impl ThemeBackend for UiState {
     }
 }
 
-unsafe fn create_window() -> Result<HWND, String> {
+unsafe fn create_window(mode: UiMode) -> Result<HWND, String> {
+    let icon = load_weasel_icon();
     let class = WNDCLASSW {
         lpfnWndProc: Some(window_proc),
         lpszClassName: WINDOW_CLASS,
+        // Class icon also acts as the preview task-bar icon fallback.
+        hIcon: icon,
         ..Default::default()
     };
     if RegisterClassW(&class).0 == 0 {
         // The class may already exist if the host is reinitialized in-process.
     }
+    // The preview keeps the borderless strip identical to input but must be
+    // findable and closable: no WS_EX_TOOLWINDOW (so a task-bar button appears)
+    // and no WS_EX_NOACTIVATE (so it can be activated and closed). Live keeps the
+    // invisible, non-activating tool window.
+    let (ex_style, title) = match mode {
+        UiMode::Live => (
+            (WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE) as u32,
+            WINDOW_CLASS,
+        ),
+        UiMode::Preview => ((WS_EX_TOPMOST) as u32, w!("Weasel-RS 皮肤预览")),
+    };
     let window = CreateWindowExW(
-        (WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE) as u32,
+        ex_style,
         WINDOW_CLASS,
-        WINDOW_CLASS,
-        WS_POPUP,
+        title,
+        WS_POPUP
+            | if mode == UiMode::Preview {
+                crate::bindings::Windows::Win32::WS_SYSMENU as u32
+            } else {
+                0
+            },
         0,
         0,
         1,
@@ -244,9 +292,41 @@ unsafe fn create_window() -> Result<HWND, String> {
         None,
     );
     if window.0.is_null() {
-        return Err("could not create renderer popup window".to_owned());
+        return Err("could not create renderer window".to_owned());
+    }
+    if mode == UiMode::Preview {
+        apply_taskbar_icon(window, icon);
     }
     Ok(window)
+}
+
+/// Loads the Weasel icon resource embedded in the renderer executable.
+unsafe fn load_weasel_icon() -> HICON {
+    let instance = GetModuleHandleW(None);
+    if instance.0.is_null() {
+        return HICON::default();
+    }
+    LoadIconW(Some(instance), w!("WEASEL_ICON"))
+}
+
+/// Sets the window's small and big icons so the preview window's task-bar button
+/// shows the Weasel icon. WM_SETICON is authoritative for the task-bar image.
+unsafe fn apply_taskbar_icon(window: HWND, icon: HICON) {
+    if icon.0.is_null() {
+        return;
+    }
+    let _ = SendMessageW(
+        window,
+        WM_SETICON as u32,
+        WPARAM(ICON_SMALL as usize),
+        LPARAM(icon.0 as isize),
+    );
+    let _ = SendMessageW(
+        window,
+        WM_SETICON as u32,
+        WPARAM(ICON_BIG as usize),
+        LPARAM(icon.0 as isize),
+    );
 }
 
 unsafe extern "system" fn window_proc(
@@ -255,6 +335,15 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // The preview window (the only non-tool-window variant) ends the process when
+    // the user closes it. Live tool windows are destroyed by the shutdown path.
+    if message == WM_CLOSE as u32
+        && GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW as isize == 0
+    {
+        PostQuitMessage(0);
+        // Drop XAML resources before the WindowGuard destroys HWND.
+        return LRESULT(0);
+    }
     if message == WM_SIZE as u32 {
         let width = (lparam.0 as u32 & 0xffff) as i32;
         let height = ((lparam.0 as u32 >> 16) & 0xffff) as i32;
@@ -302,6 +391,7 @@ fn render_snapshot(
         .anchor
         .as_ref()
         .ok_or("visible snapshot has no anchor")?;
+    let preview = state.preview;
 
     let unchanged = state
         .last_snapshot
@@ -324,10 +414,14 @@ fn render_snapshot(
         }
     }
 
-    let (width, height) = desired_size(state);
-    let (x, y) = popup_position(anchor, width, height);
     unsafe {
         if unchanged {
+            let (width, height) = desired_size(state);
+            let (x, y) = if preview {
+                preview_position(width, height)
+            } else {
+                popup_position(anchor, width, height)
+            };
             let dpi = GetDpiForWindow(state.window);
             let _ = SetWindowPos(
                 state.window,
@@ -346,7 +440,18 @@ fn render_snapshot(
             state.measured_size = None;
         }
         let (width, height) = desired_size(state);
-        let (x, y) = popup_position(anchor, width, height);
+        let (x, y) = if preview {
+            preview_position(width, height)
+        } else {
+            popup_position(anchor, width, height)
+        };
+        // The preview window is a normal activatable window; the live strip must
+        // never steal focus from the host application.
+        let show_flags = if preview {
+            SWP_SHOWWINDOW as u32
+        } else {
+            (SWP_NOACTIVATE | SWP_SHOWWINDOW) as u32
+        };
         let _ = SetWindowPos(
             state.window,
             Some(HWND_TOPMOST),
@@ -354,17 +459,14 @@ fn render_snapshot(
             y,
             width,
             height,
-            (SWP_NOACTIVATE | SWP_SHOWWINDOW) as u32,
+            show_flags,
         );
-        let _ = SetWindowPos(
-            state.xaml_window,
-            None,
-            0,
-            0,
-            width,
-            height,
-            (SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW) as u32,
-        );
+        let child_flags = if preview {
+            (SWP_NOZORDER | SWP_SHOWWINDOW) as u32
+        } else {
+            (SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW) as u32
+        };
+        let _ = SetWindowPos(state.xaml_window, None, 0, 0, width, height, child_flags);
         let _ = ShowWindow(state.window, SW_SHOWNA);
     }
     Ok(())

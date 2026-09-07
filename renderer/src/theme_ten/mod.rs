@@ -2,7 +2,10 @@
 mod bindings;
 mod logic;
 
-use crate::{backend::ThemeBackend, ui_runtime::EventSender};
+use crate::{
+    backend::{ThemeBackend, UiMode},
+    ui_runtime::EventSender,
+};
 use bindings::*;
 use logic::{Gesture, HEIGHT, Hit, Layout, NUMBER, Palette, Recovery, SCALE, enabled, pixels};
 use std::{
@@ -130,6 +133,12 @@ struct Window {
     error: RefCell<Option<String>>,
     recovery: RefCell<Recovery>,
     positioning: Cell<bool>,
+    preview: bool,
+    // Broker configuration (JSON) forwarded to the theme so it can render the
+    // user's configured skin. Rendering reads it once theme-specific settings
+    // are supported; carried (not yet consumed) for now.
+    #[allow(dead_code)]
+    theme_settings: String,
 }
 
 // Keep the native callback's allocation behind a shared reference even while
@@ -140,7 +149,8 @@ struct Ten {
     window: Rc<Window>,
 }
 
-pub fn create() -> Result<Box<dyn ThemeBackend>, String> {
+pub fn create(mode: UiMode, theme_settings: &str) -> Result<Box<dyn ThemeBackend>, String> {
+    let preview = mode == UiMode::Preview;
     let window = Rc::new(Window {
         hwnd: Cell::new(HWND::default()),
         dpi: Cell::new(96),
@@ -153,12 +163,17 @@ pub fn create() -> Result<Box<dyn ThemeBackend>, String> {
         error: RefCell::new(None),
         recovery: RefCell::new(Recovery::default()),
         positioning: Cell::new(false),
+        preview,
+        theme_settings: theme_settings.to_owned(),
     });
     unsafe {
         let instance = GetModuleHandleW(None);
         if instance.0.is_null() {
             return Err(windows_core::Error::from_thread().to_string());
         }
+        // The class icon is the task-bar button icon for the preview window. The
+        // live tool window has no task-bar presence, so it is harmless there too.
+        let icon = LoadIconW(Some(instance), w!("WEASEL_ICON"));
         let mut existing = WNDCLASSW::default();
         if !GetClassInfoW(Some(instance), CLASS, &mut existing).as_bool() {
             let wc = WNDCLASSW {
@@ -166,17 +181,30 @@ pub fn create() -> Result<Box<dyn ThemeBackend>, String> {
                 lpszClassName: CLASS,
                 lpfnWndProc: Some(wnd_proc),
                 hCursor: LoadCursorW(None, IDC_ARROW),
+                // Class icon also acts as the preview task-bar icon fallback.
+                hIcon: icon,
                 ..Default::default()
             };
             if wc.hCursor.0.is_null() || RegisterClassW(&wc).0 == 0 {
                 return Err(windows_core::Error::from_thread().to_string());
             }
         }
+        // The preview keeps the borderless strip identical to input but must be
+        // findable and closable: no WS_EX_TOOLWINDOW (task-bar button) and no
+        // WS_EX_NOACTIVATE (activatable, so it can be closed).
+        let (ex_style, title) = if preview {
+            ((WS_EX_TOPMOST) as u32, w!("Weasel-RS 皮肤预览"))
+        } else {
+            (
+                (WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) as u32,
+                w!("Weasel candidates"),
+            )
+        };
         let hwnd = CreateWindowExW(
-            (WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) as u32,
+            ex_style,
             CLASS,
-            w!("Weasel candidates"),
-            WS_POPUP,
+            title,
+            WS_POPUP | if preview { WS_SYSMENU as u32 } else { 0 },
             0,
             0,
             1,
@@ -191,6 +219,9 @@ pub fn create() -> Result<Box<dyn ThemeBackend>, String> {
         }
         window.hwnd.set(hwnd);
         window.dpi.set(GetDpiForWindow(hwnd).max(1));
+        if preview {
+            apply_taskbar_icon(hwnd, icon);
+        }
         // Eager initialization means the factory can fail over before first show.
         window
             .app
@@ -201,6 +232,28 @@ pub fn create() -> Result<Box<dyn ThemeBackend>, String> {
     }
     window.health()?;
     Ok(Box::new(Ten { window }))
+}
+
+/// Sets the window's small and big icons so the preview window's task-bar button
+/// shows the Weasel icon. WM_SETICON is authoritative for the task-bar image.
+unsafe fn apply_taskbar_icon(hwnd: HWND, icon: HICON) {
+    if icon.0.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON as u32,
+            WPARAM(ICON_SMALL as usize),
+            LPARAM(icon.0 as isize),
+        );
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON as u32,
+            WPARAM(ICON_BIG as usize),
+            LPARAM(icon.0 as isize),
+        );
+    }
 }
 
 impl Window {
@@ -240,18 +293,30 @@ impl Window {
             let dpi = self.dpi.get();
             let bounds = {
                 let app = self.app.borrow();
-                app.content.as_ref().and_then(|c| {
-                    c.snapshot
-                        .anchor
-                        .as_ref()
-                        .filter(|a| a.valid)
-                        .map(|anchor| {
-                            let width = pixels(c.layout.width, dpi);
-                            let height = pixels(HEIGHT, dpi);
-                            let (x, y) = crate::presentation::popup_position(anchor, width, height);
-                            (x, y, width, height)
-                        })
-                })
+                if self.preview {
+                    // The preview has no caret; center the strip on the primary
+                    // monitor instead of anchoring to a rect.
+                    app.content.as_ref().map(|c| {
+                        let width = pixels(c.layout.width, dpi);
+                        let height = pixels(HEIGHT, dpi);
+                        let (x, y) = crate::presentation::preview_position(width, height);
+                        (x, y, width, height)
+                    })
+                } else {
+                    app.content.as_ref().and_then(|c| {
+                        c.snapshot
+                            .anchor
+                            .as_ref()
+                            .filter(|a| a.valid)
+                            .map(|anchor| {
+                                let width = pixels(c.layout.width, dpi);
+                                let height = pixels(HEIGHT, dpi);
+                                let (x, y) =
+                                    crate::presentation::popup_position(anchor, width, height);
+                                (x, y, width, height)
+                            })
+                    })
+                }
             };
             let Some((x, y, width, height)) = bounds else {
                 return Ok(());
@@ -503,7 +568,14 @@ impl Window {
         }
         self.position().map_err(|e| e.to_string())?;
         unsafe {
-            let _ = ShowWindow(self.hwnd.get(), SW_SHOWNOACTIVATE);
+            let _ = ShowWindow(
+                self.hwnd.get(),
+                if self.preview {
+                    SW_SHOW
+                } else {
+                    SW_SHOWNOACTIVATE
+                },
+            );
         }
         self.invalidate();
         self.health()
@@ -625,7 +697,25 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     return LRESULT(0);
                 }
                 WM_ERASEBKGND => return LRESULT(1),
-                WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
+                WM_CLOSE => {
+                    // Closing the preview window ends the process. The live tool
+                    // window is destroyed by the shutdown path and never posts
+                    // WM_CLOSE.
+                    if window.preview {
+                        PostQuitMessage(0);
+                        // Leave HWND destruction to the owning backend's Drop.
+                        return LRESULT(0);
+                    }
+                    return DefWindowProcW(hwnd, msg, wp, lp);
+                }
+                WM_MOUSEACTIVATE => {
+                    // The preview window must be activatable so it can be closed
+                    // (Alt+F4); the live strip never activates the host.
+                    if window.preview {
+                        return DefWindowProcW(hwnd, msg, wp, lp);
+                    }
+                    return LRESULT(MA_NOACTIVATE as isize);
+                }
                 WM_SIZE => {
                     if let Err(e) = window.resize() {
                         window.graphics_error(e);

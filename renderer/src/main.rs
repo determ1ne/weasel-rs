@@ -11,6 +11,8 @@ mod diagnostics;
 #[cfg(windows)]
 mod presentation;
 #[cfg(windows)]
+mod preview;
+#[cfg(windows)]
 mod rpc;
 mod state;
 #[cfg(windows)]
@@ -27,7 +29,19 @@ fn main() {
             let _ = bindings::Windows::Win32::AllocConsole();
         }
     }
-    let _instance = match weasel_common::process::SingleInstance::acquire("renderer") {
+    let preview = match preview::parse_args(std::env::args_os().skip(1)) {
+        Ok(preview) => preview,
+        Err(error) => {
+            eprintln!("weasel-renderer: {error}");
+            std::process::exit(1);
+        }
+    };
+    let component = if preview {
+        "renderer-preview"
+    } else {
+        "renderer"
+    };
+    let _instance = match weasel_common::process::SingleInstance::acquire(component) {
         Ok(instance) => instance,
         Err(error) => {
             eprintln!("weasel-renderer: {error}");
@@ -35,8 +49,9 @@ fn main() {
         }
     };
     diagnostics::initialize();
-    diagnostics::record(format_args!("starting"));
-    if let Err(error) = rpc::run() {
+    diagnostics::record(format_args!("starting (preview={preview})"));
+    let result = if preview { preview::run() } else { rpc::run() };
+    if let Err(error) = result {
         diagnostics::record(format_args!("{error}"));
         std::process::exit(1);
     }

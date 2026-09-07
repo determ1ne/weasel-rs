@@ -1,4 +1,5 @@
 use crate::{
+    backend::UiMode,
     state::Owner,
     ui_runtime::{UiCommand, UiCommandSender, UiHandle},
 };
@@ -9,7 +10,7 @@ use tokio::{
     task::JoinSet,
 };
 use weasel_common::{
-    message::{Envelope, PeerRole, RendererEvent, ShutdownResponse, envelope::Payload},
+    message::{Envelope, PeerRole, RendererEvent, Settings, ShutdownResponse, envelope::Payload},
     rpc::{RpcServer, default_renderer_pipe_name},
 };
 
@@ -19,30 +20,43 @@ pub fn run() -> Result<(), String> {
         .enable_time()
         .build()
         .map_err(|error| format!("could not create renderer runtime: {error}"))?;
-    let theme = runtime.block_on(load_theme());
-    let ui = UiHandle::start(&theme)?;
+    // The live strip uses the broker's published configuration (no disk re-read).
+    let settings = runtime.block_on(load_theme(false)).unwrap_or_else(|error| {
+        crate::diagnostics::record(format_args!("{error}; using eleven"));
+        Settings {
+            theme: "eleven".into(),
+            theme_settings: "{}".into(),
+        }
+    });
+    let ui = UiHandle::start(&settings.theme, UiMode::Live, &settings.theme_settings)?;
     runtime.block_on(run_rpc(
         RpcServer::with_role(default_renderer_pipe_name(), PeerRole::Renderer),
         ui,
     ))
 }
 
-async fn load_theme() -> String {
+/// Read the broker's theme and its settings. `refresh` asks the broker to re-read
+/// the on-disk configuration for this one call, so a preview reflects a setup the
+/// user edited after the broker started.
+pub(crate) async fn load_theme(refresh: bool) -> Result<Settings, String> {
     use weasel_common::rpc::{RpcClient, RpcError, try_default_broker_pipe_name};
     let result = tokio::time::timeout(Duration::from_secs(2), async {
-        let client =
-            RpcClient::connect_as(try_default_broker_pipe_name()?, PeerRole::Renderer).await?;
-        client.get_settings().await
+        let client = RpcClient::connect_as_with_timeout(
+            try_default_broker_pipe_name()?,
+            PeerRole::Renderer,
+            Duration::from_secs(2),
+        )
+        .await?;
+        client.get_settings(refresh).await
     })
     .await;
     match result.unwrap_or(Err(RpcError::Timeout)) {
-        Ok(settings) if matches!(settings.theme.as_str(), "eleven" | "ten") => settings.theme,
-        result => {
-            crate::diagnostics::record(format_args!(
-                "broker settings unavailable or unsupported: {result:?}; using eleven"
-            ));
-            "eleven".into()
-        }
+        Ok(settings) if matches!(settings.theme.as_str(), "eleven" | "ten") => Ok(settings),
+        // Never print the full JSON: future settings may contain private data.
+        Ok(_) => Err("broker returned an unsupported renderer theme".into()),
+        Err(error) => Err(format!(
+            "could not read broker settings: {error}; ensure broker is running"
+        )),
     }
 }
 

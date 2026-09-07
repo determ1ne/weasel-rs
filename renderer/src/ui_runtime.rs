@@ -1,7 +1,7 @@
 //! Bounded UI worker lifecycle and toolkit-independent snapshot dispatch.
 #![allow(unsafe_op_in_unsafe_fn)]
 use crate::{
-    backend::{ThemeBackend, ThemeRegistration, theme_candidates},
+    backend::{ThemeBackend, ThemeRegistration, UiMode, theme_candidates},
     bindings::Windows::Win32::*,
     state::{Mailbox, Owner},
 };
@@ -96,11 +96,18 @@ fn select_first<T>(
 }
 
 impl UiHandle {
-    pub fn start(theme: &str) -> Result<Self, String> {
-        select_first(&theme_candidates(theme), Self::start_attempt)
+    pub fn start(theme: &str, mode: UiMode, theme_settings: &str) -> Result<Self, String> {
+        select_first(&theme_candidates(theme), |registration| {
+            Self::start_attempt(registration, mode, theme_settings)
+        })
     }
 
-    fn start_attempt(registration: ThemeRegistration) -> Result<Self, AttemptError> {
+    fn start_attempt(
+        registration: ThemeRegistration,
+        mode: UiMode,
+        theme_settings: &str,
+    ) -> Result<Self, AttemptError> {
+        let theme_settings = theme_settings.to_owned();
         let mailbox = Arc::new(Mutex::new(Mailbox::default()));
         let receiver = mailbox.clone();
         let (event_sender, events) = tokio::sync::mpsc::channel(32);
@@ -114,6 +121,8 @@ impl UiHandle {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_ui(
                         registration,
+                        mode,
+                        theme_settings,
                         receiver,
                         EventSender {
                             owner: 0,
@@ -170,6 +179,19 @@ impl UiHandle {
                 result?;
             }
             wake?;
+        }
+        Ok(())
+    }
+
+    /// Blocks until the user-driven UI thread ends (e.g. the preview window is
+    /// closed). Unlike close(), no quit is forced and no deadline is imposed: the
+    /// user controls when the window goes away.
+    pub fn wait_for_close(&mut self) -> Result<(), String> {
+        if let Some(worker) = self.thread.take() {
+            worker.join().map_err(|_| "UI thread panicked".to_owned())?;
+            if let Ok(result) = self.finished.try_recv() {
+                result?;
+            }
         }
         Ok(())
     }
@@ -296,6 +318,8 @@ impl Presentation {
 
 fn run_ui(
     registration: ThemeRegistration,
+    mode: UiMode,
+    theme_settings: String,
     mailbox: Arc<Mutex<Mailbox>>,
     events: EventSender,
     ready: &mpsc::SyncSender<Result<u32, String>>,
@@ -306,7 +330,7 @@ fn run_ui(
             .map_err(|e| e.to_string())?;
         let _apartment = Apartment;
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let backend = (registration.create)()?;
+        let backend = (registration.create)(mode, &theme_settings)?;
         let mut presentation = Presentation {
             backend,
             events,
@@ -390,7 +414,7 @@ mod tests {
         assert!(!is_thread_message(&message, WM_RENDERER_QUIT));
     }
 
-    fn unused_factory() -> Result<Box<dyn ThemeBackend>, String> {
+    fn unused_factory(_: UiMode, _theme_settings: &str) -> Result<Box<dyn ThemeBackend>, String> {
         Err("test factory must not create native resources".into())
     }
 

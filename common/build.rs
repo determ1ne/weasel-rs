@@ -22,6 +22,7 @@ fn main() {
             "Windows.Win32.LocalFree",
             "Windows.Win32.CreateMutexW",
             "Windows.Win32.GetLastError",
+            "Windows.Win32.ERROR_PIPE_BUSY",
             "Windows.Win32.TOKEN_USER",
             "Windows.Win32.TOKEN_GROUPS",
             "Windows.Win32.TOKEN_QUERY",

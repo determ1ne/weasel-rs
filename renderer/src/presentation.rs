@@ -10,6 +10,33 @@ pub fn is_visible(snapshot: &RenderSnapshot) -> bool {
         && snapshot.anchor.as_ref().is_some_and(|anchor| anchor.valid)
 }
 
+/// Center a `width`x`height` (device pixels) window on the primary monitor's
+/// work area. Used only by the standalone preview, which has no caret anchor.
+pub fn preview_position(width: i32, height: i32) -> (i32, i32) {
+    unsafe {
+        // A 1x1 rect at the virtual-screen origin resolves to the monitor that
+        // hosts (0,0), which is the primary display in the common layout.
+        let origin = RECT {
+            left: 0,
+            top: 0,
+            right: 1,
+            bottom: 1,
+        };
+        let monitor = MonitorFromRect(&origin, MONITOR_DEFAULTTONEAREST as u32);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if monitor.0.is_null() || !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return (0, 0);
+        }
+        let work = &info.rcWork;
+        let x = work.left + (work.right - work.left - width) / 2;
+        let y = work.top + (work.bottom - work.top - height) / 2;
+        (x.max(work.left), y.max(work.top))
+    }
+}
+
 pub fn popup_position(anchor: &RenderRect, width: i32, height: i32) -> (i32, i32) {
     unsafe {
         let rect = RECT {

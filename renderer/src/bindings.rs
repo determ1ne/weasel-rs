@@ -23,10 +23,11 @@ pub use Windows::UI::Xaml::{
 pub use Windows::Win32::{
     CreateWindowExW, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     DefWindowProcW, DestroyWindow, DwmSetWindowAttribute, GWL_EXSTYLE, GetDpiForWindow,
-    GetMonitorInfoW, GetPropW, GetWindowLongPtrW, HANDLE, HWND, HWND_TOPMOST,
-    IDesktopWindowXamlSourceNative, LPARAM, LRESULT, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromRect, PostThreadMessageW, RECT, RegisterClassW, RemovePropW, SW_HIDE, SW_SHOWNA,
-    SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetPropW, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WM_DPICHANGED, WM_SIZE, WNDCLASSW, WPARAM, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    GetModuleHandleW, GetMonitorInfoW, GetPropW, GetWindowLongPtrW, HANDLE, HICON, HWND,
+    HWND_TOPMOST, ICON_BIG, ICON_SMALL, IDesktopWindowXamlSourceNative, LPARAM, LRESULT, LoadIconW,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, PostQuitMessage, PostThreadMessageW,
+    RECT, RegisterClassW, RemovePropW, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SendMessageW, SetPropW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE,
+    WM_DPICHANGED, WM_SETICON, WM_SIZE, WNDCLASSW, WPARAM, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
 };

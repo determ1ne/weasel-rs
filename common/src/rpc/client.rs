@@ -119,6 +119,30 @@ impl RpcClient {
         Self::connect_as(pipe_name, crate::message::PeerRole::Unspecified).await
     }
 
+    /// Retry only transient instance exhaustion. The timeout covers all attempts;
+    /// callers should include the subsequent request in their own operation deadline.
+    pub async fn connect_as_with_timeout(
+        pipe_name: impl AsRef<str>,
+        role: crate::message::PeerRole,
+        timeout: std::time::Duration,
+    ) -> Result<Self, RpcError> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                match Self::connect_as(pipe_name.as_ref(), role).await {
+                    Err(RpcError::Io(error))
+                        if error.raw_os_error()
+                            == Some(crate::bindings::ERROR_PIPE_BUSY as i32) =>
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    result => return result,
+                }
+            }
+        })
+        .await
+        .map_err(|_| RpcError::Timeout)?
+    }
+
     pub async fn connect_as(
         pipe_name: impl AsRef<str>,
         role: crate::message::PeerRole,
@@ -344,10 +368,13 @@ impl RpcClient {
         }
     }
 
-    /// Read the broker's effective startup configuration.
-    pub async fn get_settings(&self) -> Result<crate::message::Settings, RpcError> {
+    /// Read the broker's configuration. `refresh` requests a one-shot re-read
+    /// from disk for this call (the preview uses it to see a just-edited setup).
+    pub async fn get_settings(&self, refresh: bool) -> Result<crate::message::Settings, RpcError> {
         let response = self
-            .request(Payload::GetSettings(crate::message::GetSettings {}))
+            .request(Payload::GetSettings(crate::message::GetSettings {
+                refresh,
+            }))
             .await?;
         match response.payload {
             Some(Payload::Settings(settings)) => Ok(settings),
