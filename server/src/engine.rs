@@ -493,7 +493,21 @@ impl Engine {
                             }
                             _ => {}
                         }
-                        let mut response = client.session.context_action(action);
+                        let mut response = match (action, command.ascii_mode) {
+                            (ContextAction::SetAscii, None) => {
+                                failure(
+                                    &connection,
+                                    envelope.request_id,
+                                    FailureCode::InvalidArgument,
+                                    "SetAscii requires ascii_mode",
+                                );
+                                return;
+                            }
+                            (ContextAction::SetAscii, Some(ascii)) => {
+                                client.session.set_ascii_mode_response(ascii)
+                            }
+                            _ => client.session.context_action(action),
+                        };
                         response.external_preedit = response.composing
                             && self.renderer.supports_preedit()
                             && !client.inline_preedit;

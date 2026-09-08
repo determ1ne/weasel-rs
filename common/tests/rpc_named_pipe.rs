@@ -94,6 +94,7 @@ async fn key_replies_push_commits_and_context_commands_share_wire_order() {
                     ..token
                 }),
                 action: ContextAction::Cancel as i32,
+                ascii_mode: None,
             })
             .await
             .unwrap();

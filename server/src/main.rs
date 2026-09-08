@@ -80,6 +80,7 @@ async fn read_connection(
             .map_or_else(|| engine.notifier(), |a| a.notifier(engine.notifier())),
     );
     let mut pending_opened = None;
+    let mut pending_mode_restored = false;
     loop {
         let received = if let Some(a) = admission.as_ref().filter(|a| a.pending()) {
             match tokio::time::timeout_at(a.deadline, connection.recv_tracked()).await {
@@ -114,6 +115,18 @@ async fn read_connection(
                     pending_opened = open.token
                 }
                 Some(Payload::LogEvent(_)) => {}
+                // Restore remembered mode before Focus without claiming an active
+                // slot. Allow only one assignment for this opened context; the
+                // pending connection's original deadline still applies.
+                Some(Payload::ContextCommand(command))
+                    if command.action == ContextAction::SetAscii as i32
+                        && command.ascii_mode.is_some()
+                        && !pending_mode_restored
+                        && pending_opened.is_some()
+                        && command.token == pending_opened =>
+                {
+                    pending_mode_restored = true;
+                }
                 Some(Payload::KeyEvent(_) | Payload::ContextCommand(_)) => {
                     let token = match envelope.payload.as_ref() {
                         Some(Payload::KeyEvent(key)) if !key.test && key.keycode.is_some() => {

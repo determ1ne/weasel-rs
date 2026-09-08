@@ -126,6 +126,7 @@ async fn role_operation_allowlists_and_response_rejection() {
             Operation::Context(m::ContextCommand {
                 token,
                 action: m::ContextAction::Cancel as i32,
+                ascii_mode: None,
             }),
         ];
         let mut bodies: Vec<_> = requests

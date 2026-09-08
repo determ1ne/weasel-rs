@@ -472,6 +472,16 @@ impl RpcClient {
         &self,
         token: Option<crate::message::ContextToken>,
     ) -> Result<(), RpcError> {
+        self.prepare_input_session(token, None).await
+    }
+
+    /// Open once and restore an optional remembered mode before allowing input.
+    /// Assignment and acknowledgement are part of the caller's existing deadline.
+    pub async fn prepare_input_session(
+        &self,
+        token: Option<crate::message::ContextToken>,
+        initial_ascii_mode: Option<bool>,
+    ) -> Result<(), RpcError> {
         if !self.is_connected() {
             return Err(RpcError::Disconnected);
         }
@@ -488,6 +498,22 @@ impl RpcClient {
             .await?;
         match reply.payload {
             Some(Payload::InputOpened(v)) if v.token == token => {
+                if let Some(ascii_mode) = initial_ascii_mode {
+                    let response = self
+                        .request_key_response(Payload::ContextCommand(
+                            crate::message::ContextCommand {
+                                token,
+                                action: crate::message::ContextAction::SetAscii as i32,
+                                ascii_mode: Some(ascii_mode),
+                            },
+                        ))
+                        .await?;
+                    if response.token != token || response.ascii_mode != Some(ascii_mode) {
+                        return Err(RpcError::Protocol(
+                            "input mode restoration was not confirmed".into(),
+                        ));
+                    }
+                }
                 opened.insert(id);
                 Ok(())
             }

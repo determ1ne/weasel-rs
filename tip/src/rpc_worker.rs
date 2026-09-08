@@ -57,6 +57,9 @@ enum RpcCommand {
 
 #[derive(Default)]
 struct PushTarget {
+    // 0 = unknown, 1 = Chinese, 2 = English. Only confirmed UI-thread replies
+    // update this memory; connection invalidation deliberately preserves it.
+    remembered_ascii: AtomicUsize,
     layout: LayoutMailbox,
     window: AtomicUsize,
     updates: Mutex<Vec<KeyEventResponse>>,
@@ -75,6 +78,13 @@ impl Default for LayoutMailbox {
 }
 
 impl PushTarget {
+    fn remembered_mode(&self) -> Option<bool> {
+        match self.remembered_ascii.load(Ordering::Acquire) {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
+    }
     fn current_epoch(&self) -> u64 {
         let generation = self.cancellation.load(Ordering::Acquire);
         let epoch = self.epoch.load(Ordering::Acquire);
@@ -394,6 +404,14 @@ impl WorkerState {
         }
         let expected = event.token.clone();
         let current = self.client.as_ref()?;
+        if let Err(error) = current
+            .prepare_input_session(event.token, self.push.remembered_mode())
+            .await
+        {
+            report("restore-input-mode", Some(&self.pipe_name), error);
+            self.disconnect_invalidated_client().await;
+            return None;
+        }
         match current.process_translated_key(event).await {
             Ok(value) if self.push.current_epoch() != 0 && value.token == expected => Some(value),
             Ok(_) => {
@@ -429,6 +447,16 @@ impl WorkerState {
         let Some(current) = self.client.as_ref() else {
             return;
         };
+        if !blur_only {
+            if let Err(error) = current
+                .prepare_input_session(command.token, self.push.remembered_mode())
+                .await
+            {
+                report("restore-input-mode", Some(&self.pipe_name), error);
+                self.disconnect_invalidated_client().await;
+                return;
+            }
+        }
         if let Err(error) = current.context_command(command).await {
             report("context-request", Some(&self.pipe_name), error);
             self.disconnect_invalidated_client().await;
@@ -488,6 +516,21 @@ pub struct RpcWorker {
 }
 
 impl RpcWorker {
+    pub fn remembered_mode(&self) -> Option<bool> {
+        self.push.remembered_mode()
+    }
+
+    pub fn remember_mode(&self, mode: Option<bool>) {
+        self.push.remembered_ascii.store(
+            match mode {
+                None => 0,
+                Some(false) => 1,
+                Some(true) => 2,
+            },
+            Ordering::Release,
+        );
+    }
+
     pub fn start(&mut self) {
         self.start_resolved(try_default_pipe_name());
     }
@@ -1129,6 +1172,7 @@ mod tests {
                     .dispatch(RpcCommand::Context(ContextCommand {
                         token: translated_key().token,
                         action: ContextAction::Focus as i32,
+                        ascii_mode: None,
                     }))
                     .await;
                 while push.updates.lock().unwrap().is_empty() {
@@ -1168,6 +1212,7 @@ mod tests {
             .try_send(RpcCommand::Context(ContextCommand {
                 token: translated_key().token,
                 action: ContextAction::Focus as i32,
+                ascii_mode: None,
             }))
             .unwrap();
         drop(sender);

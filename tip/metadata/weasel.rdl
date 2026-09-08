@@ -5,6 +5,9 @@
 // build.rs together with the official Windows metadata.
 
 mod Weasel {
+    // Thread-manager-local memory, retained when the TIP is deactivated.
+    const GUID_WEASEL_INPUT_MODE: GUID =
+        0x31e3c0e8_2e47_42b8_9bd5_a799ac652b11;
     const CLSID_WEASEL_TIP: GUID =
         0x16a7aea9_9ee6_4540_8020_e384c0489bb1;
     const GUID_WEASEL_DISPLAY_ATTRIBUTE: GUID =

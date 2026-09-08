@@ -91,6 +91,7 @@ async fn one_pipe_opens_multiple_contexts_and_destroy_reopens_only_its_context()
                 .context_command(ContextCommand {
                     token: Some(token),
                     action: action as i32,
+                    ascii_mode: None,
                 })
                 .await
                 .unwrap();

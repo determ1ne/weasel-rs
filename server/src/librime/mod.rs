@@ -173,6 +173,22 @@ impl RimeSession {
             }
         }
     }
+    /// Explicit assignment, including a truthful acknowledgement. Repeating the
+    /// same assignment must not commit an unrelated active composition.
+    pub fn set_ascii_mode_response(&mut self, ascii: bool) -> KeyEventResponse {
+        unsafe {
+            if let Some(get) = (*self.api.api).get_option {
+                if (get(self.id, c"ascii_mode".as_ptr()) != 0) != ascii {
+                    if let Some(commit) = (*self.api.api).commit_composition {
+                        commit(self.id);
+                    }
+                }
+            }
+        }
+        self.set_ascii_mode(ascii);
+        self.read_response(false, String::new())
+    }
+
     pub fn context_action(
         &mut self,
         action: weasel_common::message::ContextAction,

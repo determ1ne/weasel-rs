@@ -40,6 +40,7 @@ impl TextService {
         let command = weasel_common::message::ContextCommand {
             token: Some(state.token()?),
             action: weasel_common::message::ContextAction::Cancel as i32,
+            ascii_mode: None,
         };
         // Invalidate the cancellation reply too: it must not request another
         // write session against this read-only document.

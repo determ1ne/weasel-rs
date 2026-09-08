@@ -92,6 +92,7 @@ impl TextService {
         *self.lock(&self.keystroke_mgr)? = Some(keystroke_mgr);
         *self.lock(&self.keystroke_client_id)? = Some(tid);
         self.lock(&self.rpc)?.start();
+        self.load_input_mode()?;
         self.register_display_attribute()?;
         self.activated.store(true, Ordering::Release);
         Ok(())

@@ -10,6 +10,7 @@ mod host_edit;
 use context::ContextState;
 mod display_attribute;
 mod edit_session;
+mod input_mode;
 mod key_event;
 mod language_bar;
 mod layout;

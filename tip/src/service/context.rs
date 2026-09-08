@@ -219,6 +219,7 @@ impl TextService {
         let _ = self.lock(&self.rpc)?.context_command(ContextCommand {
             token: Some(token),
             action: ContextAction::Destroy as i32,
+            ascii_mode: None,
         });
         let removed = {
             let mut states = self.lock(&self.contexts)?;
@@ -267,6 +268,7 @@ impl TextService {
         let command = ContextCommand {
             token: Some(state.token()?),
             action: action as i32,
+            ascii_mode: None,
         };
         let result = self.lock(&state.rpc)?.context_command(command);
         if let Err(error) = result {
@@ -325,6 +327,10 @@ impl TextService {
                 state.reconciling.store(false, Ordering::Release);
                 if let Some(ascii) = response.ascii_mode {
                     *self.lock(&state.input_mode)? = Some((token.connection_epoch, ascii));
+                    let is_focused = *self.lock(&self.focused_context)? == Some(state.id);
+                    if is_focused {
+                        self.remember_input_mode(ascii)?;
+                    }
                     self.refresh_language_bar()?;
                 }
                 if response::has_edit_payload(&response) {

@@ -291,6 +291,9 @@ fn validate_context(v: &m::ContextCommand) -> Result<(), RpcError> {
     ) {
         return Err(invalid("unknown context action"));
     }
+    if v.action == m::ContextAction::SetAscii as i32 && v.ascii_mode.is_none() {
+        return Err(invalid("SetAscii requires ascii_mode"));
+    }
     Ok(())
 }
 fn validate_interaction(v: &m::RendererEvent) -> Result<(), RpcError> {

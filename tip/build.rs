@@ -36,6 +36,10 @@ fn main() {
         .input_default()
         .output(&bindings)
         .filters([
+            "Windows.Win32.ITfCompartmentMgr",
+            "Windows.Win32.ITfCompartment",
+            "Windows.Win32.VariantClear",
+            "Weasel.GUID_WEASEL_INPUT_MODE",
             "Windows.Win32.E_PENDING",
             "Windows.Win32.GetAncestor",
             "Windows.Win32.GA_ROOT",

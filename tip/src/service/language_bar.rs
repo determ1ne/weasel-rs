@@ -303,6 +303,7 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
             let command = ContextCommand {
                 token: Some(target.token()?),
                 action: ContextAction::ToggleAscii as i32,
+                ascii_mode: None,
             };
             // Never wait for a pipe response from a language-bar COM callback.
             let rpc = target

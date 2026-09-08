@@ -32,11 +32,15 @@ enum ContextAction {
   CONTEXT_ACTION_TOGGLE_ASCII = 6;
   // Release one context without closing the shared TextService connection.
   CONTEXT_ACTION_DESTROY = 7;
+  // Idempotent assignment; existing actions retain their original semantics.
+  CONTEXT_ACTION_SET_ASCII = 8;
 }
 
 message ContextCommand {
   ContextToken token = 1;
   ContextAction action = 2;
+  // Required for SET_ASCII; absent on commands sent by older TIPs.
+  optional bool ascii_mode = 3;
 }
 
 message Candidate {
