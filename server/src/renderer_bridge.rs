@@ -3,7 +3,7 @@ use crate::engine::Work;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -15,6 +15,7 @@ use weasel_common::{
 
 #[derive(Clone)]
 pub(crate) struct RendererPublisher {
+    preedit: Arc<AtomicBool>,
     snapshots: watch::Sender<Option<RenderSnapshot>>,
     sequence: Arc<AtomicU64>,
 }
@@ -23,6 +24,7 @@ impl RendererPublisher {
         let (tx, rx) = watch::channel(None);
         (
             Self {
+                preedit: Arc::new(AtomicBool::new(false)),
                 snapshots: tx,
                 sequence: Arc::new(AtomicU64::new(0)),
             },
@@ -43,19 +45,22 @@ impl RendererPublisher {
             *latest = Some(snapshot);
         });
     }
+    pub fn supports_preedit(&self) -> bool {
+        self.preedit.load(Ordering::Acquire)
+    }
 }
 
 pub(crate) fn spawn(
     mut snapshots: watch::Receiver<Option<RenderSnapshot>>,
     engine: crate::worker::Sender<Work>,
+    publisher: RendererPublisher,
+    eager: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            if snapshots
-                .borrow()
-                .as_ref()
-                .is_none_or(|snapshot| !snapshot.visible)
-            {
+            // External preedit needs capability negotiation before the first key.
+            // Inline-only sessions retain the lazy, visible-snapshot connection.
+            if !eager && snapshots.borrow().as_ref().is_none_or(|s| !s.visible) {
                 if snapshots.changed().await.is_err() {
                     return;
                 }
@@ -73,6 +78,17 @@ pub(crate) fn spawn(
                     continue;
                 }
             };
+            let supported = match tokio::time::timeout(
+                Duration::from_secs(2),
+                client.query_config(".capabilities.preedit", false),
+            )
+            .await
+            {
+                Ok(Ok(Some(value))) => value.as_bool().unwrap_or(false),
+                _ => false,
+            };
+            publisher.preedit.store(supported, Ordering::Release);
+            (engine.notifier())();
             let mut events = client.subscribe_renderer_events();
             let mut dirty = true;
             // One connection/task owns both directions; reconnect drops its subscription.
@@ -105,6 +121,8 @@ pub(crate) fn spawn(
                     _ = client.disconnected() => break,
                 }
             }
+            publisher.preedit.store(false, Ordering::Release);
+            (engine.notifier())();
             client.disconnect().await;
         }
     })
@@ -120,7 +138,15 @@ pub(crate) fn render_snapshot(
         sequence: 0, // Assigned only when published; independent of input revision.
         session_id,
         revision,
-        visible: !response.candidates.is_empty() && anchor.valid,
+        visible: (!response.candidates.is_empty()
+            || (response.external_preedit && response.composing))
+            && anchor.valid,
+        preedit: (response.external_preedit && response.composing).then(|| {
+            weasel_common::message::RenderPreedit {
+                text: response.composition.clone(),
+                cursor_utf16: response.composition_cursor,
+            }
+        }),
         anchor: Some(anchor.clone()),
         items: response
             .candidates

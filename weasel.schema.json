@@ -15,12 +15,37 @@
       "enum": [
         "eleven",
         "ten",
-        "abc"
+        "abc",
+        "void"
       ]
+    },
+    "ascii_mode": {
+      "description": "新输入会话默认使用英文模式，可由 app_options 中的 ascii_mode 覆盖",
+      "type": "boolean",
+      "default": false
     },
     "inline_preedit": {
       "description": "是否在宿主编辑框内联显示预编辑文本",
       "type": "boolean"
+    },
+    "app_options": {
+      "description": "按宿主程序文件名配置新输入会话的默认选项",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "ascii_mode": {
+            "description": "新会话默认使用英文模式；未指定时继承全局 ascii_mode，不覆盖已有会话的手动切换",
+            "type": "boolean"
+          },
+          "inline_preedit": {
+            "description": "是否在该宿主编辑框内联显示预编辑文本；未指定时继承全局 inline_preedit，主题不支持外部预编辑时仍回退内联",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "examples": [{"cmd.exe": {"ascii_mode": true}}]
     },
     "themeSettings": {
       "description": "按主题划分的自定义设置，键为主题名称，值为该主题的设置对象",

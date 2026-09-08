@@ -60,15 +60,34 @@ fn overlay(base: &mut Value, bytes: &[u8]) -> Result<(), String> {
     }
     if !matches!(
         next.get("theme").and_then(Value::as_str),
-        Some("eleven" | "ten" | "abc")
+        Some("eleven" | "ten" | "abc" | "void")
     ) {
-        return Err("theme must be eleven, ten or abc".into());
+        return Err("theme must be eleven, ten, abc or void".into());
     }
     if next.get("inline_preedit").is_some_and(|v| !v.is_boolean()) {
         return Err("inline_preedit must be a boolean".into());
     }
+    if next.get("ascii_mode").is_some_and(|v| !v.is_boolean()) {
+        return Err("ascii_mode must be a boolean".into());
+    }
     if next.get("themeSettings").is_some_and(|v| !v.is_object()) {
         return Err("themeSettings must be an object".into());
+    }
+    if let Some(apps) = next.get("app_options") {
+        let apps = apps.as_object().ok_or("app_options must be an object")?;
+        for (name, options) in apps {
+            if name.is_empty() || name.contains(['/', '\\']) || !options.is_object() {
+                return Err(
+                    "app_options keys must be executable basenames and values must be objects"
+                        .into(),
+                );
+            }
+            for option in ["ascii_mode", "inline_preedit"] {
+                if options.get(option).is_some_and(|v| !v.is_boolean()) {
+                    return Err(format!("app_options.{name}.{option} must be a boolean"));
+                }
+            }
+        }
     }
     *base = next;
     Ok(())
@@ -108,6 +127,10 @@ mod tests {
             br#"{"theme":null}"#,
             br#"{"theme":"unknown"}"#,
             br#"{"theme":42}"#,
+            br#"{"ascii_mode":"false"}"#,
+            br#"{"app_options":[]}"#,
+            br#"{"app_options":{"cmd.exe":{"ascii_mode":"true"}}}"#,
+            br#"{"app_options":{"cmd.exe":{"inline_preedit":"false"}}}"#,
         ] {
             let mut base = original.clone();
             assert!(overlay(&mut base, bytes).is_err());

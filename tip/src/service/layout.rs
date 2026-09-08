@@ -143,7 +143,8 @@ impl ITfEditSession_Impl for LayoutProbe_Impl {
                         top: rect.top,
                         right: rect.right,
                         bottom: rect.bottom,
-                        valid: rect.right > rect.left && rect.bottom > rect.top,
+                        // An empty TSF composition still has a caret-height rect.
+                        valid: rect.right >= rect.left && rect.bottom > rect.top,
                     }),
                 });
             Ok(())

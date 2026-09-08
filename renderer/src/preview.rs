@@ -40,6 +40,7 @@ pub fn synthetic_snapshot() -> RenderSnapshot {
         })
         .collect();
     RenderSnapshot {
+        preedit: None,
         visible: true,
         sequence: 1,
         session_id: 1,

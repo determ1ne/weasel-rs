@@ -5,7 +5,13 @@ use weasel_common::message::{RenderSnapshot, RendererEvent, RendererEventAction}
 
 pub fn view(snapshot: &RenderSnapshot, content_id: u64) -> CandidateView {
     CandidateView {
-        preedit: None,
+        preedit: snapshot
+            .preedit
+            .as_ref()
+            .map(|p| crate::theme_api::Preedit {
+                text: p.text.clone(),
+                cursor: p.cursor_utf16,
+            }),
         content_id,
         visible: snapshot.visible,
         anchor: snapshot.anchor.as_ref().map(|r| Anchor {

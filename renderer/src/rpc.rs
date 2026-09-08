@@ -49,6 +49,7 @@ pub(crate) async fn load_theme(
 
 async fn run_rpc(server: RpcServer, mut ui: UiHandle) -> Result<(), String> {
     let commands = ui.command_sender();
+    let preedit = ui.capabilities.preedit;
     let (shutdown_sender, mut shutdown_receiver) = watch::channel(false);
     let mut tasks = JoinSet::new();
     let mut routes: HashMap<Owner, mpsc::Sender<RendererEvent>> = HashMap::new();
@@ -68,7 +69,7 @@ async fn run_rpc(server: RpcServer, mut ui: UiHandle) -> Result<(), String> {
                 let shutdown = shutdown_sender.clone();
                 tasks.spawn(async move {
                     let _guard = ConnectionOwner { owner, commands: commands.clone() };
-                    (owner, serve_connection(connection, owner, commands, receiver, shutdown).await)
+                    (owner, serve_connection(connection, owner, commands, receiver, shutdown, preedit).await)
                 });
             }
             completed = tasks.join_next(), if !tasks.is_empty() => {
@@ -121,6 +122,7 @@ async fn serve_connection(
     commands: UiCommandSender,
     mut events: mpsc::Receiver<RendererEvent>,
     shutdown_sender: watch::Sender<bool>,
+    preedit: bool,
 ) -> Result<(), String> {
     loop {
         // The common transport owns the bounded reader/writer tasks.
@@ -146,6 +148,18 @@ async fn serve_connection(
             return Ok(());
         };
         match envelope.payload {
+            Some(Payload::QueryConfig(query)) => {
+                // Read-only runtime capability of the successfully created theme.
+                let json = (query.path == ".capabilities.preedit").then(|| preedit.to_string());
+                connection
+                    .enqueue(Envelope {
+                        request_id: envelope.request_id,
+                        payload: Some(Payload::ConfigValue(weasel_common::message::ConfigValue {
+                            json,
+                        })),
+                    })
+                    .map_err(|e| e.to_string())?;
+            }
             Some(Payload::Ping(_)) => {
                 connection
                     .send_pong(envelope.request_id, "renderer ready")
@@ -196,7 +210,7 @@ mod tests {
             let server = RpcServer::with_role(&pipe, PeerRole::Renderer);
             let accept = tokio::spawn(async move { (server.accept().await.unwrap(), server) });
             let client = loop {
-                match weasel_common::rpc::RpcClient::connect_as(&pipe, PeerRole::Broker).await {
+                match weasel_common::rpc::RpcClient::connect_as(&pipe, PeerRole::Server).await {
                     Ok(client) => break client,
                     Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
                 }
@@ -207,13 +221,20 @@ mod tests {
             let (_events, receiver) = mpsc::channel(1);
             let (shutdown, _) = watch::channel(false);
             let serve = tokio::spawn(serve_connection(
-                connection, 1, commands, receiver, shutdown,
+                connection, 1, commands, receiver, shutdown, true,
             ));
             assert_eq!(
                 client.ping("readiness").await.unwrap().text,
                 "renderer ready"
             );
             assert!(!observer.is_owner(1));
+            assert_eq!(
+                client
+                    .query_config(".capabilities.preedit", false)
+                    .await
+                    .unwrap(),
+                Some(serde_json::json!(true))
+            );
             client.disconnect().await;
             serve.await.unwrap().unwrap();
         })

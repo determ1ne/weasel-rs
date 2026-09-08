@@ -12,6 +12,35 @@ use crate::message::{
 
 use super::{RpcError, read_frame, wire, write_frame};
 
+fn client_executable(pipe: &NamedPipeServer) -> Option<String> {
+    use crate::bindings::*;
+    use std::os::windows::io::AsRawHandle;
+    unsafe {
+        let mut pid = 0;
+        if !GetNamedPipeClientProcessId(HANDLE(pipe.as_raw_handle()), &mut pid).as_bool() {
+            return None;
+        }
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION as u32, false, pid);
+        if process.0.is_null() {
+            return None;
+        }
+        let mut path = [0u16; 32768];
+        let mut len = path.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            process,
+            0,
+            windows_strings::PWSTR(path.as_mut_ptr()),
+            &mut len,
+        );
+        let _ = CloseHandle(process);
+        if !result.as_bool() {
+            return None;
+        }
+        let path = String::from_utf16(path.get(..len as usize)?).ok()?;
+        Some(path.rsplit(['\\', '/']).next()?.to_owned())
+    }
+}
+
 fn validate_peer_role(
     local: PeerRole,
     peer: i32,
@@ -82,7 +111,7 @@ fn validate_business(
         (
             PeerRole::Renderer,
             PeerRole::Server,
-            Some(Payload::Ping(_) | Payload::RenderSnapshot(_)),
+            Some(Payload::Ping(_) | Payload::RenderSnapshot(_) | Payload::QueryConfig(_)),
         ) => true,
         _ => false,
     };
@@ -110,6 +139,7 @@ pub struct RpcServer {
 
 /// A connected client/server RPC stream.
 pub struct RpcConnection {
+    client_executable: Option<String>,
     activity: std::sync::Arc<super::activity::Activity>,
     layout: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<LayoutUpdate>>>,
     incoming: Mutex<mpsc::Receiver<Result<Envelope, RpcError>>>,
@@ -220,6 +250,7 @@ impl RpcConnection {
         role: PeerRole,
         allow_unspecified_peer: bool,
     ) -> Self {
+        let client_executable = client_executable(&pipe);
         let (mut reader, mut writer) = tokio::io::split(pipe);
         let (tx, incoming) = mpsc::channel(64);
         let (outgoing, mut rx) =
@@ -296,6 +327,7 @@ impl RpcConnection {
             writer_activity.notify();
         });
         Self {
+            client_executable,
             activity,
             layout,
             incoming: Mutex::new(incoming),
@@ -310,6 +342,11 @@ impl RpcConnection {
             .recv_tracked()
             .await?
             .map(|(envelope, _lease)| envelope))
+    }
+
+    /// Basename of the process connected to this pipe, resolved once at accept.
+    pub fn client_executable(&self) -> Option<&str> {
+        self.client_executable.as_deref()
     }
 
     pub async fn recv_tracked(&self) -> Result<Option<(Envelope, super::RequestLease)>, RpcError> {

@@ -241,11 +241,27 @@ fn init_logging(paths: &RuntimePaths, component: &str) -> Result<(), String> {
 }
 
 async fn serve(paths: RuntimePaths) -> Result<(), String> {
+    let settings =
+        match weasel_common::settings::fetch(weasel_common::message::PeerRole::Server, false).await
+        {
+            Ok(settings) => Some(settings),
+            Err(error) => {
+                eprintln!(
+                    "weasel-server: broker settings unavailable: {error}; using Rime defaults"
+                );
+                None
+            }
+        };
     let (publisher, snapshots) = renderer_bridge::RendererPublisher::channel();
+    let capability = publisher.clone();
+    let eager_renderer = settings
+        .as_ref()
+        .is_some_and(|s| s.needs_external_preedit());
     let mut engine = worker::Worker::spawn(engine::QUEUE_CAPACITY, move || {
-        engine::Engine::new(paths, publisher)
+        engine::Engine::new(paths, publisher, settings)
     })?;
-    let renderer = renderer_bridge::spawn(snapshots, engine.sender.clone());
+    let renderer =
+        renderer_bridge::spawn(snapshots, engine.sender.clone(), capability, eager_renderer);
     let server = RpcServer::with_role(
         default_pipe_name(),
         weasel_common::message::PeerRole::Server,

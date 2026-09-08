@@ -21,6 +21,49 @@ impl ConfigSnapshot {
     pub fn theme(&self) -> Result<String, String> {
         Ok(self.get(".theme")?.unwrap_or_else(|| "eleven".into()))
     }
+
+    pub fn app_ascii_mode(&self, executable: &str) -> Option<bool> {
+        self.application_bool(executable, "ascii_mode")
+            .or_else(|| self.0.get("ascii_mode").and_then(Value::as_bool))
+    }
+
+    pub fn inline_preedit(&self) -> bool {
+        self.0
+            .get("inline_preedit")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+    }
+
+    pub fn app_inline_preedit(&self, executable: &str) -> bool {
+        self.application_bool(executable, "inline_preedit")
+            .unwrap_or_else(|| self.inline_preedit())
+    }
+
+    /// Negotiate renderer capabilities early if any application can need them.
+    pub fn needs_external_preedit(&self) -> bool {
+        !self.inline_preedit()
+            || self
+                .0
+                .get("app_options")
+                .and_then(Value::as_object)
+                .is_some_and(|apps| {
+                    apps.values().any(|options| {
+                        options.get("inline_preedit").and_then(Value::as_bool) == Some(false)
+                    })
+                })
+    }
+
+    fn application_bool(&self, executable: &str, option: &str) -> Option<bool> {
+        let apps = self.0.get("app_options")?.as_object()?;
+        apps.get(executable)
+            .or_else(|| {
+                apps.iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(executable))
+                    .map(|(_, value)| value)
+            })?
+            .get(option)?
+            .as_bool()
+    }
     pub fn theme_settings<T: DeserializeOwned + Default>(&self, name: &str) -> Result<T, String> {
         let key = serde_json::to_string(name).map_err(|e| e.to_string())?;
         Ok(self
@@ -144,6 +187,43 @@ pub async fn fetch(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn application_preedit_overrides_global_and_enables_early_negotiation() {
+        for global in [true, false] {
+            let config = super::ConfigSnapshot::new(serde_json::json!({
+                "inline_preedit": global,
+                "app_options": {
+                    "cmd.exe": {"inline_preedit": false},
+                    "editor.exe": {"inline_preedit": true},
+                    "other.exe": {"ascii_mode": true}
+                }
+            }));
+            assert!(!config.app_inline_preedit("CMD.EXE"));
+            assert!(config.app_inline_preedit("editor.exe"));
+            assert_eq!(config.app_inline_preedit("other.exe"), global);
+            assert_eq!(config.app_inline_preedit("unknown.exe"), global);
+            assert!(config.needs_external_preedit());
+        }
+        let defaults = super::ConfigSnapshot::new(serde_json::json!({}));
+        assert!(defaults.app_inline_preedit("cmd.exe"));
+        assert!(!defaults.needs_external_preedit());
+    }
+    #[test]
+    fn application_defaults_distinguish_false_from_missing() {
+        let config = super::ConfigSnapshot::new(serde_json::json!({
+            "app_options": {"cmd.exe": {"ascii_mode": true}, "editor.exe": {"ascii_mode": false}}
+        }));
+        assert_eq!(config.app_ascii_mode("CMD.EXE"), Some(true));
+        assert_eq!(config.app_ascii_mode("editor.exe"), Some(false));
+        assert_eq!(config.app_ascii_mode("unknown.exe"), None);
+        let config = super::ConfigSnapshot::new(serde_json::json!({
+            "ascii_mode": true, "inline_preedit": false,
+            "app_options": {"editor.exe": {"ascii_mode": false}}
+        }));
+        assert_eq!(config.app_ascii_mode("unknown.exe"), Some(true));
+        assert_eq!(config.app_ascii_mode("EDITOR.EXE"), Some(false));
+        assert!(!config.inline_preedit());
+    }
     use super::*;
     #[test]
     fn theme_defaults_are_overlaid_without_changing_the_source() {

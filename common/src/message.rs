@@ -27,6 +27,8 @@ pub struct KeyEvent {
 /// from one-shot effects; no legacy flat-response decoder exists.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct KeyEventResponse {
+    /// Server-local routing decision, not serialized in the TIP contract.
+    pub external_preedit: bool,
     pub eaten: bool,
     pub commit_text: String,
     pub composition: String,

@@ -6,6 +6,10 @@ fn main() {
         .input_default()
         .filters([
             "Windows.Win32.GetKeyState",
+            "Windows.Win32.GetNamedPipeClientProcessId",
+            "Windows.Win32.OpenProcess",
+            "Windows.Win32.PROCESS_QUERY_LIMITED_INFORMATION",
+            "Windows.Win32.QueryFullProcessImageNameW",
             "Windows.Win32.VK_SHIFT",
             "Windows.Win32.MessageBoxW",
             "Windows.Win32.MB_OK",

@@ -35,6 +35,7 @@ pub(crate) enum Work {
 }
 
 struct ClientSession {
+    inline_preedit: bool,
     connection_id: u64,
     connection: Arc<RpcConnection>,
     alive: Arc<AtomicBool>,
@@ -46,6 +47,7 @@ struct ClientSession {
 }
 
 pub(crate) struct Engine {
+    settings: Option<weasel_common::settings::ConfigSnapshot>,
     // Field order is intentional: destroy every session before dropping the engine.
     clients: HashMap<u64, ClientSession>,
     rime: librime::Librime,
@@ -56,10 +58,58 @@ pub(crate) struct Engine {
     next_session: u64,
 }
 
+fn host_response(mut response: KeyEventResponse) -> KeyEventResponse {
+    if response.external_preedit {
+        // Preserve composing/commit semantics while keeping the host range empty.
+        response.composition.clear();
+        response.composition_cursor = 0;
+    }
+    response
+}
+
+#[cfg(test)]
+mod preedit_tests {
+    use super::*;
+
+    #[test]
+    fn external_preedit_keeps_host_composition_and_commit_but_routes_text_to_renderer() {
+        let response = KeyEventResponse {
+            external_preedit: true,
+            composing: true,
+            state_updated: true,
+            composition: "nihao".into(),
+            composition_cursor: 2,
+            commit_text: "前文".into(),
+            ..Default::default()
+        };
+        let anchor = RenderRect {
+            left: 10,
+            right: 10,
+            top: 20,
+            bottom: 40,
+            valid: true,
+        };
+        let snapshot = render_snapshot(1, 2, &response, &anchor);
+        assert!(snapshot.visible); // Input field remains visible without candidates.
+        assert_eq!(snapshot.preedit.unwrap().text, "nihao");
+        let host = host_response(response.clone());
+        assert!(host.composition.is_empty());
+        assert_eq!(host.composition_cursor, 0);
+        assert!(host.composing && host.state_updated);
+        assert_eq!(host.commit_text, "前文");
+        let inline = KeyEventResponse {
+            external_preedit: false,
+            ..response
+        };
+        assert_eq!(host_response(inline.clone()), inline);
+        assert!(render_snapshot(1, 3, &inline, &anchor).preedit.is_none());
+    }
+}
+
 fn reply(connection: &RpcConnection, request_id: u64, response: KeyEventResponse) {
     if let Err(error) = connection.enqueue(Envelope {
         request_id,
-        payload: Some(Payload::KeyEventResponse(response)),
+        payload: Some(Payload::KeyEventResponse(host_response(response))),
     }) {
         tracing::debug!(%error, "client response enqueue failed");
     }
@@ -82,12 +132,17 @@ fn valid_token(token: Option<&ContextToken>) -> bool {
 }
 
 impl Engine {
-    pub fn new(paths: RuntimePaths, renderer: RendererPublisher) -> Result<Self, String> {
+    pub fn new(
+        paths: RuntimePaths,
+        renderer: RendererPublisher,
+        settings: Option<weasel_common::settings::ConfigSnapshot>,
+    ) -> Result<Self, String> {
         let data_lock = crate::data_lock::DataLock::acquire(&paths.user_data)?;
         crate::init_logging(&paths, "server")?;
         let rime = librime::Librime::load(&paths.executable_directory)?;
         tracing::info!("librime initialized on engine thread");
         Ok(Self {
+            settings,
             clients: HashMap::new(),
             rime,
             _data_lock: data_lock,
@@ -232,7 +287,7 @@ impl Engine {
                     return;
                 }
             } else {
-                let session = match self.rime.new_session() {
+                let mut session = match self.rime.new_session() {
                     Ok(session) => session,
                     Err(error) => {
                         tracing::error!(client_id, %error, "session creation failed");
@@ -245,9 +300,18 @@ impl Engine {
                         return;
                     }
                 };
+                if let Some(ascii) = self.settings.as_ref().and_then(|settings| {
+                    settings.app_ascii_mode(connection.client_executable().unwrap_or(""))
+                }) {
+                    session.set_ascii_mode(ascii);
+                }
                 self.clients.insert(
                     client_id,
                     ClientSession {
+                        inline_preedit: self.settings.as_ref().is_none_or(|settings| {
+                            settings
+                                .app_inline_preedit(connection.client_executable().unwrap_or(""))
+                        }),
                         connection_id,
                         connection: connection.clone(),
                         alive,
@@ -339,6 +403,9 @@ impl Engine {
                         self.active_client = Some(client_id);
                         client.route.focused = true;
                         let mut response = client.session.process_key(&key_event);
+                        response.external_preedit = response.composing
+                            && self.renderer.supports_preedit()
+                            && !client.inline_preedit;
                         if response.state_updated {
                             client.revision = client.revision.wrapping_add(1);
                         }
@@ -427,6 +494,9 @@ impl Engine {
                             _ => {}
                         }
                         let mut response = client.session.context_action(action);
+                        response.external_preedit = response.composing
+                            && self.renderer.supports_preedit()
+                            && !client.inline_preedit;
                         client.revision = client.revision.wrapping_add(1);
                         response.token = client.route.token.clone();
                         response.revision = client.revision;
@@ -479,6 +549,8 @@ impl Engine {
             return;
         }
         let mut response = client.session.process_renderer_event(&event);
+        response.external_preedit =
+            response.composing && self.renderer.supports_preedit() && !client.inline_preedit;
         client.revision = client.revision.wrapping_add(1);
         response.token = client.route.token.clone();
         response.revision = client.revision;
@@ -511,6 +583,31 @@ impl Processor<Work> for Engine {
     }
 
     fn idle(&mut self) {
+        // Capability changes wake this worker. Restore inline text immediately
+        // after a renderer disconnect; do not wait for the next keystroke.
+        if !self.renderer.supports_preedit() {
+            for (id, client) in &mut self.clients {
+                if client.last_response.external_preedit && client.alive.load(Ordering::Acquire) {
+                    client.last_response.external_preedit = false;
+                    client.revision = client.revision.wrapping_add(1);
+                    client.last_response.revision = client.revision;
+                    let mut response = client.last_response.clone();
+                    response.commit_text.clear();
+                    response.open_emoji_panel = false;
+                    response.state_updated = true;
+                    response.eaten = false;
+                    reply(&client.connection, 0, response);
+                    if self.active_client == Some(*id) {
+                        self.renderer.publish(render_snapshot(
+                            *id,
+                            client.revision,
+                            &client.last_response,
+                            &client.anchor,
+                        ));
+                    }
+                }
+            }
+        }
         // Poll the active connection's latest geometry, never the input FIFO.
         // Layout arrival explicitly wakes the engine, including the final drag position.
         if let Some(client_id) = self.active_client
@@ -523,7 +620,9 @@ impl Processor<Work> for Engine {
             let anchor = update.anchor.unwrap_or_default();
             if client.anchor != anchor {
                 client.anchor = anchor;
-                if !client.last_response.candidates.is_empty() {
+                if !client.last_response.candidates.is_empty()
+                    || client.last_response.external_preedit
+                {
                     self.renderer.publish(render_snapshot(
                         client_id,
                         client.revision,

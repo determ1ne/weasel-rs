@@ -66,6 +66,13 @@ message RenderSnapshot {
   // Global presentation order within one server/renderer connection owner.
   // Independent of per-input revision: focus, hide and layout also advance it.
   uint64 sequence = 12;
+  // Present only when preedit is displayed outside the host application.
+  RenderPreedit preedit = 13;
+}
+
+message RenderPreedit {
+  string text = 1;
+  uint32 cursor_utf16 = 2;
 }
 
 enum RendererEventAction {

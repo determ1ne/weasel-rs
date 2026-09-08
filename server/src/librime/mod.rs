@@ -165,6 +165,14 @@ impl Drop for Engine {
 }
 
 impl RimeSession {
+    /// Initial application preference, applied only when allocating a session.
+    pub fn set_ascii_mode(&mut self, ascii: bool) {
+        unsafe {
+            if let Some(set) = (*self.api.api).set_option {
+                set(self.id, c"ascii_mode".as_ptr(), ascii as i32);
+            }
+        }
+    }
     pub fn context_action(
         &mut self,
         action: weasel_common::message::ContextAction,
@@ -636,6 +644,27 @@ mod input_mode_tests {
             Some(false)
         );
         STATE.with(|state| assert_eq!(state.borrow().1, ["commit", "set", "commit", "set"]));
+    }
+
+    #[test]
+    fn initial_ascii_preference_is_reported_without_resetting_on_focus() {
+        STATE.with(|state| *state.borrow_mut() = (false, Vec::new()));
+        let mut api: raw::RimeApi = unsafe { std::mem::zeroed() };
+        api.get_option = Some(get_option);
+        api.set_option = Some(set_option);
+        api.get_status = Some(get_status);
+        api.free_status = Some(free_status);
+        let mut session = fake_engine(api).new_session().unwrap();
+        session.set_ascii_mode(true);
+        assert_eq!(
+            session.context_action(ContextAction::Focus).ascii_mode,
+            Some(true)
+        );
+        session.context_action(ContextAction::ToggleAscii);
+        assert_eq!(
+            session.context_action(ContextAction::Focus).ascii_mode,
+            Some(false)
+        );
     }
 }
 

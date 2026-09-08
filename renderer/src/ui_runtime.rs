@@ -34,6 +34,7 @@ pub struct UiCommandSender {
 }
 
 pub struct UiHandle {
+    pub capabilities: crate::theme_api::ThemeCapabilities,
     pub theme: &'static str,
     commands: UiCommandSender,
     pub events: tokio::sync::mpsc::Receiver<(Owner, RendererEvent)>,
@@ -166,6 +167,7 @@ impl UiHandle {
         crate::diagnostics::record(format_args!("using renderer theme {}", registration.name()));
         Ok(Self {
             theme: registration.name(),
+            capabilities: registration.capabilities(),
             commands: UiCommandSender { mailbox, thread_id },
             events,
             finished,
@@ -338,6 +340,12 @@ fn run_ui(
         let config =
             config.with_theme_defaults(registration.name(), registration.default_settings()?)?;
         let backend = registration.create(mode, &config)?;
+        if !config.inline_preedit() && !registration.capabilities().preedit {
+            crate::diagnostics::record(format_args!(
+                "theme {} does not support preedit; using inline preedit",
+                registration.name()
+            ));
+        }
         crate::diagnostics::record(format_args!(
             "theme {} capabilities: {:?}",
             registration.name(),
@@ -352,7 +360,13 @@ fn run_ui(
         // Preview startup includes its first render. Failed initialization or
         // layout leaves the controller's previous preview alive.
         if mode == UiMode::Preview {
-            let snapshot = crate::preview::synthetic_snapshot();
+            let mut snapshot = crate::preview::synthetic_snapshot();
+            if !config.inline_preedit() && registration.capabilities().preedit {
+                snapshot.preedit = Some(weasel_common::message::RenderPreedit {
+                    text: "nihao".into(),
+                    cursor_utf16: 5,
+                });
+            }
             {
                 let mut queue = mailbox.lock().map_err(|_| "renderer mailbox poisoned")?;
                 queue.render(crate::preview::PREVIEW_OWNER, snapshot.clone());

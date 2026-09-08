@@ -2,5 +2,17 @@
   "$schema": "weasel.schema.json",
   "theme": "eleven",
   "inline_preedit": true,
-  "themeSettings": {}
+  "ascii_mode": false,
+  "themeSettings": {},
+  "app_options": {
+    "cmd.exe": {
+      "ascii_mode": true
+    },
+    "conhost.exe": {
+      "ascii_mode": true
+    },
+    "WindowsTerminal.exe": {
+      "ascii_mode": true
+    }
+  }
 }

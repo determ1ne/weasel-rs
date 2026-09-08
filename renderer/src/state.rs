@@ -57,6 +57,13 @@ impl Mailbox {
 }
 
 pub fn validate(snapshot: &RenderSnapshot) -> Result<(), String> {
+    if let Some(preedit) = &snapshot.preedit {
+        crate::theme_api::Preedit {
+            text: preedit.text.clone(),
+            cursor: preedit.cursor_utf16,
+        }
+        .validate()?;
+    }
     if snapshot.items.len() > MAX_ITEMS {
         return Err("snapshot exceeds 256 items".into());
     }
@@ -103,6 +110,7 @@ pub fn validate(snapshot: &RenderSnapshot) -> Result<(), String> {
 
 pub fn same_content(a: &RenderSnapshot, b: &RenderSnapshot) -> bool {
     a.session_id == b.session_id
+        && a.preedit == b.preedit
         && a.token == b.token
         && a.revision == b.revision
         && a.items == b.items

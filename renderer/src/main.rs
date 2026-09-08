@@ -29,6 +29,8 @@ mod theme_eleven;
 #[cfg(windows)]
 mod theme_ten;
 #[cfg(windows)]
+mod theme_void;
+#[cfg(windows)]
 mod ui_runtime;
 
 #[cfg(windows)]
