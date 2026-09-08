@@ -244,12 +244,14 @@ fn init_logging(paths: &RuntimePaths, component: &str) -> Result<(), String> {
     if paths.development {
         tracing_subscriber::fmt()
             .with_ansi(false)
+            .with_timer(weasel_common::logging::UtcTimer)
             .with_writer(logger.and(std::io::stderr))
             .try_init()
             .map_err(|error| error.to_string())
     } else {
         tracing_subscriber::fmt()
             .with_ansi(false)
+            .with_timer(weasel_common::logging::UtcTimer)
             .with_writer(logger)
             .try_init()
             .map_err(|error| error.to_string())

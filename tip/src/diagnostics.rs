@@ -26,13 +26,28 @@ thread_local! {
     static CURRENT: RefCell<Weak<Recorder>> = RefCell::new(Weak::new());
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Event {
     time: SystemTime,
     thread: std::thread::ThreadId,
     site: &'static Location<'static>,
     kind: &'static str,
     value: u64,
+}
+
+impl std::fmt::Debug for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} DEBUG {:?} {}:{} {} value={:#x}",
+            weasel_common::logging::timestamp(self.time),
+            self.thread,
+            self.site.file(),
+            self.site.line(),
+            self.kind,
+            self.value
+        )
+    }
 }
 
 struct Recorder {
@@ -280,8 +295,8 @@ impl Recorder {
                         use std::fmt::Write;
                         let _ = writeln!(
                             report,
-                            "{:?} {:?} {}:{} {} value={:#x}",
-                            event.time,
+                            "{} DEBUG {:?} {}:{} {} value={:#x}",
+                            weasel_common::logging::timestamp(event.time),
                             event.thread,
                             event.site.file(),
                             event.site.line(),

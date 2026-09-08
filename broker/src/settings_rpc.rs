@@ -147,12 +147,14 @@ async fn serve(
             let payload = if query.refresh {
                 let paths = paths.clone();
                 let path = query.path.clone();
+                let notifications = notifications.clone();
                 read_on_worker(disk_reads.clone(), move || {
                     let mut warnings = Vec::new();
                     let fresh = crate::settings::load(&paths, |warning| warnings.push(warning));
                     if warnings.is_empty() {
                         config_payload(&fresh, &path)
                     } else {
+                        notifications.report_settings_errors(&warnings);
                         // A preview must not claim rejected disk settings were applied.
                         Payload::Failure(weasel_common::message::Failure {
                             code: weasel_common::message::FailureCode::InvalidArgument as i32,

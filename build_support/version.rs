@@ -10,6 +10,7 @@ pub fn embed() {
         "weasel-theme-eleven" => ("Weasel-RS eleven Theme", "weasel_theme_eleven.dll", true),
         "weasel-theme-abc" => ("Weasel-RS abc Theme", "weasel_theme_abc.dll", true),
         "weasel-theme-void" => ("Weasel-RS void Theme", "weasel_theme_void.dll", true),
+        "weasel-theme-wasm" => ("Weasel-RS wasm Theme", "weasel_theme_wasm.dll", true),
         _ => panic!("missing Windows file description for {package}"),
     };
     let root = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("..");

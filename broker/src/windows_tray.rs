@@ -84,11 +84,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let paths = RuntimePaths::discover()?;
     paths.ensure()?;
     let _ = LOGGER.set(ComponentLogger::for_paths(&paths, "broker")?);
+    let mut settings_warnings = Vec::new();
     let settings = crate::settings::load(&paths, |warning| {
         deployment_diagnostic(&paths.executable_directory, &warning);
+        settings_warnings.push(warning);
     });
     // A preview re-reads the on-disk configuration via this same runtime layout.
     let _settings_service = crate::settings_rpc::SettingsService::start(settings, paths.clone())?;
+    _settings_service
+        .notifications()
+        .report_settings_errors(&settings_warnings);
     let directory = paths.executable_directory;
     crate::managed_children::initialize()?;
     crate::managed_children::clear_stale(&directory, "weasel-server.exe")?;
@@ -405,12 +410,12 @@ fn shutdown_component(child: &mut Option<Child>, pipe: String, reason: &str) -> 
 }
 
 fn deployment_diagnostic(_directory: &std::path::Path, text: &str) {
-    use std::io::Write;
     if let Some(logger) = LOGGER.get() {
-        let mut logger = logger.clone();
-        if let Err(error) = writeln!(logger, "[broker {:?}] {text}", std::time::SystemTime::now()) {
-            eprintln!("weasel-broker: diagnostic write failed: {error}");
-        }
+        logger.record(
+            weasel_common::logging::Level::INFO,
+            "weasel-broker",
+            format_args!("{text}"),
+        );
     }
 }
 
@@ -620,9 +625,6 @@ fn restart_components(state: &mut BrokerState) -> (String, u32) {
             );
         }
     };
-    let settings = crate::settings::load(&paths, |warning| {
-        deployment_diagnostic(&state.directory, &warning);
-    });
     let mut errors = Vec::new();
     if let Err(error) = shutdown_component(
         &mut state.server,
@@ -646,8 +648,16 @@ fn restart_components(state: &mut BrokerState) -> (String, u32) {
         );
     }
     // Publish synchronously before renderer can query its startup theme.
-    state.settings.replace(settings);
     state.notifications.reset();
+    let mut settings_warnings = Vec::new();
+    let settings = crate::settings::load(&paths, |warning| {
+        deployment_diagnostic(&state.directory, &warning);
+        settings_warnings.push(warning);
+    });
+    state.settings.replace(settings);
+    state
+        .notifications
+        .report_settings_errors(&settings_warnings);
     // Restore each component that actually stopped, even on partial failure.
     if state.renderer.is_none() && !STOPPING.load(Ordering::Acquire) {
         match start_child(&state.directory, "weasel-renderer.exe", &[]) {

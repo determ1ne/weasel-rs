@@ -10,6 +10,16 @@ fn main() {
         .output(out.join("bindings.rs"))
         .input_default()
         .filters([
+            "Windows.Win32.CoCreateInstance",
+            "Windows.Win32.CLSCTX_INPROC_SERVER",
+            "Windows.Win32.ShellLink",
+            "Windows.Win32.IShellLinkW",
+            "Windows.Win32.IPersistFile",
+            "Windows.Win32.IPropertyStore",
+            "Windows.Win32.PKEY_AppUserModel_ID",
+            "Windows.Win32.SHStrDupW",
+            "Windows.Win32.PropVariantClear",
+            "Windows.Win32.VARENUM",
             "Windows.UI.Notifications.ToastNotificationManager::CreateToastNotifier",
             "Windows.UI.Notifications.ToastNotificationManager::CreateToastNotifierWithId",
             "Windows.UI.Notifications.IToastNotificationManagerStatics2::{}",

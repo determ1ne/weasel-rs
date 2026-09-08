@@ -10,13 +10,14 @@
       "type": "string"
     },
     "theme": {
-      "description": "主题名称",
+      "description": "主题名称（wasm 通过 themeSettings.wasm.file 指定 .wasm 文件）",
       "type": "string",
       "enum": [
         "eleven",
         "ten",
         "abc",
-        "void"
+        "void",
+        "wasm"
       ]
     },
     "ascii_mode": {
@@ -24,9 +25,20 @@
       "type": "boolean",
       "default": false
     },
+    "global_ascii_status": {
+      "description": "所有应用共享中英文状态，优先于应用默认值",
+      "type": "boolean",
+      "default": false
+    },
     "inline_preedit": {
       "description": "是否在宿主编辑框内联显示预编辑文本",
       "type": "boolean"
+    },
+    "preedit_type": {
+      "description": "外部预编辑显示内容：composition 为编码，preview 为当前有效候选文本",
+      "type": "string",
+      "enum": ["composition", "preview"],
+      "default": "composition"
     },
     "app_options": {
       "description": "按宿主程序文件名配置新输入会话的默认选项",
@@ -45,11 +57,53 @@
         },
         "additionalProperties": false
       },
-      "examples": [{"cmd.exe": {"ascii_mode": true}}]
+      "examples": [
+        {
+          "cmd.exe": {
+            "ascii_mode": true
+          }
+        }
+      ]
     },
     "themeSettings": {
       "description": "按主题划分的自定义设置，键为主题名称，值为该主题的设置对象",
       "type": "object",
+      "properties": {
+        "wasm": {
+          "type": "object",
+          "properties": {
+            "theme": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "default": "weaselui",
+              "description": "加载同名 .wasm 模块"
+            },
+            "modules": {
+              "type": "object",
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "config": {
+                    "type": "object"
+                  },
+                  "file": {
+                    "type": "string",
+                    "description": "模块路径；省略或空字符串时依次查找程序目录 theme-wasm/<id>.wasm、用户数据目录 <id>.wasm；显式相对路径以用户数据目录为基准"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
       "additionalProperties": {
         "type": "object"
       }

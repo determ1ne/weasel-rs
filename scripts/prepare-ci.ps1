@@ -27,5 +27,5 @@ rustup toolchain install stable --profile minimal
 if ($LASTEXITCODE -ne 0) { throw 'Failed to install Rust stable.' }
 rustup default stable
 if ($LASTEXITCODE -ne 0) { throw 'Failed to select Rust stable.' }
-rustup target add --toolchain stable x86_64-pc-windows-msvc i686-pc-windows-msvc
+rustup target add --toolchain stable x86_64-pc-windows-msvc i686-pc-windows-msvc wasm32-unknown-unknown
 if ($LASTEXITCODE -ne 0) { throw 'Failed to install Rust build targets.' }

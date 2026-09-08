@@ -47,6 +47,8 @@ struct ClientSession {
 }
 
 pub(crate) struct Engine {
+    // None 保留每应用行为；Some 为服务生命周期内的共享模式。
+    global_ascii: Option<bool>,
     settings: Option<weasel_common::settings::ConfigSnapshot>,
     // Field order is intentional: destroy every session before dropping the engine.
     clients: HashMap<u64, ClientSession>,
@@ -142,6 +144,13 @@ impl Engine {
         let rime = librime::Librime::load(&paths.executable_directory)?;
         tracing::info!("librime initialized on engine thread");
         Ok(Self {
+            global_ascii: settings.as_ref().and_then(|s| {
+                s.get::<bool>(".global_ascii_status")
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false)
+                    .then(|| s.get::<bool>(".ascii_mode").ok().flatten().unwrap_or(false))
+            }),
             settings,
             clients: HashMap::new(),
             rime,
@@ -300,8 +309,10 @@ impl Engine {
                         return;
                     }
                 };
-                if let Some(ascii) = self.settings.as_ref().and_then(|settings| {
-                    settings.app_ascii_mode(connection.client_executable().unwrap_or(""))
+                if let Some(ascii) = self.global_ascii.or_else(|| {
+                    self.settings.as_ref().and_then(|settings| {
+                        settings.app_ascii_mode(connection.client_executable().unwrap_or(""))
+                    })
                 }) {
                     session.set_ascii_mode(ascii);
                 }
@@ -402,7 +413,15 @@ impl Engine {
                         let focus_changed = self.active_client != Some(client_id);
                         self.active_client = Some(client_id);
                         client.route.focused = true;
+                        if let Some(ascii) = self.global_ascii {
+                            client.session.set_ascii_mode(ascii);
+                        }
                         let mut response = client.session.process_key(&key_event);
+                        if self.global_ascii.is_some()
+                            && let Some(ascii) = response.ascii_mode
+                        {
+                            self.global_ascii = Some(ascii);
+                        }
                         response.external_preedit = response.composing
                             && self.renderer.supports_preedit()
                             && !client.inline_preedit;
@@ -493,6 +512,13 @@ impl Engine {
                             }
                             _ => {}
                         }
+                        // SetAscii 是旧 TIP 重连时恢复本地记忆的握手，仍按原值确认，
+                        // 但不写共享状态；随后的 Focus 再恢复共享值，兼容现有 TIP。
+                        if matches!(action, ContextAction::Focus | ContextAction::ToggleAscii)
+                            && let Some(ascii) = self.global_ascii
+                        {
+                            client.session.set_ascii_mode(ascii);
+                        }
                         let mut response = match (action, command.ascii_mode) {
                             (ContextAction::SetAscii, None) => {
                                 failure(
@@ -508,6 +534,12 @@ impl Engine {
                             }
                             _ => client.session.context_action(action),
                         };
+                        if action == ContextAction::ToggleAscii
+                            && self.global_ascii.is_some()
+                            && let Some(ascii) = response.ascii_mode
+                        {
+                            self.global_ascii = Some(ascii);
+                        }
                         response.external_preedit = response.composing
                             && self.renderer.supports_preedit()
                             && !client.inline_preedit;

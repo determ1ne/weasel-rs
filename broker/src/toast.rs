@@ -5,7 +5,7 @@
 use crate::bindings::*;
 use windows_strings::HSTRING;
 
-const APP_ID: &str = "WeaselRS.Broker";
+pub(crate) const APP_ID: &str = "WeaselRS.Broker";
 // The installer assigns this identity to its existing Start Menu shortcut.
 // Sending notifications must not create or modify shortcuts.
 
@@ -25,7 +25,7 @@ pub fn show(title: &str, message: &str) -> Result<(), String> {
     }
     let _apartment = Apartment;
     let xml = format!(
-        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text><text>详情请查看 broker-notifications.log。</text></binding></visual><audio silent=\"true\"/></toast>",
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text><text>详情请查看 broker-notifications.*.log。</text></binding></visual><audio silent=\"true\"/></toast>",
         escape_xml(title),
         escape_xml(message)
     );

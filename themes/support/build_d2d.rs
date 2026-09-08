@@ -1,10 +1,78 @@
 /// Shared native projection for D2D candidate themes.
 pub fn generate() {
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    // The SDK interop interface is absent from windows-default 0.100 metadata.
+    let rdl = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/graphics_effect.rdl");
+    let winmd = out.join("graphics-effect-interop.winmd");
+    windows_rdl::reader()
+        .input(&rdl)
+        .reference_default()
+        .output(&winmd)
+        .write()
+        .expect("compile graphics effect interop metadata");
+    println!("cargo:rerun-if-changed={}", rdl.display());
     windows_bindgen::builder()
         .input_default()
+        .input(&winmd)
+        .implements([
+            "Windows.Graphics.Effects.IGraphicsEffect",
+            "Windows.Graphics.Effects.IGraphicsEffectSource",
+            "Windows.Win32.IGraphicsEffectD2D1Interop",
+        ])
         .output(out.join("d2d-bindings.rs"))
         .filters([
+            "Windows.UI.Composition.ICompositor2::CreateMaskBrush",
+            "Windows.UI.Composition.CompositionMaskBrush::{Source,Mask}",
+            "Windows.Win32.DwmSetWindowAttribute", "Windows.Win32.DWMWA_USE_HOSTBACKDROPBRUSH",
+            "Windows.Win32.E_NOTIMPL",
+            "Windows.Graphics.Effects.IGraphicsEffect",
+            "Windows.Graphics.Effects.IGraphicsEffectSource",
+            "Windows.Win32.IGraphicsEffectD2D1Interop",
+            "Windows.Foundation.PropertyValue",
+            "Windows.Foundation.IPropertyValueStatics::{CreateSingle,CreateSingleArray,CreateUInt32,CreateBoolean}",
+            "Windows.UI.Composition.ICompositionEffectSourceParameterFactory",
+            "Windows.UI.Composition.ICompositor::{CreateEffectFactory,CreateColorBrushWithColor}",
+            "Windows.UI.Composition.ICompositor3::CreateHostBackdropBrush",
+            "Windows.UI.Composition.CompositionEffectSourceParameter",
+            "Windows.UI.Composition.CompositionEffectFactory::CreateBrush",
+            "Windows.UI.Composition.CompositionEffectBrush::SetSourceParameter",
+            "Windows.Win32.CLSID_D2D1GaussianBlur", "Windows.Win32.CLSID_D2D1ColorMatrix",
+            "Windows.Win32.CLSID_D2D1Flood", "Windows.Win32.CLSID_D2D1ArithmeticComposite",
+            "Windows.Win32.D3D11CreateDevice", "Windows.Win32.D3D11_CREATE_DEVICE_BGRA_SUPPORT",
+            "Windows.Win32.D3D11_SDK_VERSION", "Windows.Win32.D3D_DRIVER_TYPE",
+            "Windows.Win32.IDXGIDevice", "Windows.Win32.ID2D1Factory1::CreateDevice",
+            "Windows.Win32.ID2D1DeviceContext", "Windows.Win32.ID2D1RenderTarget::SetTransform",
+            "Windows.Win32.ICompositorInterop", "Windows.Win32.ICompositorDesktopInterop",
+            "Windows.Win32.ICompositionDrawingSurfaceInterop",
+            "Windows.Win32.CreateDispatcherQueueController", "Windows.Win32.DQTYPE_THREAD_CURRENT",
+            "Windows.Win32.DQTAT_COM_NONE", "Windows.Win32.WS_EX_NOREDIRECTIONBITMAP",
+            "Windows.Win32.WM_NCHITTEST", "Windows.Win32.HTTRANSPARENT", "Windows.Win32.HTCLIENT",
+            "Windows.Win32.ScreenToClient",
+            "Windows.Win32.DXGI_ERROR_DEVICE_REMOVED", "Windows.Win32.DXGI_ERROR_DEVICE_RESET",
+            "Windows.Win32.E_INVALIDARG", "Windows.Win32.RoInitialize", "Windows.Win32.RoUninitialize",
+            "Windows.Win32.RO_INIT_TYPE::RO_INIT_SINGLETHREADED",
+            "Windows.System.DispatcherQueue::GetForCurrentThread",
+            "Windows.System.DispatcherQueueController",
+            "Windows.System.IDispatcherQueueControllerStatics",
+            "Windows.System.IDispatcherQueueController::ShutdownQueueAsync",
+            "Windows.UI.Composition.ICompositionObjectStatics", "Windows.UI.Composition.ICompositorStatics",
+            "Windows.Foundation.Collections.IIterable",
+            "Windows.UI.Composition.ICompositor::{CreateContainerVisual,CreateSpriteVisual,CreateSurfaceBrushWithSurface}",
+            "Windows.UI.Composition.ICompositor2::CreateDropShadow",
+            "Windows.UI.Composition.IContainerVisual::Children",
+            "Windows.UI.Composition.ISpriteVisual::Brush", "Windows.UI.Composition.ISpriteVisual2::Shadow",
+            "Windows.UI.Composition.IDropShadow::{BlurRadius,Color,Offset,Opacity,Mask}",
+            "Windows.UI.Composition.IVisualCollection::{InsertAtTop,InsertAtBottom}",
+            "Windows.UI.Composition.Compositor",
+            "Windows.UI.Composition.CompositionGraphicsDevice::CreateDrawingSurface",
+            "Windows.UI.Composition.CompositionDrawingSurface",
+            "Windows.UI.Composition.CompositionSurfaceBrush",
+            "Windows.UI.Composition.SpriteVisual", "Windows.UI.Composition.ContainerVisual",
+            "Windows.UI.Composition.DropShadow", "Windows.UI.Composition.VisualCollection",
+            "Windows.UI.Composition.Desktop.DesktopWindowTarget",
+            "Windows.UI.Composition.Visual::{Size,Offset}",
+            "Windows.UI.Composition.CompositionTarget::Root",
+            "Windows.Win32.CreateRoundRectRgn", "Windows.Win32.SetWindowRgn", "Windows.Win32.DeleteObject",
             "Windows.Win32.LoadLibraryExW", "Windows.Win32.GetProcAddress", "Windows.Win32.FreeLibrary",
             "Windows.Win32.LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR", "Windows.Win32.LOAD_LIBRARY_SEARCH_SYSTEM32",
             "Windows.Win32.GetMessageW", "Windows.Win32.TranslateMessage", "Windows.Win32.DispatchMessageW",
@@ -31,7 +99,7 @@ pub fn generate() {
             "Windows.Win32.D2D1_ANTIALIAS_MODE",
             "Windows.Win32.ID2D1RenderTarget::{SetTextAntialiasMode,SetAntialiasMode}",
             "Windows.Win32.D2D1_TEXT_ANTIALIAS_MODE",
-            "Windows.Win32.ID2D1RenderTarget::{SetDpi,CreateSolidColorBrush,BeginDraw,EndDraw,Clear,FillRectangle,DrawText}",
+            "Windows.Win32.ID2D1RenderTarget::{SetDpi,CreateSolidColorBrush,BeginDraw,EndDraw,Clear,FillRectangle,FillRoundedRectangle,DrawText}",
             "Windows.Win32.D2D1_FACTORY_TYPE", "Windows.Win32.D2D1_PRESENT_OPTIONS",
             "Windows.Win32.D2D1_DRAW_TEXT_OPTIONS", "Windows.Win32.D2D1_ALPHA_MODE",
             "Windows.Win32.D2DERR_RECREATE_TARGET",

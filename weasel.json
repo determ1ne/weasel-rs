@@ -2,8 +2,24 @@
   "$schema": "weasel.schema.json",
   "theme": "eleven",
   "inline_preedit": true,
+  "preedit_type": "composition",
   "ascii_mode": false,
-  "themeSettings": {},
+  "global_ascii_status": false,
+  "themeSettings": {
+    "abc": {},
+    "eleven": {},
+    "wasm": {
+      "theme": "weaselui",
+      "modules": {
+        "weaselui": {
+          "name": "旧版 Weasel UI"
+        },
+        "glass": {
+          "name": "Glass"
+        }
+      }
+    }
+  },
   "app_options": {
     "cmd.exe": {
       "ascii_mode": true

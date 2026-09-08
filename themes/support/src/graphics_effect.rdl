@@ -1,0 +1,17 @@
+// ABI from windows.graphics.effects.interop.h; missing in windows-default 0.100.
+// GRAPHICS_EFFECT_PROPERTY_MAPPING has a signed 32-bit enum ABI. This graph
+// exposes no named/animated properties, so its projection uses i32 directly.
+#[win32]
+mod Windows {
+    mod Win32 {
+        #[guid(0x2fc57384_a068_44d7_a331_30982fcf7177)]
+        interface IGraphicsEffectD2D1Interop: IUnknown {
+            fn GetEffectId(&self, #[retval] id: *mut GUID) -> HRESULT;
+            fn GetNamedPropertyMapping(&self, name: PCWSTR, index: *mut u32, mapping: *mut i32) -> HRESULT;
+            fn GetPropertyCount(&self, #[retval] count: *mut u32) -> HRESULT;
+            fn GetProperty(&self, index: u32, #[retval] value: *mut Windows::Foundation::IPropertyValue) -> HRESULT;
+            fn GetSource(&self, index: u32, #[retval] source: *mut Windows::Graphics::Effects::IGraphicsEffectSource) -> HRESULT;
+            fn GetSourceCount(&self, #[retval] count: *mut u32) -> HRESULT;
+        }
+    }
+}

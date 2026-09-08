@@ -6,6 +6,8 @@ mod managed_children;
 mod notifications;
 mod settings;
 mod settings_rpc;
+#[cfg(windows)]
+mod shortcut;
 mod toast;
 
 #[cfg(windows)]
@@ -18,6 +20,15 @@ mod windows_tray;
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Installer commands must not initialize the tray, console or managed children.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(std::ffi::OsStr::new("--install-shortcut")) {
+        let path = args.next().ok_or("missing shortcut path")?;
+        if args.next().is_some() {
+            return Err("unexpected shortcut arguments".into());
+        }
+        return shortcut::install(std::path::Path::new(&path));
+    }
     if weasel_common::runtime_paths::is_development() {
         unsafe {
             let _ = bindings::AllocConsole();

@@ -76,10 +76,7 @@ fn select_first<T>(
         match attempt(*candidate) {
             Ok(value) => return Ok(value),
             Err(AttemptError::Failed(error)) => {
-                crate::diagnostics::record(format_args!(
-                    "theme {} unavailable: {error}",
-                    candidate.name()
-                ));
+                crate::notifications::theme_unavailable(candidate.name(), &error);
                 failures.push(format!("{}: {error}", candidate.name()));
             }
             Err(AttemptError::Fatal(error)) => {

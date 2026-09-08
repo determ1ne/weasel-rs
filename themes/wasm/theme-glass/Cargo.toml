@@ -1,0 +1,20 @@
+[package]
+name = "theme-glass"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+
+[workspace]
+
+[lib]
+name = "glass"
+crate-type = ["cdylib"]
+
+[dependencies]
+weasel-wasm-sdk = { path = "../sdk-rust" }
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "s"
+strip = true

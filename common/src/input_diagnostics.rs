@@ -13,10 +13,10 @@ pub fn record(args: std::fmt::Arguments<'_>) {
         return;
     }
     let line = windows_strings::HSTRING::from(format!(
-        "weasel-input pid={} thread={:?} time={:?} {}\n",
+        "{} DEBUG weasel-input: pid={} thread={:?} {}\n",
+        crate::logging::timestamp(std::time::SystemTime::now()),
         std::process::id(),
         std::thread::current().id(),
-        std::time::SystemTime::now(),
         args
     ));
     unsafe {

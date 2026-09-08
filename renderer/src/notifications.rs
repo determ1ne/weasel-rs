@@ -9,6 +9,11 @@ use weasel_common::{
 };
 
 pub fn report(theme: &str, notice: crate::theme_api::ThemeNotice) {
+    let level = match notice.severity {
+        crate::theme_api::NoticeSeverity::Info => weasel_common::logging::Level::INFO,
+        crate::theme_api::NoticeSeverity::Warning => weasel_common::logging::Level::WARN,
+        crate::theme_api::NoticeSeverity::Error => weasel_common::logging::Level::ERROR,
+    };
     let diagnostic = UserNotification {
         source: "renderer".into(),
         code: bounded(&notice.code, 128),
@@ -21,10 +26,13 @@ pub fn report(theme: &str, notice: crate::theme_api::ThemeNotice) {
         message: bounded(&notice.message, 2048),
         details: bounded(&format!("theme={theme}: {}", notice.details), 16384),
     };
-    crate::diagnostics::record(format_args!(
-        "theme notice: {} details={}",
-        diagnostic.message, diagnostic.details
-    ));
+    crate::diagnostics::record_at(
+        level,
+        format_args!(
+            "theme notice: {} details={}",
+            diagnostic.message, diagnostic.details
+        ),
+    );
     // Unit tests validate parsing only, without contacting a running broker.
     if cfg!(test) {
         return;
@@ -73,6 +81,18 @@ pub fn report(theme: &str, notice: crate::theme_api::ThemeNotice) {
             "broker diagnostic queue unavailable or full; details retained locally"
         ));
     }
+}
+
+pub fn theme_unavailable(theme: &str, error: &str) {
+    report(
+        theme,
+        crate::theme_api::ThemeNotice {
+            severity: crate::theme_api::NoticeSeverity::Warning,
+            code: "theme.unavailable".into(),
+            message: format!("主题 {theme} 加载失败，正在尝试其他主题。"),
+            details: format!("theme {theme} unavailable: {error}"),
+        },
+    );
 }
 
 fn bounded(value: &str, limit: usize) -> String {

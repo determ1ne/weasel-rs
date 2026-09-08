@@ -1,0 +1,17 @@
+{
+  "name": "@weasel-rs/sdk-as",
+  "version": "0.1.0",
+  "description": "AssemblyScript SDK and sample theme for weasel-rs WASM themes",
+  "type": "module",
+  "files": ["assembly", "README.md"],
+  "scripts": {
+    "asbuild:debug": "asc examples/minimal.ts --target debug",
+    "asbuild:release": "asc examples/minimal.ts --target release",
+    "asbuild": "npm run asbuild:debug && npm run asbuild:release",
+    "test": "node test/host-test.mjs"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "assemblyscript": "^0.28.20"
+  }
+}

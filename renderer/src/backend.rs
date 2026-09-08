@@ -1,15 +1,19 @@
 //! Known theme DLLs and ordered initialization fallback. Missing optional DLLs
-//! are skipped; void is opt-in and never a fallback for a broken visible theme.
+//! are skipped; void is opt-in and never a fallback for a broken visible theme;
+//! wasm (user .wasm themes) falls back to the built-in themes when unavailable.
 use crate::theme_api::ThemeFactory;
 use std::sync::OnceLock;
 
 pub fn supports_theme(name: &str) -> bool {
-    ["eleven", "ten", "abc", "void"].contains(&name)
+    ["eleven", "ten", "abc", "void", "wasm"].contains(&name)
 }
 
 fn names(preferred: &str) -> Vec<&'static str> {
     if preferred == "void" {
         return vec!["void"];
+    }
+    if preferred == "wasm" {
+        return vec!["wasm", "eleven", "ten", "abc"];
     }
     let mut names = vec!["eleven", "ten", "abc"];
     names.sort_by_key(|name| *name != preferred);
@@ -21,6 +25,7 @@ pub fn theme_candidates(preferred: &str) -> Vec<&'static dyn ThemeFactory> {
     static TEN: OnceLock<Result<crate::theme_dll::Factory, String>> = OnceLock::new();
     static ABC: OnceLock<Result<crate::theme_dll::Factory, String>> = OnceLock::new();
     static VOID: OnceLock<Result<crate::theme_dll::Factory, String>> = OnceLock::new();
+    static WASM: OnceLock<Result<crate::theme_dll::Factory, String>> = OnceLock::new();
     names(preferred)
         .into_iter()
         .filter_map(|name| {
@@ -28,6 +33,7 @@ pub fn theme_candidates(preferred: &str) -> Vec<&'static dyn ThemeFactory> {
                 "eleven" => &ELEVEN,
                 "ten" => &TEN,
                 "abc" => &ABC,
+                "wasm" => &WASM,
                 _ => &VOID,
             };
             let loaded = slot.get_or_init(|| {
@@ -49,9 +55,7 @@ pub fn theme_candidates(preferred: &str) -> Vec<&'static dyn ThemeFactory> {
                 Ok(factory) => Some(factory as &'static dyn ThemeFactory),
                 Err(error) => {
                     if name == preferred || name == "ten" {
-                        crate::diagnostics::record(format_args!(
-                            "theme {name} unavailable: {error}"
-                        ));
+                        crate::notifications::theme_unavailable(name, error);
                     }
                     None
                 }
@@ -63,9 +67,10 @@ pub fn theme_candidates(preferred: &str) -> Vec<&'static dyn ThemeFactory> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn preference_preserves_visible_fallback_and_void_is_opt_in() {
+    fn preference_preserves_visible_fallback_and_opt_in_themes_are_exclusive() {
         assert_eq!(super::names("abc"), ["abc", "eleven", "ten"]);
         assert_eq!(super::names("unknown"), ["eleven", "ten", "abc"]);
         assert_eq!(super::names("void"), ["void"]);
+        assert_eq!(super::names("wasm"), ["wasm", "eleven", "ten", "abc"]);
     }
 }

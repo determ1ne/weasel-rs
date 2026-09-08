@@ -77,6 +77,8 @@ try {
         Write-Host "Bundling $architecture VC++ runtime $runtimeVersion"
     }
     Write-Host 'Package contents: application binaries, Rime shared data and VC++ runtimes; fonts are not included.'
+    # WASM artifacts are optional; NSIS recursively includes them when present.
+    Write-Host 'Optional WASM modules: artifacts\theme-wasm (no build is triggered).'
     $arguments = @(
         '/V3', '/INPUTCHARSET', 'UTF8',
         "/DPROJECT_ROOT=$projectRoot",

@@ -60,12 +60,18 @@ fn overlay(base: &mut Value, bytes: &[u8]) -> Result<(), String> {
     }
     if !matches!(
         next.get("theme").and_then(Value::as_str),
-        Some("eleven" | "ten" | "abc" | "void")
+        Some("eleven" | "ten" | "abc" | "void" | "wasm")
     ) {
-        return Err("theme must be eleven, ten, abc or void".into());
+        return Err("theme must be eleven, ten, abc, void or wasm".into());
     }
     if next.get("inline_preedit").is_some_and(|v| !v.is_boolean()) {
         return Err("inline_preedit must be a boolean".into());
+    }
+    if next
+        .get("global_ascii_status")
+        .is_some_and(|v| !v.is_boolean())
+    {
+        return Err("global_ascii_status must be a boolean".into());
     }
     if next.get("ascii_mode").is_some_and(|v| !v.is_boolean()) {
         return Err("ascii_mode must be a boolean".into());

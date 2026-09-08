@@ -1,0 +1,16 @@
+[package]
+name = "weasel-wasm-sdk"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+
+# Guest package, deliberately separate from the native Windows workspace.
+[workspace]
+
+[[example]]
+name = "minimal"
+crate-type = ["cdylib"]
+
+[profile.release]
+panic = "abort"
+lto = true

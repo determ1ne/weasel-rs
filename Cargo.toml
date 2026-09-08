@@ -12,6 +12,7 @@ members = [
     "themes/eleven",
     "themes/abc",
     "themes/void",
+    "themes/wasm",
 ]
 
 [workspace.package]

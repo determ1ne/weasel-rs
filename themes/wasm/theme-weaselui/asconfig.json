@@ -1,0 +1,6 @@
+{
+  "targets": {
+    "debug": { "outFile": "build/weaselui-debug.wasm", "debug": true },
+    "release": { "outFile": "build/weaselui.wasm", "optimizeLevel": 3, "shrinkLevel": 0 }
+  }
+}

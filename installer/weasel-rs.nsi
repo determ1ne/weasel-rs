@@ -12,8 +12,6 @@ RequestExecutionLevel admin
 !include x64.nsh
 !include FileFunc.nsh
 !include Sections.nsh
-!include Win\COM.nsh
-!include Win\Propkey.nsh
 
 !ifndef PROJECT_ROOT
   !error "Use scripts\build-installer.ps1 to supply PROJECT_ROOT."
@@ -27,83 +25,6 @@ RequestExecutionLevel admin
 
 !define PRODUCT_NAME "小狼毫RS"
 
-; Keep in sync with broker/src/toast.rs. Update the existing shortcut only.
-Function SetBrokerShortcutAppId
-  Push $0
-  Push $1
-  Push $2
-  Push $3
-  Push $4
-  Push $5
-  Push $6
-  StrCpy $0 0
-  StrCpy $1 0
-  StrCpy $2 0
-  StrCpy $3 0
-  StrCpy $4 0
-  StrCpy $6 -1
-  System::Call 'ole32::CoInitialize(p0)i.r5'
-  !insertmacro ComHlpr_CreateInProcInstance ${CLSID_ShellLink} ${IID_IPersistFile} r0 ""
-  ${If} $0 P= 0
-    Goto appid_done
-  ${EndIf}
-  ${IPersistFile::Load} $0 '("$SMPROGRAMS\小狼毫RS\小狼毫RS算法服务.lnk", ${STGM_READWRITE}).r6'
-  ${If} $6 < 0
-    Goto appid_done
-  ${EndIf}
-  ${IUnknown::QueryInterface} $0 '("${IID_IPropertyStore}",.r1).r6'
-  ${If} $6 < 0
-    Goto appid_done
-  ${EndIf}
-  System::Call '*${SYSSTRUCT_PROPERTYKEY}(${PKEY_AppUserModel_ID})p.r2'
-  System::Call '*${SYSSTRUCT_PROPVARIANT}()p.r3'
-  StrCpy $6 -1
-  ${If} $2 P= 0
-  ${OrIf} $3 P= 0
-    Goto appid_done
-  ${EndIf}
-  System::Call 'shlwapi::SHStrDupW(w "WeaselRS.Broker", *p.r4)i.r6'
-  ${If} $6 < 0
-    Goto appid_done
-  ${EndIf}
-  ; Borrow the CoTaskMem string until SetValue/Commit/Save have completed.
-  System::Call '*$3${SYSSTRUCT_PROPVARIANT}(${VT_LPWSTR},,p r4)'
-  ${IPropertyStore::SetValue} $1 '($2,$3).r6'
-  ${If} $6 < 0
-    Goto appid_done
-  ${EndIf}
-  ${IPropertyStore::Commit} $1 '().r6'
-  ${If} $6 < 0
-    Goto appid_done
-  ${EndIf}
-  ${IPersistFile::Save} $0 '("$SMPROGRAMS\小狼毫RS\小狼毫RS算法服务.lnk",1).r6'
-  appid_done:
-  System::Call 'ole32::CoTaskMemFree(p r4)'
-  System::Free $3
-  System::Free $2
-  ${If} $1 P<> 0
-    ${IUnknown::Release} $1 ""
-  ${EndIf}
-  ${If} $0 P<> 0
-    ${IUnknown::Release} $0 ""
-  ${EndIf}
-  ${If} $5 >= 0
-    System::Call 'ole32::CoUninitialize()'
-  ${EndIf}
-  ${If} $6 < 0
-    DetailPrint "设置算法服务快捷方式 AUMID 失败：$6"
-    SetErrors
-  ${Else}
-    ClearErrors
-  ${EndIf}
-  Pop $6
-  Pop $5
-  Pop $4
-  Pop $3
-  Pop $2
-  Pop $1
-  Pop $0
-FunctionEnd
 !define PRODUCT_KEY "Software\Weasel-RS"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weasel-RS"
 !define X64_RELEASE "${PROJECT_ROOT}\target\x86_64-pc-windows-msvc\release"
@@ -319,6 +240,8 @@ FunctionEnd
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_abc.pdb"
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_void.dll"
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_void.pdb"
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_wasm.dll"
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_wasm.pdb"
   RMDir "$INSTDIR\themes"
   Delete /REBOOTOK "$INSTDIR\weasel-broker.exe"
   Delete /REBOOTOK "$INSTDIR\weasel-server.exe"
@@ -381,6 +304,9 @@ Section "Weasel-RS" SEC_MAIN
   StrCpy $OldDll "$INSTDIR\themes\weasel_theme_void.dll"
   Call RetireDll
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_void.pdb"
+  StrCpy $OldDll "$INSTDIR\themes\weasel_theme_wasm.dll"
+  Call RetireDll
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_wasm.pdb"
   SetOverwrite on
   SetOutPath "$INSTDIR"
   StrCpy $CopiedFiles 1
@@ -466,6 +392,20 @@ Section "void" SEC_THEME_VOID
   ${EndIf}
 SectionEnd
 
+Section "wasm" SEC_THEME_WASM
+  ClearErrors
+  SetOutPath "$INSTDIR\themes"
+  File /nonfatal "${X64_RELEASE}\weasel_theme_wasm.dll"
+  SetOutPath "$INSTDIR\theme-wasm"
+  ; Optional artifacts: preserve offline/skipped-build packaging.
+  File /nonfatal /r "${PROJECT_ROOT}\artifacts\theme-wasm\*"
+  ${If} ${Errors}
+    MessageBox MB_OK|MB_ICONSTOP "无法安装 WASM 主题，请检查磁盘空间和文件权限。" /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+SectionEnd
+
 SectionGroupEnd
 
 Section /o "调试符号" SEC_SYMBOLS
@@ -491,6 +431,9 @@ Section /o "调试符号" SEC_SYMBOLS
   ${EndIf}
   ${If} ${SectionIsSelected} ${SEC_THEME_VOID}
     File "${X64_RELEASE}\weasel_theme_void.pdb"
+  ${EndIf}
+  ${If} ${SectionIsSelected} ${SEC_THEME_WASM}
+    File /nonfatal "${X64_RELEASE}\weasel_theme_wasm.pdb"
   ${EndIf}
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装调试符号，请检查磁盘空间和文件权限。" /SD IDOK
@@ -528,10 +471,14 @@ Section "-注册与安装信息" SEC_REGISTER
   WriteRegDWORD HKLM "${UNINSTALL_KEY}" "NoRepair" 1
   CreateDirectory "$SMPROGRAMS\小狼毫RS"
   Delete "$SMPROGRAMS\小狼毫RS\小狼毫RS.lnk"
-  CreateShortcut "$SMPROGRAMS\小狼毫RS\小狼毫RS算法服务.lnk" "$INSTDIR\weasel-broker.exe"
   CreateShortcut "$SMPROGRAMS\小狼毫RS\卸载.lnk" "$INSTDIR\Uninstall.exe"
   IfErrors install_failed
-  Call SetBrokerShortcutAppId
+  nsExec::ExecToLog '"$INSTDIR\weasel-broker.exe" --install-shortcut "$SMPROGRAMS\小狼毫RS\小狼毫RS算法服务.lnk"'
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "创建算法服务快捷方式失败：$0"
+    Goto install_failed
+  ${EndIf}
   IfErrors install_failed
   DetailPrint "正在为当前账户部署 Rime 数据……"
   nsExec::ExecToLog '"$INSTDIR\weasel-server.exe" --deploy --silent'
@@ -587,6 +534,7 @@ FunctionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_ELEVEN} "XAML 候选栏，适用于 Windows 10 1903 及以上。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_ABC} "复古候选窗口，支持外部预编辑。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_VOID} "不显示窗口的主题及接口示例。"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_WASM} "WebAssembly 候选主题后端及随附主题，支持加载自定义 .wasm 主题文件。"
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 !endif
 
