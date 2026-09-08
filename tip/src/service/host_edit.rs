@@ -32,7 +32,12 @@ impl TextService {
             return Ok(());
         };
         let range = unsafe { composition.GetRange()? };
-        if unsafe { range.IsEmpty(ec)? }.as_bool() {
+        let range_empty = unsafe { range.IsEmpty(ec)? }.as_bool();
+        // External preedit intentionally leaves an empty host range. Only a
+        // previously nonempty inline preedit becoming empty means host deletion.
+        // Drop the state lock before invoking TSF or sending a context command.
+        let expected_empty = self.lock(&state.composition_text)?.is_empty();
+        if host_deleted_preedit(range_empty, expected_empty) {
             return self.send_context_action(&state, ContextAction::Cancel, true);
         }
         let Some(record) = record.to_owned() else {
@@ -77,5 +82,22 @@ impl TextService {
             }
         }
         Ok(())
+    }
+}
+
+fn host_deleted_preedit(range_empty: bool, expected_empty: bool) -> bool {
+    range_empty && !expected_empty
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_deleted_preedit;
+
+    #[test]
+    fn empty_external_preedit_is_not_host_deletion() {
+        assert!(!host_deleted_preedit(true, true));
+        assert!(host_deleted_preedit(true, false));
+        assert!(!host_deleted_preedit(false, false));
+        assert!(!host_deleted_preedit(false, true));
     }
 }
