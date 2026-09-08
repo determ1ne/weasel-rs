@@ -42,6 +42,13 @@ pub fn encode(envelope: &m::Envelope) -> Result<m::RpcFrame, RpcError> {
         .clone()
         .ok_or_else(|| invalid("missing payload"))?;
     let body = match payload {
+        P::UserNotification(v) if id != 0 => {
+            validate_notification(&v)?;
+            B::Request(m::Request {
+                id,
+                operation: Some(Q::UserNotification(v)),
+            })
+        }
         P::QueryConfig(v) if id != 0 => B::Request(m::Request {
             id,
             operation: Some(Q::QueryConfig(v)),
@@ -162,6 +169,10 @@ pub fn unpack(frame: m::RpcFrame) -> Result<m::Envelope, RpcError> {
                 v.id,
                 match v.operation.ok_or_else(|| invalid("missing operation"))? {
                     Q::Ping(v) => P::Ping(v),
+                    Q::UserNotification(v) => {
+                        validate_notification(&v)?;
+                        P::UserNotification(v)
+                    }
                     Q::QueryConfig(v) => P::QueryConfig(v),
                     Q::Shutdown(v) => P::Shutdown(v),
                     Q::OpenInput(v) => {
@@ -227,6 +238,30 @@ pub fn unpack(frame: m::RpcFrame) -> Result<m::Envelope, RpcError> {
         request_id: id,
         payload: Some(payload),
     })
+}
+
+fn validate_notification(v: &m::UserNotification) -> Result<(), RpcError> {
+    if v.source.is_empty()
+        || v.code.is_empty()
+        || v.title.is_empty()
+        || v.source.len() > 64
+        || v.code.len() > 128
+        || v.title.len() > 512
+        || v.message.len() > 2048
+        || v.details.len() > 16384
+        || !matches!(
+            m::UserNotificationSeverity::try_from(v.severity),
+            Ok(m::UserNotificationSeverity::Info
+                | m::UserNotificationSeverity::Warning
+                | m::UserNotificationSeverity::Error)
+        )
+        || [&v.source, &v.code, &v.title, &v.message, &v.details]
+            .iter()
+            .any(|s| s.contains('\0'))
+    {
+        return Err(invalid("invalid user notification"));
+    }
+    Ok(())
 }
 
 fn validate_token(v: &Option<m::ContextToken>) -> Result<(), RpcError> {

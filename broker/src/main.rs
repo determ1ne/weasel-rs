@@ -2,8 +2,10 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod lifecycle;
+mod notifications;
 mod settings;
 mod settings_rpc;
+mod toast;
 
 #[cfg(windows)]
 mod bindings;

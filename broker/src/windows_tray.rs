@@ -44,6 +44,7 @@ fn wake_monitor() {
 
 struct BrokerState {
     settings: crate::settings_rpc::SettingsStore,
+    notifications: crate::notifications::NotificationCenter,
     directory: PathBuf,
     server: Option<Child>,
     renderer: Option<Child>,
@@ -106,6 +107,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let state = Arc::new(Mutex::new(BrokerState {
         settings: _settings_service.settings(),
+        notifications: _settings_service.notifications(),
         directory: directory.clone(),
         server: Some(server),
         renderer: Some(renderer),
@@ -646,6 +648,7 @@ fn restart_components(state: &mut BrokerState) -> (String, u32) {
     }
     // Publish synchronously before renderer can query its startup theme.
     state.settings.replace(settings);
+    state.notifications.reset();
     // Restore each component that actually stopped, even on partial failure.
     if state.renderer.is_none() && !STOPPING.load(Ordering::Acquire) {
         match start_child(&state.directory, "weasel-renderer.exe", &[]) {
@@ -701,6 +704,7 @@ fn begin_deploy(window: HWND, operation: Operation) {
                 wake_monitor();
                 BrokerState {
                     settings: shared.settings.clone(),
+                    notifications: shared.notifications.clone(),
                     directory: shared.directory.clone(),
                     server: shared.server.take(),
                     renderer: if operation == Operation::Restart {

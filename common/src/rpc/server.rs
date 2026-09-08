@@ -75,6 +75,11 @@ fn validate_business(
         (
             PeerRole::Broker,
             PeerRole::Renderer | PeerRole::Server,
+            Some(Payload::UserNotification(_)),
+        ) => true,
+        (
+            PeerRole::Broker,
+            PeerRole::Renderer | PeerRole::Server,
             Some(Payload::QueryConfig(_)),
         ) => true,
         (

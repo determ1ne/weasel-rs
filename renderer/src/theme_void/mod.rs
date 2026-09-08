@@ -31,22 +31,24 @@ impl ThemeFactory for Factory {
         Ok(serde_json::json!({}))
     }
 
-    fn create(
-        &self,
-        _mode: UiMode,
-        settings: &ConfigSnapshot,
-    ) -> Result<Box<dyn ThemeBackend>, String> {
-        // settings 是合并后的本地只读快照，不需要阻塞 UI 线程请求配置。
-        // 实际主题可换成自己的 Deserialize 配置类型，在这里检查参数。
-        let _options: serde_json::Map<String, serde_json::Value> =
-            settings.theme_settings(self.name())?;
+    fn create(&self, _mode: UiMode, settings: &ConfigSnapshot) -> crate::theme_api::ThemeCreation {
+        // ThemeCreation carries notices even if backend initialization fails.
+        // Themes return data only: renderer owns logging and user notification.
+        // Runtime notices can be returned by ThemeBackend::take_notices().
+        (|| -> Result<Box<dyn ThemeBackend>, String> {
+            // settings 是合并后的本地只读快照，不需要阻塞 UI 线程请求配置。
+            // 实际主题可换成自己的 Deserialize 配置类型，在这里检查参数。
+            let _options: serde_json::Map<String, serde_json::Value> =
+                settings.theme_settings(self.name())?;
 
-        // create 在 UI 线程执行。窗口、绘图和 COM 资源应在这里创建，
-        // 并由 backend 持有和在 Drop 中释放；不要放进全局或 Factory。
-        // 初始化失败返回 Err，runtime 才能按注册顺序尝试其他主题。
-        // Live 窗口通常不激活、不抢焦点；Preview 的控制窗口由 runtime 提供。
-        // void 在两种模式下都不创建主题窗口。
-        Ok(Box::new(VoidBackend))
+            // create 在 UI 线程执行。窗口、绘图和 COM 资源应在这里创建，
+            // 并由 backend 持有和在 Drop 中释放；不要放进全局或 Factory。
+            // 初始化失败返回 Err，runtime 才能按注册顺序尝试其他主题。
+            // Live 窗口通常不激活、不抢焦点；Preview 的控制窗口由 runtime 提供。
+            // void 在两种模式下都不创建主题窗口。
+            Ok(Box::new(VoidBackend))
+        })()
+        .into()
     }
 }
 

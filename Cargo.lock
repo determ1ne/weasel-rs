@@ -828,6 +828,7 @@ dependencies = [
  "tokio",
  "weasel-common",
  "windows-bindgen",
+ "windows-collections",
  "windows-core",
  "windows-strings",
 ]
@@ -863,6 +864,7 @@ dependencies = [
  "windows-numerics",
  "windows-rdl",
  "windows-reference",
+ "windows-registry",
  "windows-strings",
  "windows-time",
  "windows-version",

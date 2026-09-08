@@ -855,9 +855,12 @@ impl crate::theme_api::ThemeFactory for Factory {
         &self,
         mode: UiMode,
         settings: &weasel_common::settings::ConfigSnapshot,
-    ) -> Result<Box<dyn ThemeBackend>, String> {
-        // Theme-local validation; style fields will be defined by this theme.
-        let _: serde_json::Map<String, serde_json::Value> = settings.theme_settings("ten")?;
-        create(mode)
+    ) -> crate::theme_api::ThemeCreation {
+        (|| -> Result<Box<dyn ThemeBackend>, String> {
+            // Theme-local validation; style fields will be defined by this theme.
+            let _: serde_json::Map<String, serde_json::Value> = settings.theme_settings("ten")?;
+            create(mode)
+        })()
+        .into()
     }
 }

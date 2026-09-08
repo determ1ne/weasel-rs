@@ -12,6 +12,8 @@ RequestExecutionLevel admin
 !include x64.nsh
 !include FileFunc.nsh
 !include Sections.nsh
+!include Win\COM.nsh
+!include Win\Propkey.nsh
 
 !ifndef PROJECT_ROOT
   !error "Use scripts\build-installer.ps1 to supply PROJECT_ROOT."
@@ -24,6 +26,84 @@ RequestExecutionLevel admin
 !endif
 
 !define PRODUCT_NAME "小狼毫RS"
+
+; Keep in sync with broker/src/toast.rs. Update the existing shortcut only.
+Function SetBrokerShortcutAppId
+  Push $0
+  Push $1
+  Push $2
+  Push $3
+  Push $4
+  Push $5
+  Push $6
+  StrCpy $0 0
+  StrCpy $1 0
+  StrCpy $2 0
+  StrCpy $3 0
+  StrCpy $4 0
+  StrCpy $6 -1
+  System::Call 'ole32::CoInitialize(p0)i.r5'
+  !insertmacro ComHlpr_CreateInProcInstance ${CLSID_ShellLink} ${IID_IPersistFile} r0 ""
+  ${If} $0 P= 0
+    Goto appid_done
+  ${EndIf}
+  ${IPersistFile::Load} $0 '("$SMPROGRAMS\小狼毫RS\小狼毫RS算法服务.lnk", ${STGM_READWRITE}).r6'
+  ${If} $6 < 0
+    Goto appid_done
+  ${EndIf}
+  ${IUnknown::QueryInterface} $0 '("${IID_IPropertyStore}",.r1).r6'
+  ${If} $6 < 0
+    Goto appid_done
+  ${EndIf}
+  System::Call '*${SYSSTRUCT_PROPERTYKEY}(${PKEY_AppUserModel_ID})p.r2'
+  System::Call '*${SYSSTRUCT_PROPVARIANT}()p.r3'
+  StrCpy $6 -1
+  ${If} $2 P= 0
+  ${OrIf} $3 P= 0
+    Goto appid_done
+  ${EndIf}
+  System::Call 'shlwapi::SHStrDupW(w "WeaselRS.Broker", *p.r4)i.r6'
+  ${If} $6 < 0
+    Goto appid_done
+  ${EndIf}
+  ; Borrow the CoTaskMem string until SetValue/Commit/Save have completed.
+  System::Call '*$3${SYSSTRUCT_PROPVARIANT}(${VT_LPWSTR},,p r4)'
+  ${IPropertyStore::SetValue} $1 '($2,$3).r6'
+  ${If} $6 < 0
+    Goto appid_done
+  ${EndIf}
+  ${IPropertyStore::Commit} $1 '().r6'
+  ${If} $6 < 0
+    Goto appid_done
+  ${EndIf}
+  ${IPersistFile::Save} $0 '("$SMPROGRAMS\小狼毫RS\小狼毫RS算法服务.lnk",1).r6'
+  appid_done:
+  System::Call 'ole32::CoTaskMemFree(p r4)'
+  System::Free $3
+  System::Free $2
+  ${If} $1 P<> 0
+    ${IUnknown::Release} $1 ""
+  ${EndIf}
+  ${If} $0 P<> 0
+    ${IUnknown::Release} $0 ""
+  ${EndIf}
+  ${If} $5 >= 0
+    System::Call 'ole32::CoUninitialize()'
+  ${EndIf}
+  ${If} $6 < 0
+    DetailPrint "设置算法服务快捷方式 AUMID 失败：$6"
+    SetErrors
+  ${Else}
+    ClearErrors
+  ${EndIf}
+  Pop $6
+  Pop $5
+  Pop $4
+  Pop $3
+  Pop $2
+  Pop $1
+  Pop $0
+FunctionEnd
 !define PRODUCT_KEY "Software\Weasel-RS"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weasel-RS"
 !define X64_RELEASE "${PROJECT_ROOT}\target\x86_64-pc-windows-msvc\release"
@@ -367,6 +447,8 @@ Section "-注册与安装信息" SEC_REGISTER
   Delete "$SMPROGRAMS\小狼毫RS\小狼毫RS.lnk"
   CreateShortcut "$SMPROGRAMS\小狼毫RS\小狼毫RS算法服务.lnk" "$INSTDIR\weasel-broker.exe"
   CreateShortcut "$SMPROGRAMS\小狼毫RS\卸载.lnk" "$INSTDIR\Uninstall.exe"
+  IfErrors install_failed
+  Call SetBrokerShortcutAppId
   IfErrors install_failed
   DetailPrint "正在为当前账户部署 Rime 数据……"
   nsExec::ExecToLog '"$INSTDIR\weasel-server.exe" --deploy --silent'

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "font": {"type": "string", "minLength": 1, "default": "Microsoft YaHei UI"},
+    "fontSize": {
+      "description": "DIP: small=14, medium=18, large=22, extraLarge=28",
+      "oneOf": [{"enum": ["small", "medium", "large", "extraLarge"]}, {"type": "number", "minimum": 1, "maximum": 256}],
+      "default": "small"
+    },
+    "accentColor": {"$ref": "#/$defs/color", "default": "system"},
+    "backgroundColor": {"$ref": "#/$defs/color", "default": "system"},
+    "textColor": {"$ref": "#/$defs/color", "default": "system"}
+  },
+  "$defs": {
+    "value": {"type": "string", "pattern": "^(system|#?([0-9a-fA-F]{6}|[0-9a-fA-F]{8}))$"},
+    "color": {
+      "description": "system 或 RGB/ARGB 十六进制颜色；system 保留系统外观，accentColor 从 DWM AccentColor (ABGR) 读取",
+      "oneOf": [
+        {"$ref": "#/$defs/value"},
+        {"type": "object", "properties": {"light": {"$ref": "#/$defs/value"}, "dark": {"$ref": "#/$defs/value"}}, "required": ["light", "dark"], "additionalProperties": false}
+      ]
+    }
+  },
+  "additionalProperties": false
+}

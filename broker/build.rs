@@ -10,6 +10,18 @@ fn main() {
         .output(out.join("bindings.rs"))
         .input_default()
         .filters([
+            "Windows.UI.Notifications.ToastNotificationManager::CreateToastNotifier",
+            "Windows.UI.Notifications.ToastNotificationManager::CreateToastNotifierWithId",
+            "Windows.UI.Notifications.IToastNotificationManagerStatics2::{}",
+            "Windows.UI.Notifications.IToastNotificationManagerStatics4::{}",
+            "Windows.UI.Notifications.IToastNotificationManagerStatics5::{}",
+            "Windows.Data.Xml.Dom.IXmlDocumentStatics::{}",
+            "Windows.UI.Notifications.ToastNotification::CreateToastNotification",
+            "Windows.UI.Notifications.ToastNotifier::Show",
+            "Windows.Data.Xml.Dom.XmlDocument::LoadXml",
+            "Windows.Win32.RoInitialize",
+            "Windows.Win32.RoUninitialize",
+            "Windows.Win32.RO_INIT_SINGLETHREADED",
             "Windows.Win32.CreateEventW",
             "Windows.Win32.SetEvent",
             "Windows.Win32.WaitForMultipleObjects",

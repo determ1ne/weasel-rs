@@ -1,4 +1,4 @@
-//! Read-only configuration endpoint, confined to the current logon session.
+//! Configuration and notification endpoint, confined to the current logon session.
 use std::{
     sync::{Arc, RwLock},
     thread,
@@ -17,6 +17,7 @@ use weasel_common::{
 };
 
 pub struct SettingsService {
+    notifications: crate::notifications::NotificationCenter,
     settings: SettingsStore,
     stop: Option<oneshot::Sender<()>>,
     done: std::sync::mpsc::Receiver<()>,
@@ -36,6 +37,9 @@ impl SettingsStore {
 }
 
 impl SettingsService {
+    pub fn notifications(&self) -> crate::notifications::NotificationCenter {
+        self.notifications.clone()
+    }
     pub fn settings(&self) -> SettingsStore {
         self.settings.clone()
     }
@@ -57,6 +61,8 @@ impl SettingsService {
         runtime.block_on(server.bind())?;
         let (stop, mut stopping) = oneshot::channel();
         let (finished, done) = std::sync::mpsc::channel();
+        let notifications = crate::notifications::NotificationCenter::new(&paths);
+        let notification_handle = notifications.clone();
         let settings = SettingsStore(Arc::new(RwLock::new(settings)));
         let published = settings.clone();
         let disk_reads = Arc::new(Semaphore::new(1));
@@ -70,11 +76,12 @@ impl SettingsService {
                             match accepted {
                                 Ok(connection) => {
                                     let settings = settings.clone();
+                                    let notifications = notifications.clone();
                                     let paths = paths.clone();
                                     let disk_reads = disk_reads.clone();
                                     clients.spawn(async move {
                                         // Bound idle/misbehaving clients as well as the connection count.
-                                        let _ = tokio::time::timeout(Duration::from_secs(5), serve(connection, settings, paths, disk_reads)).await;
+                                        let _ = tokio::time::timeout(Duration::from_secs(5), serve(connection, settings, paths, disk_reads, notifications)).await;
                                     });
                                 }
                                 Err(error) => {
@@ -96,6 +103,7 @@ impl SettingsService {
         })?;
         Ok(Self {
             settings: published,
+            notifications: notification_handle,
             stop: Some(stop),
             done,
             worker: Some(worker),
@@ -121,8 +129,18 @@ async fn serve(
     settings: SettingsStore,
     paths: RuntimePaths,
     disk_reads: Arc<Semaphore>,
+    notifications: crate::notifications::NotificationCenter,
 ) -> Result<(), RpcError> {
     while let Some(request) = connection.recv().await? {
+        if let Some(Payload::UserNotification(notice)) = &request.payload {
+            let center = notifications.clone();
+            let notice = notice.clone();
+            read_on_worker(disk_reads.clone(), move || center.report(notice)).await?;
+            connection
+                .send_pong(request.request_id, "notification recorded")
+                .await?;
+            continue;
+        }
         if let Some(Payload::QueryConfig(query)) = &request.payload {
             // A refresh re-reads the on-disk configuration for this one call so a
             // just-edited setup is previewed; it does not publish to the store.
@@ -261,6 +279,16 @@ mod tests {
                 assert_eq!(a_result.unwrap().unwrap()["theme"], "ten");
                 assert_eq!(b_result.unwrap().unwrap()["theme"], "ten");
                 let engine = connect(&pipe, PeerRole::Server).await.unwrap();
+                let notice = weasel_common::message::UserNotification {
+                    source: "server".into(),
+                    code: "configuration.invalid".into(),
+                    severity: weasel_common::message::UserNotificationSeverity::Warning as i32,
+                    title: "Configuration warning".into(),
+                    message: "Using defaults".into(),
+                    details: "field=example".into(),
+                };
+                engine.notify_user(notice.clone()).await.unwrap();
+                a.notify_user(notice).await.unwrap();
                 assert_eq!(
                     engine.query_config(".theme", false).await.unwrap(),
                     Some(serde_json::json!("ten"))

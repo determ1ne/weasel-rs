@@ -933,11 +933,14 @@ impl crate::theme_api::ThemeFactory for Factory {
         &self,
         mode: UiMode,
         settings: &weasel_common::settings::ConfigSnapshot,
-    ) -> Result<Box<dyn ThemeBackend>, String> {
-        let antialiasing = settings
-            .get::<bool>(".themeSettings.abc.antialiasing")?
-            .ok_or("missing ABC antialiasing setting")?;
-        create(mode, antialiasing)
+    ) -> crate::theme_api::ThemeCreation {
+        (|| -> Result<Box<dyn ThemeBackend>, String> {
+            let antialiasing = settings
+                .get::<bool>(".themeSettings.abc.antialiasing")?
+                .ok_or("missing ABC antialiasing setting")?;
+            create(mode, antialiasing)
+        })()
+        .into()
     }
 }
 

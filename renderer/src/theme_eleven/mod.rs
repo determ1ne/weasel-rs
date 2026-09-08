@@ -1,5 +1,6 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
+mod config;
 mod visual;
 
 use crate::bindings::Windows::Win32::SWP_NOSIZE;
@@ -81,7 +82,10 @@ fn supports_xaml(version: OsVersion) -> bool {
     version >= OsVersion::new(10, 0, 0, 18362)
 }
 
-fn create(mode: UiMode) -> Result<Box<dyn crate::theme_api::ThemeBackend>, String> {
+fn create(
+    mode: UiMode,
+    config: config::ThemeConfig,
+) -> Result<Box<dyn crate::theme_api::ThemeBackend>, String> {
     // The XAML Island backend requires Windows 10 1903 (build 18362) or later.
     if !supports_xaml(OsVersion::current()) {
         return Err(format!(
@@ -89,7 +93,7 @@ fn create(mode: UiMode) -> Result<Box<dyn crate::theme_api::ThemeBackend>, Strin
             OsVersion::current().build
         ));
     }
-    unsafe { create_initialized(mode) }
+    unsafe { create_initialized(mode, config) }
 }
 
 #[cfg(test)]
@@ -104,7 +108,10 @@ mod version_tests {
     }
 }
 
-unsafe fn create_initialized(mode: UiMode) -> Result<Box<dyn ThemeBackend>, String> {
+unsafe fn create_initialized(
+    mode: UiMode,
+    config: config::ThemeConfig,
+) -> Result<Box<dyn ThemeBackend>, String> {
     let window = create_window(mode)?;
     let window_guard = WindowGuard(window);
     apply_dwm_corner_preference(window);
@@ -183,7 +190,7 @@ unsafe fn create_initialized(mode: UiMode) -> Result<Box<dyn ThemeBackend>, Stri
         .SetContent(&root)
         .map_err(|error| format!("XAML root attachment failed: {error}"))?;
 
-    let theme = CandidateTheme::default();
+    let theme = CandidateTheme::new(config);
     theme
         .prepare(&root, &rows, &quick_action_panel, &quick_actions)
         .map_err(|error| format!("theme preparation failed: {error}"))?;
@@ -209,6 +216,9 @@ unsafe fn create_initialized(mode: UiMode) -> Result<Box<dyn ThemeBackend>, Stri
 }
 
 impl ThemeBackend for UiState {
+    fn take_notices(&mut self) -> Vec<crate::theme_api::ThemeNotice> {
+        self.theme.take_notices()
+    }
     fn render(&mut self, snapshot: &CandidateView, events: &EventSink) -> Result<(), String> {
         if !is_visible(snapshot) {
             self.hide();
@@ -231,7 +241,7 @@ impl ThemeBackend for UiState {
     }
 
     fn refresh_appearance(&mut self) -> Result<(), String> {
-        self.theme = CandidateTheme::default();
+        self.theme.refresh();
         self.last_snapshot = None;
         Ok(())
     }
@@ -527,6 +537,9 @@ fn desired_size(state: &mut UiState) -> (i32, i32) {
 pub struct Factory;
 
 impl crate::theme_api::ThemeFactory for Factory {
+    fn default_settings(&self) -> Result<serde_json::Value, String> {
+        serde_json::from_str(include_str!("config.json")).map_err(|e| e.to_string())
+    }
     fn name(&self) -> &'static str {
         "eleven"
     }
@@ -537,9 +550,11 @@ impl crate::theme_api::ThemeFactory for Factory {
         &self,
         mode: UiMode,
         settings: &weasel_common::settings::ConfigSnapshot,
-    ) -> Result<Box<dyn ThemeBackend>, String> {
-        // Theme-local validation; style fields will be defined by this theme.
-        let _: serde_json::Map<String, serde_json::Value> = settings.theme_settings("eleven")?;
-        create(mode)
+    ) -> crate::theme_api::ThemeCreation {
+        let config = config::ThemeConfig::load(settings);
+        // Keep the notice buffer alive if native initialization fails midway.
+        let backend = create(mode, config.clone());
+        let notices = config.take_notices();
+        crate::theme_api::ThemeCreation { backend, notices }
     }
 }

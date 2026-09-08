@@ -29,6 +29,23 @@ message QueryConfig {
   bool refresh = 1;
   string path = 2;
 }
+
+// Component-to-broker user notification. Transport is independent of Toast/UI.
+// Never include input text or other secrets in diagnostic details.
+enum UserNotificationSeverity {
+  USER_NOTIFICATION_SEVERITY_UNSPECIFIED = 0;
+  USER_NOTIFICATION_SEVERITY_INFO = 1;
+  USER_NOTIFICATION_SEVERITY_WARNING = 2;
+  USER_NOTIFICATION_SEVERITY_ERROR = 3;
+}
+message UserNotification {
+  string source = 1;
+  string code = 2;
+  UserNotificationSeverity severity = 3;
+  string title = 4;
+  string message = 5;
+  string details = 6;
+}
 message ConfigValue {
   // Absent means missing; the string "null" is a present JSON null value.
   optional string json = 1;

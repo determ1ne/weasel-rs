@@ -1,6 +1,38 @@
 //! Theme contract: factories are shared; backend resources stay on the UI thread.
 use std::sync::Arc;
 
+/// Presentation-neutral information; themes never log or perform notification RPC.
+#[derive(Clone, Debug)]
+pub struct ThemeNotice {
+    pub severity: NoticeSeverity,
+    pub code: String,
+    pub message: String,
+    pub details: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // Public theme contract; individual themes may use only warnings.
+pub enum NoticeSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+pub struct ThemeCreation {
+    pub backend: Result<Box<dyn ThemeBackend>, String>,
+    /// Retained even when native backend creation fails.
+    pub notices: Vec<ThemeNotice>,
+}
+
+impl From<Result<Box<dyn ThemeBackend>, String>> for ThemeCreation {
+    fn from(backend: Result<Box<dyn ThemeBackend>, String>) -> Self {
+        Self {
+            backend,
+            notices: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThemeCapabilities {
     /// Whether this backend can display preedit outside the host application.
@@ -106,6 +138,10 @@ impl EventSink {
 
 #[cfg(windows)]
 pub trait ThemeBackend {
+    /// Drain after an operation, including failed operations. No polling needed.
+    fn take_notices(&mut self) -> Vec<ThemeNotice> {
+        Vec::new()
+    }
     fn render(&mut self, snapshot: &CandidateView, events: &EventSink) -> Result<(), String>;
     fn hide(&mut self);
     /// Invalidate appearance resources only. The runtime decides whether the
@@ -137,7 +173,7 @@ pub trait ThemeFactory: Send + Sync {
         &self,
         mode: UiMode,
         settings: &weasel_common::settings::ConfigSnapshot,
-    ) -> Result<Box<dyn ThemeBackend>, String>;
+    ) -> ThemeCreation;
 }
 
 /// How the renderer is running. Live is the normal per-candidate strip driven

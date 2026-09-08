@@ -483,6 +483,22 @@ impl RpcClient {
             _ => Err(RpcError::UnexpectedResponse),
         }
     }
+    /// Ask broker to record a problem and notify the user under its lifecycle policy.
+    /// Acknowledgement means recorded, not that the OS displayed a notification.
+    pub async fn notify_user(
+        &self,
+        notification: crate::message::UserNotification,
+    ) -> Result<(), RpcError> {
+        match self
+            .request(Payload::UserNotification(notification))
+            .await?
+            .payload
+        {
+            Some(Payload::Pong(_)) => Ok(()),
+            _ => Err(RpcError::UnexpectedResponse),
+        }
+    }
+
     async fn request(&self, payload: Payload) -> Result<Envelope, RpcError> {
         if !self.is_connected() {
             return Err(RpcError::Disconnected);

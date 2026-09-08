@@ -261,6 +261,7 @@ impl Drop for Apartment {
 }
 
 struct Presentation {
+    theme_name: &'static str,
     backend: Box<dyn ThemeBackend>,
     events: EventSender,
     last: Option<RenderSnapshot>,
@@ -268,9 +269,13 @@ struct Presentation {
 }
 
 impl Presentation {
+    fn hide(&mut self) {
+        self.backend.hide();
+        crate::notifications::drain(self.theme_name, self.backend.as_mut());
+    }
     fn apply(&mut self, owner: Owner, snapshot: Option<RenderSnapshot>) -> Result<(), String> {
         if self.events.owner != owner {
-            self.backend.hide();
+            self.hide();
             self.last = None;
         }
         self.events.owner = owner;
@@ -290,14 +295,18 @@ impl Presentation {
                 if crate::presentation::is_visible(&view) {
                     let events =
                         crate::theme_adapter::events(owner, &snapshot, self.events.sender.clone());
-                    self.backend.render(&view, &events)?;
+                    {
+                        let result = self.backend.render(&view, &events);
+                        crate::notifications::drain(self.theme_name, self.backend.as_mut());
+                        result?;
+                    }
                 } else {
-                    self.backend.hide();
+                    self.hide();
                 }
                 self.last = Some(snapshot);
             }
             None => {
-                self.backend.hide();
+                self.hide();
                 self.last = None;
             }
         }
@@ -305,7 +314,11 @@ impl Presentation {
     }
 
     fn refresh(&mut self, current_owner: Option<Owner>) -> Result<(), String> {
-        self.backend.refresh_appearance()?;
+        {
+            let result = self.backend.refresh_appearance();
+            crate::notifications::drain(self.theme_name, self.backend.as_mut());
+            result?;
+        }
         if current_owner == Some(self.events.owner) {
             if let Some(snapshot) = &self.last {
                 let view = crate::theme_adapter::view(snapshot, self.content_id);
@@ -315,7 +328,11 @@ impl Presentation {
                         snapshot,
                         self.events.sender.clone(),
                     );
-                    self.backend.render(&view, &events)?;
+                    {
+                        let result = self.backend.render(&view, &events);
+                        crate::notifications::drain(self.theme_name, self.backend.as_mut());
+                        result?;
+                    }
                 }
             }
         }
@@ -339,7 +356,11 @@ fn run_ui(
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let config =
             config.with_theme_defaults(registration.name(), registration.default_settings()?)?;
-        let backend = registration.create(mode, &config)?;
+        let creation = registration.create(mode, &config);
+        for notice in creation.notices {
+            crate::notifications::report(registration.name(), notice);
+        }
+        let backend = creation.backend?;
         if !config.inline_preedit() && !registration.capabilities().preedit {
             crate::diagnostics::record(format_args!(
                 "theme {} does not support preedit; using inline preedit",
@@ -352,6 +373,7 @@ fn run_ui(
             registration.capabilities()
         ));
         let mut presentation = Presentation {
+            theme_name: registration.name(),
             backend,
             events,
             last: None,
@@ -373,7 +395,9 @@ fn run_ui(
                 queue.take_pending();
             }
             presentation.apply(crate::preview::PREVIEW_OWNER, Some(snapshot))?;
-            presentation.backend.check_health()?;
+            let health = presentation.backend.check_health();
+            crate::notifications::drain(registration.name(), presentation.backend.as_mut());
+            health?;
         }
         let thread_id = GetCurrentThreadId();
         let _appearance =
@@ -421,14 +445,20 @@ fn run_ui(
             }
             if !is_thread_message(&message, WM_RENDERER_UPDATE)
                 && !is_thread_message(&message, WM_RENDERER_THEME)
-                && !presentation.backend.pre_translate(&message)?
             {
-                let _ = TranslateMessage(&message);
-                DispatchMessageW(&message);
+                let translated = presentation.backend.pre_translate(&message);
+                crate::notifications::drain(registration.name(), presentation.backend.as_mut());
+                if !translated? {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
             }
-            presentation.backend.check_health()?;
+            let health = presentation.backend.check_health();
+            crate::notifications::drain(registration.name(), presentation.backend.as_mut());
+            health?;
         }
         presentation.backend.hide();
+        crate::notifications::drain(registration.name(), presentation.backend.as_mut());
         Ok(())
     }
 }
@@ -460,8 +490,10 @@ mod tests {
             &self,
             _: UiMode,
             _: &weasel_common::settings::ConfigSnapshot,
-        ) -> Result<Box<dyn ThemeBackend>, String> {
-            Err("test factory must not create native resources".into())
+        ) -> crate::theme_api::ThemeCreation {
+            crate::theme_api::ThemeCreation::from(Err(
+                "test factory must not create native resources".into(),
+            ))
         }
     }
     fn candidates() -> [&'static dyn ThemeFactory; 2] {
@@ -568,6 +600,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Calls::default()));
         let (sender, _) = tokio::sync::mpsc::channel(1);
         let mut ui = Presentation {
+            theme_name: "test",
             backend: Box::new(FakeBackend(calls.clone())),
             events: EventSender { owner: 0, sender },
             last: None,

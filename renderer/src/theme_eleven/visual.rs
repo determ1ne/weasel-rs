@@ -68,14 +68,30 @@ use crate::bindings::{
     UIColorType, UISettings, VerticalAlignment,
 };
 
-#[derive(Default)]
 pub struct CandidateTheme {
+    config: super::config::ThemeConfig,
     brushes: std::cell::RefCell<Vec<([u8; 4], SolidColorBrush)>>,
     palette: std::cell::Cell<Option<Palette>>,
     font: std::cell::RefCell<Option<FontFamily>>,
 }
 
 impl CandidateTheme {
+    pub fn take_notices(&self) -> Vec<crate::theme_api::ThemeNotice> {
+        self.config.take_notices()
+    }
+    pub fn new(config: super::config::ThemeConfig) -> Self {
+        Self {
+            config,
+            brushes: Default::default(),
+            palette: Default::default(),
+            font: Default::default(),
+        }
+    }
+    pub fn refresh(&mut self) {
+        self.brushes.get_mut().clear();
+        self.palette.set(None);
+        *self.font.get_mut() = None;
+    }
     fn brush(&self, color: Color) -> windows_core::Result<SolidColorBrush> {
         let key = [color.A, color.R, color.G, color.B];
         let mut cache = self.brushes.borrow_mut();
@@ -93,7 +109,7 @@ impl CandidateTheme {
         if let Some(font) = self.font.borrow().as_ref() {
             return Ok(font.clone());
         }
-        let font = FontFamily::CreateInstanceWithName(&HSTRING::from("Microsoft YaHei UI"))?;
+        let font = FontFamily::CreateInstanceWithName(&HSTRING::from(&self.config.font))?;
         *self.font.borrow_mut() = Some(font.clone());
         Ok(font)
     }
@@ -107,7 +123,13 @@ impl CandidateTheme {
         quick_action_panel: &Border,
         quick_actions: &StackPanel,
     ) -> windows_core::Result<()> {
-        let palette = self.palette.get().unwrap_or_else(Palette::system);
+        let palette = self.palette.get().unwrap_or_else(|| {
+            let mut palette = Palette::system();
+            palette.accent = self.config.accent(palette.dark, palette.accent);
+            palette.foreground = self.config.foreground(palette.dark, palette.foreground);
+            palette.background = self.config.background(palette.dark);
+            palette
+        });
         self.palette.set(Some(palette));
         self.brush(palette.foreground)?;
         self.brush(palette.accent)?;
@@ -274,7 +296,7 @@ impl CandidateTheme {
 
             let ordinal = TextBlock::new()?;
             ordinal.SetFontFamily(&candidate_font)?;
-            ordinal.SetFontSize(14.0)?;
+            ordinal.SetFontSize(self.config.font_size)?;
             ordinal.SetVerticalAlignment(VerticalAlignment::Center)?;
             ordinal.SetText(&HSTRING::from((index + 1).to_string()))?;
             ordinal.SetMargin(thickness(0.0, 0.0, 6.0, 0.0))?;
@@ -282,7 +304,7 @@ impl CandidateTheme {
 
             let text = TextBlock::new()?;
             text.SetFontFamily(&candidate_font)?;
-            text.SetFontSize(14.0)?;
+            text.SetFontSize(self.config.font_size)?;
             text.SetVerticalAlignment(VerticalAlignment::Center)?;
             let label = if candidate.secondary_text.is_empty() {
                 candidate.primary_text.clone()
@@ -446,6 +468,7 @@ fn append_action(
 
 #[derive(Clone, Copy)]
 struct Palette {
+    background: Option<Color>,
     foreground: Color,
     accent: Color,
     dark: bool,
@@ -454,6 +477,7 @@ struct Palette {
 impl Palette {
     fn system() -> Self {
         let fallback = Self {
+            background: None,
             foreground: Color {
                 A: 0xff,
                 R: 0x20,
@@ -482,6 +506,7 @@ impl Palette {
             + 587_u32 * background.G as u32
             + 114_u32 * background.B as u32;
         Self {
+            background: None,
             foreground,
             accent,
             dark: luminance < 128_000,
@@ -489,6 +514,9 @@ impl Palette {
     }
 
     fn acrylic_base(self) -> Color {
+        if let Some(background) = self.background {
+            return background;
+        }
         Color {
             A: 0xff,
             R: if self.dark { 0x1c } else { 0xf3 },
@@ -517,7 +545,13 @@ fn apply_panel_background(
         acrylic.SetBackgroundSource(AcrylicBackgroundSource::HostBackdrop)?;
         acrylic.SetFallbackColor(palette.acrylic_base())?;
         acrylic.SetTintColor(palette.acrylic_base())?;
-        acrylic.SetTintOpacity(if palette.dark { 0.75 } else { 0.0 })?;
+        acrylic.SetTintOpacity(
+            palette
+                .background
+                .map_or(if palette.dark { 0.75 } else { 0.0 }, |c| {
+                    c.A as f64 / 255.0
+                }),
+        )?;
         acrylic.SetTintLuminosityOpacity(Some(if palette.dark { 0.92 } else { 0.9 }))?;
         root.SetBackground(&acrylic)
     })();

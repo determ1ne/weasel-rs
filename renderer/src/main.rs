@@ -11,6 +11,8 @@ mod d2d_bindings;
 #[cfg(windows)]
 mod diagnostics;
 #[cfg(windows)]
+mod notifications;
+#[cfg(windows)]
 mod presentation;
 #[cfg(windows)]
 mod preview;

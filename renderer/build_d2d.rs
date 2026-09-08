@@ -18,6 +18,8 @@ pub fn generate() {
             "Windows.Win32.MonitorFromWindow", "Windows.Win32.MONITOR_DEFAULTTOPRIMARY", "Windows.Win32.GetMonitorInfoW",
 
             "Windows.Win32.D2D1CreateFactory", "Windows.Win32.DWriteCreateFactory",
+            "Windows.Win32.IDWriteFactory::GetSystemFontCollection",
+            "Windows.Win32.IDWriteFontCollection::FindFamilyName",
             "Windows.Win32.ID2D1Factory::CreateHwndRenderTarget", "Windows.Win32.ID2D1HwndRenderTarget::Resize",
             "Windows.Win32.ID2D1SolidColorBrush::SetColor", "Windows.Win32.IDWriteFactory::{CreateTextFormat,CreateTextLayout}",
             "Windows.Win32.IDWriteTextFormat::{SetTextAlignment,SetParagraphAlignment,SetWordWrapping}",

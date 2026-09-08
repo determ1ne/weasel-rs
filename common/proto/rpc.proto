@@ -17,7 +17,7 @@ enum PeerRole { PEER_ROLE_UNSPECIFIED = 0; PEER_ROLE_TIP = 1; PEER_ROLE_BROKER =
 message Hello { PeerRole role = 1; uint64 instance_id = 2; }
 message Request {
   uint64 id = 1;
-  oneof operation { Ping ping = 10; InputKey key = 11; ContextCommand context = 12; Shutdown shutdown = 13; OpenInput open_input = 14; QueryConfig query_config = 15; }
+  oneof operation { Ping ping = 10; InputKey key = 11; ContextCommand context = 12; Shutdown shutdown = 13; OpenInput open_input = 14; QueryConfig query_config = 15; UserNotification user_notification = 16; }
 }
 message Response {
   uint64 id = 1;
