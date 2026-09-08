@@ -1,7 +1,7 @@
 use std::{
     os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::Stdio,
     sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex, OnceLock},
     thread,
@@ -12,6 +12,7 @@ use crate::bindings::*;
 use crate::lifecycle::{
     Operation, RestartBackoff, completion_result, shutdown_error_result, workflow_result,
 };
+use crate::managed_children::Child;
 use weasel_common::{
     logging::ComponentLogger,
     message::PeerRole,
@@ -89,18 +90,21 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // A preview re-reads the on-disk configuration via this same runtime layout.
     let _settings_service = crate::settings_rpc::SettingsService::start(settings, paths.clone())?;
     let directory = paths.executable_directory;
-    let server = start_child(&directory, "weasel-server.exe", &[])?;
-    let renderer = match start_child(&directory, "weasel-renderer.exe", &[]) {
-        Ok(renderer) => renderer,
+    crate::managed_children::initialize()?;
+    crate::managed_children::clear_stale(&directory, "weasel-server.exe")?;
+    crate::managed_children::clear_stale(&directory, "weasel-renderer.exe")?;
+    // Renderer readiness precedes engine capability discovery.
+    let renderer = start_child(&directory, "weasel-renderer.exe", &[])?;
+    let server = match start_child(&directory, "weasel-server.exe", &[]) {
+        Ok(server) => server,
         Err(error) => {
-            let mut server = Some(server);
-            if let Err(error) =
-                shutdown_component(&mut server, default_pipe_name(), "broker startup failed")
-            {
-                deployment_diagnostic(
-                    &directory,
-                    &format!("Server left running after startup failure: {error}"),
-                );
+            let mut renderer = Some(renderer);
+            if let Err(cleanup) = shutdown_component(
+                &mut renderer,
+                default_renderer_pipe_name(),
+                "broker startup failed",
+            ) {
+                deployment_diagnostic(&directory, &format!("Startup rollback: {cleanup}"));
             }
             return Err(error.into());
         }
@@ -154,15 +158,7 @@ fn start_child(
     executable: &str,
     arguments: &[&str],
 ) -> Result<Child, std::io::Error> {
-    let mut command = Command::new(directory.join(executable));
-    command
-        .args(arguments)
-        .current_dir(directory)
-        .stdin(Stdio::null());
-    if !weasel_common::runtime_paths::is_development_directory(directory) {
-        command.stdout(Stdio::null()).stderr(Stdio::null());
-    }
-    command.spawn()
+    crate::managed_children::start(directory, executable, arguments)
 }
 
 fn shutdown_broker(state: &Mutex<BrokerState>) {
@@ -189,15 +185,11 @@ fn shutdown_broker(state: &Mutex<BrokerState>) {
 
 fn monitor_children(state: Arc<Mutex<BrokerState>>, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::Acquire) {
-        let mut state = state.lock().expect("broker state mutex poisoned");
+        monitor_child(&state, true);
+        monitor_child(&state, false);
+        let state = state.lock().expect("broker state mutex poisoned");
         if stop.load(Ordering::Acquire) || state.operation == Operation::Shutdown {
             break;
-        }
-        if state.operation.monitors_server() {
-            monitor_child(&mut state, true);
-        }
-        if state.operation.monitors_renderer() {
-            monitor_child(&mut state, false);
         }
         // Duplicate child handles while ownership is locked; operations can then
         // move/drop Child without invalidating this wait set.
@@ -250,7 +242,18 @@ fn monitor_children(state: Arc<Mutex<BrokerState>>, stop: Arc<AtomicBool>) {
     }
 }
 
-fn monitor_child(state: &mut BrokerState, server: bool) {
+fn monitor_child(shared: &Arc<Mutex<BrokerState>>, server: bool) {
+    let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+    let state = &mut *guard;
+    if STOPPING.load(Ordering::Acquire)
+        || !(if server {
+            state.operation.monitors_server()
+        } else {
+            state.operation.monitors_renderer()
+        })
+    {
+        return;
+    }
     let (slot, retry, executable) = if server {
         (
             &mut state.server,
@@ -301,7 +304,27 @@ fn monitor_child(state: &mut BrokerState, server: bool) {
         );
         return;
     }
-    match start_child(&state.directory, executable, &[]) {
+    let directory = state.directory.clone();
+    drop(guard);
+    // Readiness can take seconds. Never hold the tray/operation state lock.
+    let started = start_child(&directory, executable, &[]);
+    let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+    let state = &mut *guard;
+    if STOPPING.load(Ordering::Acquire)
+        || !(if server {
+            state.operation.monitors_server()
+        } else {
+            state.operation.monitors_renderer()
+        })
+    {
+        return;
+    }
+    let (slot, retry) = if server {
+        (&mut state.server, &mut state.server_retry)
+    } else {
+        (&mut state.renderer, &mut state.renderer_retry)
+    };
+    match started {
         Ok(child) => {
             deployment_diagnostic(
                 &state.directory,
@@ -346,6 +369,7 @@ fn shutdown_component(child: &mut Option<Child>, pipe: String, reason: &str) -> 
             let client = RpcClient::connect_as(pipe, PeerRole::Broker)
                 .await
                 .map_err(|error| error.to_string())?;
+            server.verify(&client).await?;
             client
                 .shutdown(reason)
                 .await
@@ -391,39 +415,11 @@ fn deployment_diagnostic(_directory: &std::path::Path, text: &str) {
 }
 
 fn wait_for_server(child: &mut Child) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
-    runtime.block_on(async {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if STOPPING.load(Ordering::Acquire) {
-                return Err("broker is shutting down".into());
-            }
-            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-                return Err(format!(
-                    "server pid={} exited before readiness: {status}",
-                    child.id()
-                ));
-            }
-            let probe = tokio::time::timeout(Duration::from_millis(300), async {
-                let client = RpcClient::connect_as(default_pipe_name(), PeerRole::Broker).await?;
-                client.ping("broker readiness probe").await
-            })
-            .await;
-            if matches!(probe, Ok(Ok(_))) {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(format!(
-                    "server pid={} did not answer ping within 10 seconds",
-                    child.id()
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
+    // start_child already completed the ownership/readiness handshake.
+    match child.try_wait().map_err(|e| e.to_string())? {
+        None => Ok(()),
+        Some(status) => Err(format!("server exited after readiness: {status}")),
+    }
 }
 
 async fn bounded_operation<T>(
@@ -644,7 +640,10 @@ fn restart_components(state: &mut BrokerState) -> (String, u32) {
         default_renderer_pipe_name(),
         "broker requested restart",
     ) {
-        errors.push(format!("无法停止 renderer：{error}"));
+        return (
+            format!("无法停止 renderer，已取消重启：{error}"),
+            MB_ICONERROR as u32,
+        );
     }
     // Publish synchronously before renderer can query its startup theme.
     state.settings.replace(settings);
@@ -659,7 +658,7 @@ fn restart_components(state: &mut BrokerState) -> (String, u32) {
             Err(error) => errors.push(format!("无法启动 renderer：{error}")),
         }
     }
-    if state.server.is_none() && !STOPPING.load(Ordering::Acquire) {
+    if errors.is_empty() && state.server.is_none() && !STOPPING.load(Ordering::Acquire) {
         match start_child(&state.directory, "weasel-server.exe", &[]) {
             Ok(mut child) => {
                 if let Err(error) = wait_for_server(&mut child) {
@@ -674,6 +673,15 @@ fn restart_components(state: &mut BrokerState) -> (String, u32) {
     if errors.is_empty() {
         (String::new(), 0)
     } else {
+        // This restart owns both slots. Roll back any successfully started peer.
+        for (child, pipe) in [
+            (&mut state.server, default_pipe_name()),
+            (&mut state.renderer, default_renderer_pipe_name()),
+        ] {
+            if let Err(error) = shutdown_component(child, pipe, "restart rollback") {
+                errors.push(error);
+            }
+        }
         (
             format!("重启流程异常：\n{}", errors.join("\n")),
             MB_ICONERROR as u32,
@@ -739,7 +747,11 @@ fn begin_deploy(window: HWND, operation: Operation) {
                     shared.renderer = owned.renderer;
                     shared.renderer_retry.started(Instant::now());
                 }
-                shared.operation = Operation::Idle;
+                shared.operation = if operation == Operation::Restart && !result.0.is_empty() {
+                    Operation::Failed
+                } else {
+                    Operation::Idle
+                };
                 wake_monitor();
             }
             *DEPLOY_RESULT.lock().unwrap() = Some(result);

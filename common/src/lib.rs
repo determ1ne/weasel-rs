@@ -14,4 +14,6 @@ pub mod platform;
 pub mod process;
 pub mod rpc;
 pub mod runtime_paths;
+#[cfg(windows)]
+pub mod service_owner;
 pub mod settings;

@@ -51,11 +51,17 @@ async fn run_rpc(server: RpcServer, mut ui: UiHandle) -> Result<(), String> {
     let commands = ui.command_sender();
     let preedit = ui.capabilities.preedit;
     let (shutdown_sender, mut shutdown_receiver) = watch::channel(false);
+    let (parent_exit, mut parent_dead) = tokio::sync::oneshot::channel();
+    let _parent_watch = weasel_common::service_owner::ParentWatch::start(move || {
+        let _ = parent_exit.send(());
+    })
+    .map_err(|e| e.to_string())?;
     let mut tasks = JoinSet::new();
     let mut routes: HashMap<Owner, mpsc::Sender<RendererEvent>> = HashMap::new();
     let mut next_owner = 0_u64;
     let result = loop {
         tokio::select! {
+            _ = &mut parent_dead, if _parent_watch.is_some() => break Ok(()),
             accepted = server.accept(), if routes.len() < 64 => {
                 let connection = match accepted {
                     Ok(connection) => connection,
@@ -148,6 +154,16 @@ async fn serve_connection(
             return Ok(());
         };
         match envelope.payload {
+            Some(Payload::IdentifyService(_)) => {
+                connection
+                    .enqueue(Envelope {
+                        request_id: envelope.request_id,
+                        payload: Some(Payload::ServiceIdentity(
+                            weasel_common::service_owner::identity("renderer", true),
+                        )),
+                    })
+                    .map_err(|e| e.to_string())?;
+            }
             Some(Payload::QueryConfig(query)) => {
                 // Read-only runtime capability of the successfully created theme.
                 let json = (query.path == ".capabilities.preedit").then(|| preedit.to_string());

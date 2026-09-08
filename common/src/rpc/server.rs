@@ -85,7 +85,7 @@ fn validate_business(
         (
             PeerRole::Server | PeerRole::Renderer,
             PeerRole::Broker,
-            Some(Payload::Ping(_) | Payload::Shutdown(_)),
+            Some(Payload::Ping(_) | Payload::Shutdown(_) | Payload::IdentifyService(_)),
         ) => true,
         (
             PeerRole::Server,

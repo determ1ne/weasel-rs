@@ -49,6 +49,8 @@ pub mod envelope {
     use super::*;
     #[derive(Clone, Debug, PartialEq)]
     pub enum Payload {
+        IdentifyService(IdentifyService),
+        ServiceIdentity(ServiceIdentity),
         UserNotification(UserNotification),
         QueryConfig(QueryConfig),
         ConfigValue(ConfigValue),

@@ -43,6 +43,9 @@ struct ShutdownNotice {
 
 fn control_reply(envelope: &Envelope, ready: bool) -> Option<Envelope> {
     let payload = match envelope.payload.as_ref()? {
+        Payload::IdentifyService(_) => {
+            Payload::ServiceIdentity(weasel_common::service_owner::identity("server", ready))
+        }
         Payload::Ping(_) if !ready => Payload::Failure(Failure {
             code: FailureCode::NotReady as i32,
             message: "engine not ready".into(),
@@ -241,6 +244,11 @@ fn init_logging(paths: &RuntimePaths, component: &str) -> Result<(), String> {
 }
 
 async fn serve(paths: RuntimePaths) -> Result<(), String> {
+    let (parent_exit, mut parent_dead) = tokio::sync::oneshot::channel();
+    let _parent_watch = weasel_common::service_owner::ParentWatch::start(move || {
+        let _ = parent_exit.send(());
+    })
+    .map_err(|e| e.to_string())?;
     let settings =
         match weasel_common::settings::fetch(weasel_common::message::PeerRole::Server, false).await
         {
@@ -267,6 +275,7 @@ async fn serve(paths: RuntimePaths) -> Result<(), String> {
         weasel_common::message::PeerRole::Server,
     );
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel(1);
+
     let mut readers = tokio::task::JoinSet::new();
     let mut connections = std::collections::HashMap::<u64, Arc<RpcConnection>>::new();
     let gate = admission::Gate::new(MAX_CONNECTIONS);
@@ -278,6 +287,7 @@ async fn serve(paths: RuntimePaths) -> Result<(), String> {
     loop {
         tokio::select! {
             biased;
+            _ = &mut parent_dead, if _parent_watch.is_some() => { tracing::info!("broker exited; shutting down"); break; }
             request = shutdown_rx.recv() => { notice = request; break; }
             _ = &mut engine.finished => { break; }
             Some(result) = readers.join_next_with_id(), if !readers.is_empty() => {

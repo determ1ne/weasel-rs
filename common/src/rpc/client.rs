@@ -99,6 +99,7 @@ impl Drop for PendingCall {
 /// A connected bidirectional RPC client.
 #[derive(Clone)]
 pub struct RpcClient {
+    server_pid: u32,
     layout: watch::Sender<Option<LayoutUpdate>>,
     outbound: mpsc::Sender<Envelope>,
     pending: Pending,
@@ -114,6 +115,20 @@ pub struct RpcClient {
 }
 
 impl RpcClient {
+    /// Kernel-reported owner of the connected pipe, not a self-reported PID.
+    pub fn server_pid(&self) -> u32 {
+        self.server_pid
+    }
+    pub async fn identify_service(&self) -> Result<crate::message::ServiceIdentity, RpcError> {
+        match self
+            .request(Payload::IdentifyService(crate::message::IdentifyService {}))
+            .await?
+            .payload
+        {
+            Some(Payload::ServiceIdentity(identity)) => Ok(identity),
+            _ => Err(RpcError::UnexpectedResponse),
+        }
+    }
     /// Connect to a Named Pipe and start the background reader/writer tasks.
     pub async fn connect(pipe_name: impl AsRef<str>) -> Result<Self, RpcError> {
         Self::connect_as(pipe_name, crate::message::PeerRole::Unspecified).await
@@ -151,6 +166,14 @@ impl RpcClient {
             .read(true)
             .write(true)
             .open(pipe_name.as_ref())?;
+        use std::os::windows::io::AsRawHandle;
+        let mut server_pid = 0;
+        unsafe {
+            let _ = crate::bindings::GetNamedPipeServerProcessId(
+                crate::bindings::HANDLE(pipe.as_raw_handle()),
+                &mut server_pid,
+            );
+        }
         let (mut reader, mut writer) = tokio::io::split(pipe);
         let (outbound, mut outbound_rx) = mpsc::channel(32);
         let (layout, mut layout_rx) = watch::channel::<Option<LayoutUpdate>>(None);
@@ -251,6 +274,7 @@ impl RpcClient {
         });
 
         Ok(Self {
+            server_pid,
             layout,
             outbound,
             pending,

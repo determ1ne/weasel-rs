@@ -42,6 +42,14 @@ pub fn encode(envelope: &m::Envelope) -> Result<m::RpcFrame, RpcError> {
         .clone()
         .ok_or_else(|| invalid("missing payload"))?;
     let body = match payload {
+        P::IdentifyService(v) if id != 0 => B::Request(m::Request {
+            id,
+            operation: Some(Q::IdentifyService(v)),
+        }),
+        P::ServiceIdentity(v) if id != 0 => B::Response(m::Response {
+            id,
+            result: Some(R::ServiceIdentity(v)),
+        }),
         P::UserNotification(v) if id != 0 => {
             validate_notification(&v)?;
             B::Request(m::Request {
@@ -169,6 +177,7 @@ pub fn unpack(frame: m::RpcFrame) -> Result<m::Envelope, RpcError> {
                 v.id,
                 match v.operation.ok_or_else(|| invalid("missing operation"))? {
                     Q::Ping(v) => P::Ping(v),
+                    Q::IdentifyService(v) => P::IdentifyService(v),
                     Q::UserNotification(v) => {
                         validate_notification(&v)?;
                         P::UserNotification(v)
@@ -206,6 +215,7 @@ pub fn unpack(frame: m::RpcFrame) -> Result<m::Envelope, RpcError> {
                 v.id,
                 match v.result.ok_or_else(|| invalid("missing result"))? {
                     R::Pong(v) => P::Pong(v),
+                    R::ServiceIdentity(v) => P::ServiceIdentity(v),
                     R::ConfigValue(v) => P::ConfigValue(v),
                     R::Shutdown(v) => P::ShutdownResponse(v),
                     R::InputOpened(v) => {

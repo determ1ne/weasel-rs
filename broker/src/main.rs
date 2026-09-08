@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod lifecycle;
+mod managed_children;
 mod notifications;
 mod settings;
 mod settings_rpc;
@@ -22,7 +23,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = bindings::AllocConsole();
         }
     }
-    windows_tray::run()
+    if let Err(error) = windows_tray::run() {
+        eprintln!("weasel-broker: {error}");
+        unsafe {
+            let _ = bindings::MessageBoxW(
+                None,
+                &windows_strings::HSTRING::from(format!("算法服务启动或运行失败：\n{error}")),
+                &windows_strings::HSTRING::from("小狼毫RS"),
+                (bindings::MB_OK | bindings::MB_ICONERROR | bindings::MB_SETFOREGROUND) as u32,
+            );
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]

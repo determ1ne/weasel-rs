@@ -6,6 +6,7 @@ pub enum Operation {
     Idle,
     Deploy,
     Restart,
+    Failed,
     Shutdown,
 }
 

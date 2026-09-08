@@ -46,6 +46,15 @@ message UserNotification {
   string message = 5;
   string details = 6;
 }
+// Broker-only control plane; does not change the TIP input contract.
+message IdentifyService {}
+message ServiceIdentity {
+  uint32 pid = 1;
+  string component = 2;
+  string owner_token = 3;
+  string instance = 4;
+  bool ready = 5;
+}
 message ConfigValue {
   // Absent means missing; the string "null" is a present JSON null value.
   optional string json = 1;
