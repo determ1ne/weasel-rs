@@ -37,6 +37,9 @@ fn main() {
         .output(&bindings)
         .filters([
             "Windows.Win32.E_PENDING",
+            "Windows.Win32.GetAncestor",
+            "Windows.Win32.GA_ROOT",
+            "Windows.Win32.LogicalToPhysicalPointForPerMonitorDPI",
             "Windows.Win32.SetTimer",
             "Windows.Win32.KillTimer",
             "Windows.Win32.WM_TIMER",

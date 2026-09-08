@@ -1,5 +1,7 @@
 use super::*;
-use crate::bindings::TF_ES_ASYNC;
+use crate::bindings::{
+    GA_ROOT, GetAncestor, LogicalToPhysicalPointForPerMonitorDPI, POINT, TF_ES_ASYNC,
+};
 use weasel_common::message::ContextToken;
 
 /// One pending TSF read, refreshed by notifications received before it runs.
@@ -116,6 +118,7 @@ impl ITfEditSession_Impl for LayoutProbe_Impl {
                 // Transient geometry failure must not flood the key/log queue.
                 return Ok(());
             }
+            let rect = physical_text_rect(&view, rect);
             if self.generation.load(Ordering::Acquire) != self.requested_generation
                 || !self.state.matches(Some(&token))?
                 || self
@@ -145,6 +148,45 @@ impl ITfEditSession_Impl for LayoutProbe_Impl {
                 });
             Ok(())
         })
+    }
+}
+
+/// The renderer uses physical screen pixels, whereas a text store may return
+/// screen coordinates in its host window's DPI space. Like Mozc, use the root
+/// window of the source view for the conversion, never the foreground window.
+fn physical_text_rect(view: &ITfContextView, rect: RECT) -> RECT {
+    unsafe {
+        let Ok(window) = view.GetWnd() else {
+            return rect;
+        };
+        if window.0.is_null() {
+            return rect;
+        }
+        let root = GetAncestor(window, GA_ROOT as u32);
+        if root.0.is_null() {
+            return rect;
+        }
+        let mut start = POINT {
+            x: rect.left,
+            y: rect.top,
+        };
+        let mut end = POINT {
+            x: rect.right,
+            y: rect.bottom,
+        };
+        // Commit both corners together. Geometry conversion failure should not
+        // interrupt typing or produce a rectangle mixing coordinate spaces.
+        if !LogicalToPhysicalPointForPerMonitorDPI(Some(root), &mut start).as_bool()
+            || !LogicalToPhysicalPointForPerMonitorDPI(Some(root), &mut end).as_bool()
+        {
+            return rect;
+        }
+        RECT {
+            left: start.x,
+            top: start.y,
+            right: end.x,
+            bottom: end.y,
+        }
     }
 }
 #[cfg(test)]
