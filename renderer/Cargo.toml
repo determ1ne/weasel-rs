@@ -6,19 +6,14 @@ license.workspace = true
 
 [dependencies]
 serde_json = "1"
+serde = "1"
+weasel-theme-api = { path = "../theme-api" }
+weasel-theme-support = { path = "../themes/support" }
 weasel-common = { path = "../common" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 windows-core = "0.100.0"
-windows-numerics = "0.100.0"
-windows-collections = "0.100.0"
-windows-reference = "0.100.0"
-windows-time = "0.100.0"
-windows-version = "0.100.0"
 
 windows-strings = "0.100.0"
-windows-registry = "0.100.0"
 
 [build-dependencies]
 embed-resource = "3"
-windows-bindgen = "0.100.0"
-windows-rdl = "0.100.0"

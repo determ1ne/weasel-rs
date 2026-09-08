@@ -6,6 +6,12 @@ members = [
     "server",
     "renderer",
     "common",
+    "theme-api",
+    "themes/support",
+    "themes/ten",
+    "themes/eleven",
+    "themes/abc",
+    "themes/void",
 ]
 
 [workspace.package]

@@ -1,8 +1,10 @@
 //! Theme contract: factories are shared; backend resources stay on the UI thread.
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+pub mod plugin;
 
 /// Presentation-neutral information; themes never log or perform notification RPC.
-#[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ThemeNotice {
     pub severity: NoticeSeverity,
     pub code: String,
@@ -10,7 +12,7 @@ pub struct ThemeNotice {
     pub details: String,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 #[allow(dead_code)] // Public theme contract; individual themes may use only warnings.
 pub enum NoticeSeverity {
     Info,
@@ -33,7 +35,7 @@ impl From<Result<Box<dyn ThemeBackend>, String>> for ThemeCreation {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThemeCapabilities {
     /// Whether this backend can display preedit outside the host application.
     pub preedit: bool,
@@ -43,7 +45,7 @@ impl ThemeCapabilities {
     pub const CANDIDATES_ONLY: Self = Self { preedit: false };
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Anchor {
     pub left: i32,
     pub top: i32,
@@ -52,14 +54,14 @@ pub struct Anchor {
     pub valid: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct CandidateItem {
     pub primary_text: String,
     pub secondary_text: String,
     pub enabled: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct CandidateView {
     /// None means inline input: show candidates without an input field.
     pub preedit: Option<Preedit>,
@@ -87,7 +89,7 @@ pub fn same_content(a: &CandidateView, b: &CandidateView) -> bool {
         && a.can_page_next == b.can_page_next
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Preedit {
     pub text: String,
     /// UTF-16 code-unit offset, on a Unicode scalar boundary.
@@ -114,7 +116,7 @@ impl Preedit {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiAction {
     ItemInvoked(u32),
     NavigatePrevious,
@@ -127,7 +129,7 @@ pub enum UiAction {
 pub struct EventSink(Arc<dyn Fn(UiAction) + Send + Sync>);
 
 impl EventSink {
-    pub(crate) fn new(callback: impl Fn(UiAction) + Send + Sync + 'static) -> Self {
+    pub fn new(callback: impl Fn(UiAction) + Send + Sync + 'static) -> Self {
         Self(Arc::new(callback))
     }
 
@@ -147,12 +149,6 @@ pub trait ThemeBackend {
     /// Invalidate appearance resources only. The runtime decides whether the
     /// current owner still permits redrawing its snapshot.
     fn refresh_appearance(&mut self) -> Result<(), String>;
-    fn pre_translate(
-        &mut self,
-        _message: &crate::bindings::Windows::Win32::MSG,
-    ) -> Result<bool, String> {
-        Ok(false)
-    }
     fn check_health(&mut self) -> Result<(), String> {
         Ok(())
     }
@@ -178,7 +174,7 @@ pub trait ThemeFactory: Send + Sync {
 
 /// How the renderer is running. Live is the normal per-candidate strip driven
 /// by the server; Preview is a standalone, closable stand-in showing the skin.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum UiMode {
     Live,
     Preview,

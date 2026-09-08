@@ -1,19 +1,20 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
-mod appearance;
+use weasel_theme_support::appearance;
 #[cfg(windows)]
 mod backend;
+mod theme_dll;
 #[cfg(windows)]
-mod bindings;
+use weasel_theme_support::bindings;
 #[cfg(windows)]
-mod d2d_bindings;
+use weasel_theme_support::d2d_bindings;
 #[cfg(windows)]
 mod diagnostics;
 #[cfg(windows)]
 mod notifications;
 #[cfg(windows)]
-mod presentation;
+use weasel_theme_support::presentation;
 #[cfg(windows)]
 mod preview;
 #[cfg(windows)]
@@ -22,16 +23,8 @@ mod preview_window;
 mod rpc;
 mod state;
 #[cfg(windows)]
-mod theme_abc;
-#[cfg(windows)]
 mod theme_adapter;
-mod theme_api;
-#[cfg(windows)]
-mod theme_eleven;
-#[cfg(windows)]
-mod theme_ten;
-#[cfg(windows)]
-mod theme_void;
+use weasel_theme_api as theme_api;
 #[cfg(windows)]
 mod ui_runtime;
 

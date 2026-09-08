@@ -5,6 +5,8 @@ pub fn generate() {
         .input_default()
         .output(out.join("d2d-bindings.rs"))
         .filters([
+            "Windows.Win32.LoadLibraryExW", "Windows.Win32.GetProcAddress", "Windows.Win32.FreeLibrary",
+            "Windows.Win32.LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR", "Windows.Win32.LOAD_LIBRARY_SEARCH_SYSTEM32",
             "Windows.Win32.GetMessageW", "Windows.Win32.TranslateMessage", "Windows.Win32.DispatchMessageW",
             "Windows.Win32.IsDialogMessageW", "Windows.Win32.PostMessageW",
             "Windows.Win32.EnableWindow", "Windows.Win32.SetWindowTextW", "Windows.Win32.SetFocus",

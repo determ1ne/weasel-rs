@@ -44,6 +44,11 @@ try {
         'installer\weasel-rs.nsi'
         'scripts\launch-broker.ps1'
     )
+    foreach ($theme in @('ten', 'eleven', 'abc', 'void')) {
+        foreach ($extension in @('dll', 'pdb')) {
+            $requiredFiles += "target\x86_64-pc-windows-msvc\release\weasel_theme_$theme.$extension"
+        }
+    }
     foreach ($relativePath in $requiredFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $projectRoot $relativePath) -PathType Leaf)) {
             throw "Missing $relativePath. Run scripts\build-release.ps1, scripts\download_librime.ps1 and scripts\download_vcredist.ps1 first."

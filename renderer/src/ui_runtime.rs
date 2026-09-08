@@ -446,12 +446,8 @@ fn run_ui(
             if !is_thread_message(&message, WM_RENDERER_UPDATE)
                 && !is_thread_message(&message, WM_RENDERER_THEME)
             {
-                let translated = presentation.backend.pre_translate(&message);
-                crate::notifications::drain(registration.name(), presentation.backend.as_mut());
-                if !translated? {
-                    let _ = TranslateMessage(&message);
-                    DispatchMessageW(&message);
-                }
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
             }
             let health = presentation.backend.check_health();
             crate::notifications::drain(registration.name(), presentation.backend.as_mut());

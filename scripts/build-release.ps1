@@ -45,6 +45,15 @@ try {
     }
 
     Copy-Item -LiteralPath (Join-Path $projectRoot 'weasel.json') -Destination (Join-Path $targetDirectory 'x86_64-pc-windows-msvc\release\weasel.json')
+    # Match the installed/portable DLL layout next to the renderer.
+    $releaseDirectory = Join-Path $targetDirectory 'x86_64-pc-windows-msvc\release'
+    $themeDirectory = Join-Path $releaseDirectory 'themes'
+    $null = New-Item -ItemType Directory -Path $themeDirectory -Force
+    foreach ($theme in @('ten', 'eleven', 'abc', 'void')) {
+        foreach ($extension in @('dll', 'pdb')) {
+            Copy-Item -LiteralPath (Join-Path $releaseDirectory "weasel_theme_$theme.$extension") -Destination $themeDirectory
+        }
+    }
     Write-Host 'Release builds completed:'
     Write-Host "  x64 components: $(Join-Path $targetDirectory 'x86_64-pc-windows-msvc\release')"
     Write-Host "  x86 TIP:        $(Join-Path $targetDirectory 'i686-pc-windows-msvc\release\weasel_tip.dll')"

@@ -311,6 +311,15 @@ FunctionEnd
 
 ; Explicit file list: never recursively remove the install root or user data.
 !macro RemoveProgramFiles
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_ten.dll"
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_ten.pdb"
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_eleven.dll"
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_eleven.pdb"
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_abc.dll"
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_abc.pdb"
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_void.dll"
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_void.pdb"
+  RMDir "$INSTDIR\themes"
   Delete /REBOOTOK "$INSTDIR\weasel-broker.exe"
   Delete /REBOOTOK "$INSTDIR\weasel-server.exe"
   Delete /REBOOTOK "$INSTDIR\weasel-renderer.exe"
@@ -359,6 +368,19 @@ Section "Weasel-RS" SEC_MAIN
   Call RetireDll
   StrCpy $OldDll "$INSTDIR\rime.dll"
   Call RetireDll
+  ; Retire every known theme, even deselected ones during an upgrade.
+  StrCpy $OldDll "$INSTDIR\themes\weasel_theme_ten.dll"
+  Call RetireDll
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_ten.pdb"
+  StrCpy $OldDll "$INSTDIR\themes\weasel_theme_eleven.dll"
+  Call RetireDll
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_eleven.pdb"
+  StrCpy $OldDll "$INSTDIR\themes\weasel_theme_abc.dll"
+  Call RetireDll
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_abc.pdb"
+  StrCpy $OldDll "$INSTDIR\themes\weasel_theme_void.dll"
+  Call RetireDll
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_void.pdb"
   SetOverwrite on
   SetOutPath "$INSTDIR"
   StrCpy $CopiedFiles 1
@@ -398,6 +420,54 @@ Section "librime" SEC_LIBRIME
   ${EndIf}
 SectionEnd
 
+SectionGroup /e "候选主题" SEC_THEMES
+Section "ten（必选）" SEC_THEME_TEN
+  SectionIn RO
+  ClearErrors
+  SetOutPath "$INSTDIR\themes"
+  File "${X64_RELEASE}\weasel_theme_ten.dll"
+  ${If} ${Errors}
+    MessageBox MB_OK|MB_ICONSTOP "无法安装 ten 主题，请检查磁盘空间和文件权限。" /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+SectionEnd
+
+Section "eleven" SEC_THEME_ELEVEN
+  ClearErrors
+  SetOutPath "$INSTDIR\themes"
+  File "${X64_RELEASE}\weasel_theme_eleven.dll"
+  ${If} ${Errors}
+    MessageBox MB_OK|MB_ICONSTOP "无法安装 eleven 主题，请检查磁盘空间和文件权限。" /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+SectionEnd
+
+Section "abc" SEC_THEME_ABC
+  ClearErrors
+  SetOutPath "$INSTDIR\themes"
+  File "${X64_RELEASE}\weasel_theme_abc.dll"
+  ${If} ${Errors}
+    MessageBox MB_OK|MB_ICONSTOP "无法安装 abc 主题，请检查磁盘空间和文件权限。" /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+SectionEnd
+
+Section "void" SEC_THEME_VOID
+  ClearErrors
+  SetOutPath "$INSTDIR\themes"
+  File "${X64_RELEASE}\weasel_theme_void.dll"
+  ${If} ${Errors}
+    MessageBox MB_OK|MB_ICONSTOP "无法安装 void 主题，请检查磁盘空间和文件权限。" /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+SectionEnd
+
+SectionGroupEnd
+
 Section /o "调试符号" SEC_SYMBOLS
   ClearErrors
   SetOutPath "$INSTDIR"
@@ -409,6 +479,19 @@ Section /o "调试符号" SEC_SYMBOLS
   File "${X64_RELEASE}\weasel_tip.pdb"
   SetOutPath "$INSTDIR\x86"
   File "${X86_RELEASE}\weasel_tip.pdb"
+  SetOutPath "$INSTDIR\themes"
+  ${If} ${SectionIsSelected} ${SEC_THEME_TEN}
+    File "${X64_RELEASE}\weasel_theme_ten.pdb"
+  ${EndIf}
+  ${If} ${SectionIsSelected} ${SEC_THEME_ELEVEN}
+    File "${X64_RELEASE}\weasel_theme_eleven.pdb"
+  ${EndIf}
+  ${If} ${SectionIsSelected} ${SEC_THEME_ABC}
+    File "${X64_RELEASE}\weasel_theme_abc.pdb"
+  ${EndIf}
+  ${If} ${SectionIsSelected} ${SEC_THEME_VOID}
+    File "${X64_RELEASE}\weasel_theme_void.pdb"
+  ${EndIf}
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装调试符号，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -499,6 +582,11 @@ FunctionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN} "小狼毫 RS 程序和所需运行库（必选）。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_LIBRIME} "Rime 输入引擎和共享方案数据（必选）。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_SYMBOLS} "用于崩溃分析的调试符号。"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEMES} "选择安装的候选窗口主题。"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_TEN} "Direct2D 候选栏，作为必选回退主题。"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_ELEVEN} "XAML 候选栏，适用于 Windows 10 1903 及以上。"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_ABC} "复古候选窗口，支持外部预编辑。"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_VOID} "不显示窗口的主题及接口示例。"
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 !endif
 

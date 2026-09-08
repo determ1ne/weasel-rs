@@ -1,116 +1,38 @@
 use std::path::PathBuf;
+mod build_d2d;
 
-pub fn generate() {
+fn main() {
+    build_d2d::generate();
     let manifest_dir = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is not set"),
     );
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is not set"));
-    let native_rdl = manifest_dir.join("../themes/support/metadata/xaml_host_native.rdl");
+    let native_rdl = manifest_dir.join("metadata/xaml_host_native.rdl");
     let native_winmd = out.join("xaml-host-native.winmd");
-    let manifest = manifest_dir.join("server.manifest");
 
     windows_rdl::reader()
         .input(&native_rdl)
-        .input(manifest_dir.join("metadata/xaml_transparency.rdl"))
         .reference_default()
         .output(&native_winmd)
         .write()
         .expect("failed to compile XAML host native metadata");
 
     windows_bindgen::builder()
-        .output(out.join("ui_bindings.rs"))
+        .output(out.join("bindings.rs"))
         .input(&native_winmd)
         .input_default()
         .filters([
-            "Windows.UI.Xaml.Media.IGeneralTransformFactory",
-            "Windows.Foundation.EventHandler",
-            "Windows.Win32.WS_CHILD",
-            "Windows.Win32.WS_EX_LAYERED",
-            "Windows.Win32.WS_EX_NOREDIRECTIONBITMAP",
-            "Windows.Win32.SetLayeredWindowAttributes",
-            "Windows.Win32.LWA_ALPHA",
-            "Windows.Win32.HWND_TOP",
-            "Windows.Win32.CreateRectRgn",
-            "Windows.Win32.PtInRegion",
-            "Windows.Win32.CombineRgn",
-            "Windows.Win32.RGN_DIFF",
-            "Windows.Win32.SetWindowRgn",
-            "Windows.Win32.DeleteObject",
-            "Windows.Win32.LoadCursorW",
-            "Windows.Win32.IDC_ARROW",
-            "Windows.Win32.SendMessageW",
-            "Windows.Win32.WM_NCLBUTTONUP",
-            "Windows.Win32.WM_NCMOUSEMOVE",
-            "Windows.UI.Xaml.FrameworkElement::LayoutUpdated",
-            "Windows.UI.Xaml.UIElement::TransformToVisual",
-            "Windows.UI.Xaml.Media.GeneralTransform::TransformBounds",
-            "Windows.UI.Xaml.FrameworkElement::{ActualWidth, ActualHeight}",
-            "Windows.Win32.GetCursorPos",
-            "Windows.Win32.WM_NCLBUTTONDOWN",
-            "Windows.UI.Xaml.Window::Current",
-            "Windows.UI.Xaml.IXamlSourceTransparency",
-            "Windows.Win32.GetStockObject",
-            "Windows.Win32.BLACK_BRUSH",
-            "Windows.Win32.GetWindowRect",
-            "Windows.Win32.WM_NCCALCSIZE",
-            "Windows.Win32.WM_NCHITTEST",
-            "Windows.Win32.WM_NCLBUTTONDBLCLK",
-            "Windows.Win32.SWP_FRAMECHANGED",
-            "Windows.Win32.HTCLIENT",
-            "Windows.Win32.HTCAPTION",
-            "Windows.Win32.HTLEFT",
-            "Windows.Win32.HTRIGHT",
-            "Windows.Win32.HTTOP",
-            "Windows.Win32.HTBOTTOM",
-            "Windows.Win32.HTTOPLEFT",
-            "Windows.Win32.HTTOPRIGHT",
-            "Windows.Win32.HTBOTTOMLEFT",
-            "Windows.Win32.HTBOTTOMRIGHT",
-            "Windows.Win32.GWLP_USERDATA",
-            "Windows.Win32.PostMessageW",
-            "Windows.Win32.SWP_NOMOVE",
             "Windows.Win32.SWP_NOSIZE",
-            "Windows.UI.Xaml.Controls.Panel::Background",
-            "Windows.Win32.WS_OVERLAPPED",
-            "Windows.Win32.WS_CAPTION",
-            "Windows.Win32.WS_THICKFRAME",
-            "Windows.Win32.WM_CLOSE",
-            "Windows.Win32.WM_DESTROY",
-            "Windows.Win32.WM_TIMER",
-            "Windows.Win32.WM_GETMINMAXINFO",
-            "Windows.Win32.MINMAXINFO",
-            "Windows.Win32.SetTimer",
-            "Windows.Win32.KillTimer",
-            "Windows.Win32.GetClientRect",
-            "Windows.Win32.SW_SHOW",
-            "Windows.Win32.TranslateMessage",
-            "Windows.Win32.WM_SYSCOMMAND",
-            "Windows.Win32.SC_CLOSE",
-            "Windows.Win32.DWMWA_SYSTEMBACKDROP_TYPE",
-            "Windows.Win32.DWMSBT_MAINWINDOW",
-            "Windows.Win32.DwmExtendFrameIntoClientArea",
-            "Windows.Win32.MARGINS",
-            "Windows.Win32.GetModuleHandleW",
-            "Windows.UI.Xaml.Markup.XamlReader::Load",
-            "Windows.UI.Xaml.FrameworkElement::FindName",
-            "Windows.UI.Xaml.UIElement::Visibility",
-            "Windows.UI.Xaml.Visibility",
-            "Windows.UI.Xaml.Controls.ProgressBar::IsIndeterminate",
-            "Windows.UI.Xaml.Controls.IProgressBarStatics",
-            "Windows.UI.Xaml.Controls.IProgressBarFactory",
-            "Windows.UI.Xaml.Controls.Primitives.IRangeBaseFactory",
-            "Windows.UI.Xaml.Controls.Primitives.IRangeBaseStatics",
-            "Windows.UI.Xaml.Controls.IScrollViewerStatics2",
-            "Windows.UI.Xaml.Controls.IScrollViewerStatics4",
-            "Windows.UI.Xaml.Controls.ScrollViewer::{ChangeView, ScrollableHeight}",
-            "Windows.UI.Xaml.Controls.IScrollViewerStatics",
-            "Windows.UI.Xaml.Controls.TextBlock::IsTextSelectionEnabled",
+            "Windows.Win32.AllocConsole",
             "Windows.Win32.RegisterClassW",
             "Windows.Win32.CreateWindowExW",
             "Windows.Win32.DefWindowProcW",
-            "Windows.Win32.GetWindow",
             "Windows.Win32.DestroyWindow",
             "Windows.Win32.GetMessageW",
+            "Windows.Win32.SetTimer",
+            "Windows.Win32.WaitForSingleObject",
+            "Windows.Win32.WAIT_OBJECT_0",
+            "Windows.Win32.KillTimer",
             "Windows.Win32.TranslateMessage",
             "Windows.Win32.DispatchMessageW",
             "Windows.Win32.PostQuitMessage",
@@ -118,7 +40,6 @@ pub fn generate() {
             "Windows.Win32.GetCurrentThreadId",
             "Windows.Win32.SetWindowPos",
             "Windows.Win32.ShowWindow",
-            "Windows.Win32.SetForegroundWindow",
             "Windows.Win32.GetDpiForWindow",
             "Windows.Win32.SetThreadDpiAwarenessContext",
             "Windows.Win32.MonitorFromRect",
@@ -132,10 +53,23 @@ pub fn generate() {
             "Windows.Win32.WM_APP",
             "Windows.Win32.WM_DPICHANGED",
             "Windows.Win32.WM_SIZE",
-            "Windows.Win32.GW_CHILD",
+            "Windows.Win32.WM_SETTINGCHANGE",
+            "Windows.Win32.WM_THEMECHANGED",
+            "Windows.Win32.WM_SYSCOLORCHANGE",
             "Windows.Win32.GetWindowLongPtrW",
             "Windows.Win32.SetWindowLongPtrW",
             "Windows.Win32.GWL_EXSTYLE",
+            "Windows.Win32.GetModuleHandleW",
+            "Windows.Win32.LoadIconW",
+            "Windows.Win32.WM_CLOSE",
+            "Windows.Win32.WS_SYSMENU",
+            "Windows.Win32.WM_SETICON",
+            "Windows.Win32.ICON_SMALL",
+            "Windows.Win32.ICON_BIG",
+            "Windows.Win32.SendMessageW",
+            "Windows.Win32.SetPropW",
+            "Windows.Win32.GetPropW",
+            "Windows.Win32.RemovePropW",
             "Windows.Win32.WS_EX_TOOLWINDOW",
             "Windows.Win32.WS_EX_TOPMOST",
             "Windows.Win32.WS_EX_NOACTIVATE",
@@ -282,12 +216,6 @@ pub fn generate() {
         ])
         .write();
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=metadata/xaml_transparency.rdl");
+    println!("cargo:rerun-if-changed=build_d2d.rs");
     println!("cargo:rerun-if-changed={}", native_rdl.display());
-    println!("cargo:rerun-if-changed={}", manifest.display());
-    println!("cargo:rustc-link-arg-bin=weasel-server=/MANIFEST:EMBED");
-    println!(
-        "cargo:rustc-link-arg-bin=weasel-server=/MANIFESTINPUT:{}",
-        manifest.display()
-    );
 }

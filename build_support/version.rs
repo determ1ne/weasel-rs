@@ -6,9 +6,18 @@ pub fn embed() {
         "weasel-server" => ("Weasel-RS Rime Server", "weasel-server.exe", false),
         "weasel-renderer" => ("Weasel-RS Candidate Renderer", "weasel-renderer.exe", false),
         "weasel-tip" => ("Weasel-RS Text Input Processor", "weasel_tip.dll", true),
+        "weasel-theme-ten" => ("Weasel-RS ten Theme", "weasel_theme_ten.dll", true),
+        "weasel-theme-eleven" => ("Weasel-RS eleven Theme", "weasel_theme_eleven.dll", true),
+        "weasel-theme-abc" => ("Weasel-RS abc Theme", "weasel_theme_abc.dll", true),
+        "weasel-theme-void" => ("Weasel-RS void Theme", "weasel_theme_void.dll", true),
         _ => panic!("missing Windows file description for {package}"),
     };
     let root = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("..");
+    let root = if package.starts_with("weasel-theme-") {
+        root.join("..")
+    } else {
+        root
+    };
     let resource = root.join("build_support/version.rc");
     for path in [&resource, &root.join("build_support/version.rs")] {
         println!("cargo:rerun-if-changed={}", path.display());

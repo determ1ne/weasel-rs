@@ -524,6 +524,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -855,19 +856,14 @@ name = "weasel-renderer"
 version = "0.1.2"
 dependencies = [
  "embed-resource",
+ "serde",
  "serde_json",
  "tokio",
  "weasel-common",
- "windows-bindgen",
- "windows-collections",
+ "weasel-theme-api",
+ "weasel-theme-support",
  "windows-core",
- "windows-numerics",
- "windows-rdl",
- "windows-reference",
- "windows-registry",
  "windows-strings",
- "windows-time",
- "windows-version",
 ]
 
 [[package]]
@@ -887,6 +883,82 @@ dependencies = [
  "windows-reference",
  "windows-strings",
  "windows-time",
+]
+
+[[package]]
+name = "weasel-theme-abc"
+version = "0.1.2"
+dependencies = [
+ "embed-resource",
+ "serde_json",
+ "weasel-common",
+ "weasel-theme-api",
+ "weasel-theme-support",
+ "windows-core",
+ "windows-numerics",
+ "windows-strings",
+]
+
+[[package]]
+name = "weasel-theme-api"
+version = "0.1.2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "weasel-common",
+]
+
+[[package]]
+name = "weasel-theme-eleven"
+version = "0.1.2"
+dependencies = [
+ "embed-resource",
+ "serde_json",
+ "weasel-common",
+ "weasel-theme-api",
+ "weasel-theme-support",
+ "windows-core",
+ "windows-registry",
+ "windows-strings",
+ "windows-version",
+]
+
+[[package]]
+name = "weasel-theme-support"
+version = "0.1.2"
+dependencies = [
+ "weasel-theme-api",
+ "windows-bindgen",
+ "windows-collections",
+ "windows-core",
+ "windows-numerics",
+ "windows-rdl",
+ "windows-reference",
+ "windows-strings",
+ "windows-time",
+]
+
+[[package]]
+name = "weasel-theme-ten"
+version = "0.1.2"
+dependencies = [
+ "embed-resource",
+ "serde_json",
+ "weasel-common",
+ "weasel-theme-api",
+ "weasel-theme-support",
+ "windows-core",
+ "windows-strings",
+]
+
+[[package]]
+name = "weasel-theme-void"
+version = "0.1.2"
+dependencies = [
+ "embed-resource",
+ "serde_json",
+ "weasel-common",
+ "weasel-theme-api",
 ]
 
 [[package]]

@@ -1,0 +1,19 @@
+[package]
+name = "weasel-theme-support"
+version = "0.1.2"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+weasel-theme-api = { path = "../../theme-api" }
+windows-core = "0.100.0"
+windows-numerics = "0.100.0"
+windows-collections = "0.100.0"
+windows-reference = "0.100.0"
+windows-time = "0.100.0"
+
+windows-strings = "0.100.0"
+
+[build-dependencies]
+windows-bindgen = "0.100.0"
+windows-rdl = "0.100.0"

@@ -1,7 +1,7 @@
 //! 不创建窗口的主题示例。设置 `"theme": "void"` 即可选用。
 //! 本例故意不显示候选、也不产生点击事件，输入和键盘选词仍由原有链路处理。
 //!
-//! 新主题可复制此模块，修改 Factory 的名称，并在 backend::theme_candidates、
+//! 新主题可复制 themes/void crate，通过 export_theme! 导出入口，并在 renderer 的注册表、
 //! broker 的主题校验和 weasel.schema.json 中注册名称。
 
 use crate::theme_api::{
@@ -78,14 +78,6 @@ impl ThemeBackend for VoidBackend {
         // 系统外观变化时清理颜色/字体等缓存；不要自行显示已隐藏的窗口。
         // runtime 决定当前快照是否仍有所有权、是否需要重新绘制。
         Ok(())
-    }
-
-    fn pre_translate(
-        &mut self,
-        _message: &crate::bindings::Windows::Win32::MSG,
-    ) -> Result<bool, String> {
-        // 仅在 toolkit 确实消费消息时返回 true；普通 Win32/D2D 主题一般为 false。
-        Ok(false)
     }
 
     fn check_health(&mut self) -> Result<(), String> {
