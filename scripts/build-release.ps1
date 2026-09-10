@@ -57,6 +57,12 @@ try {
     $releaseDirectory = Join-Path $targetDirectory 'x86_64-pc-windows-msvc\release'
     $themeDirectory = Join-Path $releaseDirectory 'themes'
     $null = New-Item -ItemType Directory -Path $themeDirectory -Force
+    $nodeCommand = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+    $metadataPackager = Join-Path $PSScriptRoot 'package-theme-metadata.mjs'
+    foreach ($theme in @('abc', 'eleven')) {
+        & $nodeCommand $metadataPackager --native (Join-Path $projectRoot "themes\$theme\src\config.json") (Join-Path $themeDirectory "weasel_theme_$theme.settings.json")
+        if ($LASTEXITCODE -ne 0) { throw "Metadata packaging failed for $theme." }
+    }
     foreach ($theme in @('ten', 'eleven', 'abc', 'void', 'wasm')) {
         if ($SkipThemeWasm -and $theme -eq 'wasm') { continue }
         foreach ($extension in @('dll', 'pdb')) {
@@ -99,6 +105,10 @@ try {
                 }
                 if (-not (Test-Path -LiteralPath $output -PathType Leaf) -or [IO.Path]::GetExtension($output) -ne '.wasm') {
                     throw "Missing WASM release output for $($guest.Name): $output"
+                }
+                if (Test-Path -LiteralPath (Join-Path $guest.FullName 'config.richschema.json') -PathType Leaf) {
+                    & $nodeCommand $metadataPackager --wasm $output (Join-Path $guest.FullName 'config.json')
+                    if ($LASTEXITCODE -ne 0) { throw "Metadata packaging failed for $($guest.Name)." }
                 }
                 Copy-Item -LiteralPath $output -Destination $wasmArtifacts -Force
             } finally {

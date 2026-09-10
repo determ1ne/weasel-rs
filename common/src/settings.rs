@@ -23,8 +23,13 @@ impl ConfigSnapshot {
     }
 
     pub fn app_ascii_mode(&self, executable: &str) -> Option<bool> {
-        self.application_bool(executable, "ascii_mode")
-            .or_else(|| self.0.get("ascii_mode").and_then(Value::as_bool))
+        self.app_bool(executable, "ascii_mode")
+    }
+
+    /// 应用未指定时继承全局值，不能在应用层填默认值而固定继承结果。
+    pub fn app_bool(&self, executable: &str, option: &str) -> Option<bool> {
+        self.application_bool(executable, option)
+            .or_else(|| self.0.get(option).and_then(Value::as_bool))
     }
 
     pub fn inline_preedit(&self) -> bool {
@@ -35,7 +40,7 @@ impl ConfigSnapshot {
     }
 
     pub fn app_inline_preedit(&self, executable: &str) -> bool {
-        self.application_bool(executable, "inline_preedit")
+        self.app_bool(executable, "inline_preedit")
             .unwrap_or_else(|| self.inline_preedit())
     }
 
@@ -223,6 +228,18 @@ mod tests {
         assert_eq!(config.app_ascii_mode("unknown.exe"), Some(true));
         assert_eq!(config.app_ascii_mode("EDITOR.EXE"), Some(false));
         assert!(!config.inline_preedit());
+        for global in [false, true] {
+            let config = super::ConfigSnapshot::new(serde_json::json!({
+                "ascii_mode": global, "inline_preedit": global,
+                "app_options": {"empty.exe": {}, "explicit.exe": {
+                    "ascii_mode": false, "inline_preedit": false
+                }}
+            }));
+            assert_eq!(config.app_ascii_mode("EMPTY.EXE"), Some(global));
+            assert_eq!(config.app_inline_preedit("EMPTY.EXE"), global);
+            assert_eq!(config.app_ascii_mode("explicit.exe"), Some(false));
+            assert!(!config.app_inline_preedit("explicit.exe"));
+        }
     }
     use super::*;
     #[test]

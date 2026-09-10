@@ -232,6 +232,8 @@ FunctionEnd
 
 ; Explicit file list: never recursively remove the install root or user data.
 !macro RemoveProgramFiles
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_abc.settings.json"
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_eleven.settings.json"
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_ten.dll"
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_ten.pdb"
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_eleven.dll"
@@ -292,6 +294,8 @@ Section "Weasel-RS" SEC_MAIN
   StrCpy $OldDll "$INSTDIR\rime.dll"
   Call RetireDll
   ; Retire every known theme, even deselected ones during an upgrade.
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_abc.settings.json"
+  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_eleven.settings.json"
   StrCpy $OldDll "$INSTDIR\themes\weasel_theme_ten.dll"
   Call RetireDll
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_ten.pdb"
@@ -363,6 +367,7 @@ Section "eleven" SEC_THEME_ELEVEN
   ClearErrors
   SetOutPath "$INSTDIR\themes"
   File "${X64_RELEASE}\weasel_theme_eleven.dll"
+  File "${X64_RELEASE}\themes\weasel_theme_eleven.settings.json"
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装 eleven 主题，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -374,6 +379,7 @@ Section "abc" SEC_THEME_ABC
   ClearErrors
   SetOutPath "$INSTDIR\themes"
   File "${X64_RELEASE}\weasel_theme_abc.dll"
+  File "${X64_RELEASE}\themes\weasel_theme_abc.settings.json"
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装 abc 主题，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1

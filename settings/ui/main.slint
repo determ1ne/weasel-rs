@@ -1,0 +1,251 @@
+import { Button, VerticalBox, HorizontalBox, ComboBox, ScrollView, LineEdit, TextEdit, Switch, Palette } from "std-widgets.slint";
+import { AppOptions, AppEntry, IconAction } from "app-options.slint";
+import { ColorEditor } from "color-editor.slint";
+import { WasmModules, WasmEntry } from "wasm-modules.slint";
+export { ColorCodec } from "color-editor.slint";
+export struct SettingField { source-index: int, section: string, shown: bool, title: string, key: string, description: string, choices: [string], selected: int, checked: bool, text: string, text-input: bool, boolean: bool, overridden: bool, font-size: bool, color-input: bool, single-color: bool, multiline: bool }
+export component SettingsWindow inherits Window {
+    title: "小狼毫RS：设置";
+    default-font-family: "Segoe UI";
+    in property <bool> mica-enabled: false;
+    background: root.mica-enabled ? transparent : Palette.background;
+    icon: @image-url("../../assets/weasel.ico");
+    preferred-width: 760px;
+    preferred-height: 640px;
+    min-width: 500px;
+    min-height: 400px;
+    in property <string> config-path;
+    in property <string> status;
+    in property <bool> editable;
+    in property <bool> dirty;
+    in property <[SettingField]> fields;
+    in property <[SettingField]> visible-fields;
+    in property <bool> invalid;
+    private property <string> new-app-name;
+    in-out property <string> app-add-error;
+    in property <[AppEntry]> apps;
+    in property <[WasmEntry]> wasm-modules;
+    callback module-action(string, string, string, string) -> string;
+    callback app-add(string) -> bool;
+    callback app-remove(string);
+    callback app-edit(string, string, bool, bool);
+    callback changed(int, int, string);
+    callback loaded();
+    callback save(bool);
+    callback request-close();
+    VerticalBox {
+        padding: 24px;
+        padding-top: 8px;
+        spacing: 12px;
+        HorizontalBox {
+            height: 48px;
+            padding: 0px;
+            // 给 DWM 原生标题栏按钮区域留出空间。
+            padding-right: 144px;
+            Text { text: "小狼毫RS 设置"; font-size: 22px; vertical-alignment: center; }
+        }
+        Text { text: root.config-path; wrap: word-wrap; }
+        ScrollView {
+            VerticalBox {
+                padding: 0px;
+                // 为浮动滚动条预留空间，避免覆盖卡片和右侧按钮。
+                padding-right: 14px;
+                spacing: 6px;
+                for field in root.visible-fields: VerticalBox {
+                    padding: 0px;
+                    spacing: 8px;
+                    if field.section != "": VerticalBox {
+                        padding: 0px;
+                        padding-top: field.section == "常规" ? 0px : 20px;
+                        spacing: 0px;
+                        Text { text: field.section; font-size: 20px; font-weight: 600; }
+                    }
+                    if field.key == "app_options": AppOptions {
+                        enabled: root.editable;
+                        entries: root.apps;
+                        add() => { root.new-app-name = ""; root.app-add-error = ""; add-popup.show(); }
+                        remove(name) => { root.app-remove(name); }
+                        edit(name, key, value, reset) => { root.app-edit(name, key, value, reset); }
+                    }
+                    if field.key == "modules": WasmModules {
+                        enabled: root.editable;
+                        entries: root.wasm-modules;
+                        action(kind, id, key, value) => { return root.module-action(kind, id, key, value); }
+                    }
+                    if field.multiline && field.key != "app_options" && field.key != "modules": Rectangle {
+                        background: Palette.control-background;
+                        border-radius: 6px;
+                        vertical-stretch: 0;
+                        VerticalBox {
+                            padding: 16px; spacing: 10px;
+                            HorizontalBox {
+                                padding: 0px; spacing: 12px;
+                                VerticalBox {
+                                    padding: 0px; spacing: 4px;
+                                    Text { text: field.title; font-size: 17px; font-weight: 600; }
+                                    Text { text: field.key; font-size: 12px; opacity: 0.65; }
+                                    Text { text: field.description; font-size: 12px; wrap: word-wrap; opacity: 0.75; }
+                                }
+                                IconAction {
+                                    icon: @image-url("reset_settings.svg");
+                                    label: "恢复继承";
+                                    enabled: root.editable && field.overridden;
+                                    clicked => { root.changed(field.source-index, 0, ""); }
+                                }
+                            }
+                            TextEdit {
+                                height: 120px;
+                                enabled: root.editable;
+                                text <=> field.text;
+                                edited => { root.changed(field.source-index, 1, self.text); }
+                            }
+                        }
+                    }
+                    if !field.multiline && field.key != "app_options" && field.key != "modules": Rectangle {
+                      vertical-stretch: 0;
+                      border-radius: 6px;
+                      background: Palette.control-background;
+                      border-width: 1px;
+                      border-color: Palette.foreground.with-alpha(0.08);
+                    HorizontalBox {
+                      padding: 16px;
+                      spacing: 12px;
+                      VerticalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        horizontal-stretch: 1;
+                        Text { text: field.title; font-size: 17px; font-weight: 600; wrap: word-wrap; }
+                        Text { text: field.key; font-size: 12px; opacity: 0.65; wrap: word-wrap; }
+                        if field.description != "": Text { text: field.description; font-size: 12px; opacity: 0.75; wrap: word-wrap; }
+                      }
+                      if field.color-input: ColorEditor {
+                        single-color: field.single-color;
+                        min-height: 32px;
+                        enabled: root.editable;
+                        value: field.text;
+                        edited(value) => { root.changed(field.source-index, 1, value); }
+                      }
+                      if !field.color-input: Rectangle {
+                        width: field.font-size && field.selected == 4 ? 250px : field.boolean ? 44px : field.text-input ? 210px : 160px;
+                        min-height: 32px;
+                        horizontal-stretch: 0;
+                    HorizontalLayout {
+                        width: parent.width;
+                        height: 32px;
+                        y: (parent.height - self.height) / 2;
+                        spacing: 10px;
+                        padding: 0px;
+                    if field.boolean: Switch {
+                        width: 44px;
+                        height: 32px;
+                        enabled: root.editable;
+                        checked <=> field.checked;
+                        vertical-stretch: 0;
+                        toggled => { root.changed(field.source-index, self.checked ? 2 : 1, ""); }
+                    }
+                    if !field.boolean && !field.text-input: ComboBox {
+                        width: 160px;
+                        height: 32px;
+                        enabled: root.editable;
+                        model: field.choices;
+                        current-index <=> field.selected;
+                        vertical-stretch: 0;
+                        horizontal-stretch: 0;
+                        selected(value) => { root.changed(field.source-index, self.current-index + 1, field.text); }
+                    }
+                    if field.text-input: LineEdit {
+                        width: parent.width;
+                        height: 32px;
+                        enabled: root.editable;
+                        preferred-width: 210px;
+                        vertical-stretch: 0;
+                        horizontal-stretch: 0;
+                        text <=> field.text;
+                        edited => { root.changed(field.source-index, 1, self.text); }
+                    }
+                    if field.font-size && field.selected == 4: LineEdit {
+                        width: 80px;
+                        height: 32px;
+                        enabled: root.editable;
+                        input-type: decimal;
+                        text <=> field.text;
+                        edited => { root.changed(field.source-index, 5, self.text); }
+                    }
+                    }
+                      }
+                      Rectangle {
+                        width: 32px;
+                        min-height: 32px;
+                        horizontal-stretch: 0;
+                      reset := Button {
+                        y: (parent.height - self.height) / 2;
+                        enabled: root.editable && field.overridden;
+                        width: 32px;
+                        height: 32px;
+                        vertical-stretch: 0;
+                        horizontal-stretch: 0;
+                        accessible-label: "清除覆盖，恢复继承";
+                        clicked => { root.changed(field.source-index, 0, ""); }
+                      }
+                      Image {
+                        source: @image-url("reset_settings.svg");
+                        width: 18px;
+                        height: 18px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        colorize: Palette.foreground;
+                        opacity: reset.enabled ? 0.8 : 0.3;
+                        accessible-role: none;
+                      }
+                      }
+                    }
+                    }
+                }
+            }
+        }
+        Text { text: root.status; wrap: word-wrap; }
+        HorizontalBox {
+            Button { text: "仅保存"; enabled: root.editable && root.dirty && !root.invalid; clicked => { root.save(false); } }
+            Button { text: "保存并应用"; enabled: root.editable && !root.invalid; clicked => { root.save(true); } }
+            Button { text: "关闭"; clicked => { root.request-close(); } }
+        }
+    }
+    add-popup := PopupWindow {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: 420px;
+        height: 240px;
+        close-policy: no-auto-close;
+        Rectangle {
+            // 控件底色含透明度；独立弹窗需要不透明的窗口底色。
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.foreground.with-alpha(0.15);
+            VerticalBox {
+                padding: 20px;
+                spacing: 12px;
+                Text { text: "添加应用"; font-size: 20px; font-weight: 600; }
+                app-name := LineEdit {
+                    placeholder-text: "程序文件名，例如 notepad.exe";
+                    text <=> root.new-app-name;
+                    edited => { root.app-add-error = ""; }
+                    init => { self.focus(); }
+                }
+                Text {
+                    text: root.app-add-error == "" ? "请输入程序文件名（例如 notepad.exe），不要包含路径。" : root.app-add-error;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                HorizontalBox {
+                    alignment: end;
+                    Button { text: "取消"; clicked => { add-popup.close(); } }
+                    Button {
+                        text: "添加"; enabled: app-name.text != "";
+                        clicked => { if root.app-add(app-name.text) { add-popup.close(); } }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -5,6 +5,7 @@ members = [
     "broker",
     "server",
     "renderer",
+    "settings",
     "common",
     "theme-api",
     "themes/support",

@@ -1,0 +1,333 @@
+{
+  "formatVersion": 1,
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "config.schema.json",
+    "title": "WeaselUI Theme Definition",
+    "description": "theme-weaselui 主题定义文件（config.json）",
+    "type": "object",
+    "properties": {
+      "$schema": {
+        "description": "JSON Schema 文件的 URI",
+        "type": "string"
+      },
+      "name": {
+        "description": "主题显示名称",
+        "type": "string",
+        "title": "名称"
+      },
+      "author": {
+        "description": "作者",
+        "type": "string",
+        "title": "作者"
+      },
+      "horizontal": {
+        "description": "是否横向布局",
+        "type": "boolean",
+        "title": "横向排列"
+      },
+      "layout": {
+        "description": "窗口布局参数",
+        "type": "object",
+        "properties": {
+          "min_width": {
+            "description": "窗口最小宽度",
+            "type": "integer",
+            "title": "最小宽度"
+          },
+          "max_width": {
+            "description": "窗口最大宽度，0 表示自动",
+            "type": "integer",
+            "title": "最大宽度"
+          },
+          "min_height": {
+            "description": "窗口最小高度",
+            "type": "integer",
+            "title": "最小高度"
+          },
+          "max_height": {
+            "description": "窗口最大高度，0 表示自动",
+            "type": "integer",
+            "title": "最大高度"
+          },
+          "border_width": {
+            "description": "边框粗细",
+            "type": "integer",
+            "title": "边框宽度"
+          },
+          "margin_x": {
+            "description": "水平边距",
+            "type": "integer",
+            "title": "水平边距"
+          },
+          "margin_y": {
+            "description": "垂直边距",
+            "type": "integer",
+            "title": "垂直边距"
+          },
+          "spacing": {
+            "description": "词码间距",
+            "type": "integer",
+            "title": "预编辑与候选间距"
+          },
+          "candidate_spacing": {
+            "description": "候选间距",
+            "type": "integer",
+            "title": "候选间距"
+          },
+          "corner_radius": {
+            "description": "边框圆角",
+            "type": "number",
+            "minimum": 0,
+            "maximum": 4096,
+            "title": "窗口圆角"
+          },
+          "hilite_spacing": {
+            "description": "序词间距",
+            "type": "integer",
+            "title": "高亮间距"
+          },
+          "hilite_padding": {
+            "description": "高亮填充",
+            "type": "integer",
+            "title": "高亮内边距"
+          },
+          "hilite_corner_radius": {
+            "description": "候选项边框圆角",
+            "type": "integer",
+            "title": "高亮圆角"
+          },
+          "shadow_radius": {
+            "description": "窗口阴影",
+            "type": "number",
+            "minimum": 0,
+            "maximum": 250,
+            "title": "阴影半径"
+          },
+          "shadow_offset_x": {
+            "description": "阴影水平偏移",
+            "type": "number",
+            "minimum": -1024,
+            "maximum": 1024,
+            "title": "阴影水平偏移"
+          },
+          "shadow_offset_y": {
+            "description": "阴影垂直偏移",
+            "type": "number",
+            "minimum": -1024,
+            "maximum": 1024,
+            "title": "阴影垂直偏移"
+          }
+        },
+        "additionalProperties": false,
+        "title": "布局"
+      },
+      "color": {
+        "description": "颜色：RGB / ARGB",
+        "type": "object",
+        "properties": {
+          "shadow": {
+            "$ref": "#/$defs/color",
+            "description": "窗口阴影颜色",
+            "title": "阴影颜色"
+          },
+          "text": {
+            "$ref": "#/$defs/color",
+            "description": "编码行文字颜色",
+            "title": "预编辑文字颜色"
+          },
+          "back": {
+            "$ref": "#/$defs/color",
+            "description": "背景颜色",
+            "title": "背景颜色"
+          },
+          "border": {
+            "$ref": "#/$defs/color",
+            "description": "边框颜色",
+            "title": "边框颜色"
+          },
+          "candidate_text": {
+            "$ref": "#/$defs/color",
+            "description": "候选项文字颜色",
+            "title": "候选文字颜色"
+          },
+          "comment_text": {
+            "$ref": "#/$defs/color",
+            "description": "备注项（如拼音）颜色",
+            "title": "注释颜色"
+          },
+          "label": {
+            "$ref": "#/$defs/color",
+            "description": "标签（如候选项编号）颜色",
+            "title": "序号颜色"
+          },
+          "hilited_text": {
+            "$ref": "#/$defs/color",
+            "description": "高亮编码行文字颜色",
+            "title": "高亮文字颜色"
+          },
+          "hilited_back": {
+            "$ref": "#/$defs/color",
+            "description": "高亮编码行文字背景颜色",
+            "title": "高亮背景颜色"
+          },
+          "hilited_candidate_text": {
+            "$ref": "#/$defs/color",
+            "description": "高亮候选项文本颜色",
+            "title": "选中候选文字颜色"
+          },
+          "hilited_candidate_back": {
+            "$ref": "#/$defs/color",
+            "description": "高亮候选项文本背景颜色",
+            "title": "选中候选背景颜色"
+          },
+          "hilited_comment_text": {
+            "$ref": "#/$defs/color",
+            "description": "高亮候选项备注颜色",
+            "title": "选中候选注释颜色"
+          },
+          "hilited_label": {
+            "$ref": "#/$defs/color",
+            "description": "高亮候选项标签颜色",
+            "title": "选中候选序号颜色"
+          }
+        },
+        "additionalProperties": false,
+        "title": "颜色"
+      },
+      "font_face": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "title": "候选字体"
+      },
+      "label_font_face": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "title": "序号字体"
+      },
+      "comment_font_face": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "title": "注释字体"
+      },
+      "label_format": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "title": "序号格式"
+      },
+      "font_point": {
+        "type": "number",
+        "minimum": 3,
+        "maximum": 384,
+        "description": "字号（pt）",
+        "title": "候选字号"
+      },
+      "label_font_point": {
+        "type": "number",
+        "minimum": 3,
+        "maximum": 384,
+        "description": "字号（pt）",
+        "title": "序号字号"
+      },
+      "comment_font_point": {
+        "type": "number",
+        "minimum": 3,
+        "maximum": 384,
+        "description": "字号（pt）",
+        "title": "注释字号"
+      }
+    },
+    "additionalProperties": false,
+    "$defs": {
+      "color": {
+        "description": "十六进制颜色，可选 # 前缀，6 位 RRGGBB 或 8 位 AARRGGBB",
+        "type": "string",
+        "pattern": "^#?(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"
+      }
+    },
+    "examples": [
+      {
+        "name": "碧水 / Aqua",
+        "author": "佛振 <chen.sst@gmail.com>",
+        "horizontal": true,
+        "layout": {
+          "min_width": 160,
+          "max_width": 0,
+          "min_height": 0,
+          "max_height": 0,
+          "border_width": 3,
+          "margin_x": 12,
+          "margin_y": 12,
+          "spacing": 10,
+          "candidate_spacing": 5,
+          "corner_radius": 4,
+          "hilite_spacing": 4,
+          "hilite_padding": 2,
+          "hilite_corner_radius": 4,
+          "shadow_radius": 0,
+          "shadow_offset_x": 4,
+          "shadow_offset_y": 4
+        },
+        "color": {
+          "shadow": "#40000000",
+          "text": "#000000",
+          "back": "#eeeeec",
+          "border": "#e0e0e0",
+          "candidate_text": "#000000",
+          "comment_text": "#4f4f4e",
+          "label": "#4f4f4e",
+          "hilited_text": "#000000",
+          "hilited_back": "#d4d4d4",
+          "hilited_candidate_text": "#ffffff",
+          "hilited_candidate_back": "#0a3afa",
+          "hilited_comment_text": "#4f4f4e",
+          "hilited_label": "#adbdfd"
+        }
+      }
+    ]
+  },
+  "ui": {
+    "fields": {
+      "/name": {
+        "order": 0
+      },
+      "/author": {
+        "order": 10
+      },
+      "/horizontal": {
+        "order": 20
+      },
+      "/layout": {
+        "order": 30
+      },
+      "/color": {
+        "order": 40
+      },
+      "/font_face": {
+        "order": 50
+      },
+      "/label_font_face": {
+        "order": 60
+      },
+      "/comment_font_face": {
+        "order": 70
+      },
+      "/label_format": {
+        "order": 80
+      },
+      "/font_point": {
+        "order": 90
+      },
+      "/label_font_point": {
+        "order": 100
+      },
+      "/comment_font_point": {
+        "order": 110
+      }
+    }
+  }
+}

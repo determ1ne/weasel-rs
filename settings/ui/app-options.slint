@@ -1,0 +1,125 @@
+import { Button, VerticalBox, HorizontalBox, LineEdit, Switch, Palette } from "std-widgets.slint";
+export struct AppOption { key: string, title: string, description: string, checked: bool, overridden: bool }
+export struct AppEntry { name: string, expanded: bool, overridden: bool, options: [AppOption] }
+export component IconAction inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: 32px;
+    min-height: 32px;
+    Button {
+        width: 32px; height: 32px;
+        y: (parent.height - self.height) / 2;
+        enabled: root.enabled;
+        accessible-label: root.label;
+        clicked => { root.clicked(); }
+    }
+    Image {
+        source: root.icon;
+        width: 18px; height: 18px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        colorize: Palette.foreground;
+        opacity: root.enabled ? 0.8 : 0.3;
+    }
+}
+export component AppOptions inherits VerticalBox {
+    in property <bool> enabled;
+    in property <[AppEntry]> entries;
+    private property <bool> expanded: false;
+    callback add();
+    callback remove(string);
+    callback edit(string, string, bool, bool);
+    padding: 0px;
+    spacing: 6px;
+    Rectangle {
+        background: Palette.control-background;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Palette.foreground.with-alpha(0.08);
+        HorizontalBox {
+            padding: 16px;
+            VerticalBox {
+                padding: 0px; spacing: 4px;
+                Text { text: "应用专属设置"; font-size: 17px; font-weight: 600; }
+                Text { text: "app_options"; font-size: 12px; opacity: 0.65; }
+                Text { text: "为指定程序设置默认输入模式。未覆盖的选项继承程序配置或全局设置。"; font-size: 12px; wrap: word-wrap; opacity: 0.75; }
+            }
+            Rectangle {
+                width: 100px; min-height: 32px;
+                Button {
+                    text: "添加新项"; enabled: root.enabled;
+                    width: parent.width; height: 32px; y: (parent.height - self.height) / 2;
+                    clicked => { root.expanded = true; root.add(); }
+                }
+            }
+            IconAction {
+                icon: root.expanded ? @image-url("unfold_less.svg") : @image-url("unfold_more.svg");
+                label: root.expanded ? "收起应用列表" : "展开应用列表";
+                clicked => { root.expanded = !root.expanded; }
+            }
+        }
+    }
+    if root.expanded: VerticalBox {
+        padding: 0px; padding-left: 24px; spacing: 6px;
+        for entry in root.entries: Rectangle {
+            background: Palette.control-background;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Palette.foreground.with-alpha(0.08);
+            VerticalBox {
+                padding: 16px; spacing: 8px;
+                HorizontalBox {
+                    padding: 0px;
+                    Text { text: entry.name; font-size: 16px; vertical-alignment: center; }
+                    IconAction {
+                        icon: @image-url("reset_settings.svg");
+                        label: "清除应用覆盖，恢复继承";
+                        enabled: root.enabled && entry.overridden;
+                        clicked => { root.remove(entry.name); }
+                    }
+                    IconAction {
+                        icon: entry.expanded ? @image-url("unfold_less.svg") : @image-url("unfold_more.svg");
+                        label: entry.expanded ? "收起应用设置" : "展开应用设置";
+                        clicked => { entry.expanded = !entry.expanded; }
+                    }
+                }
+                if entry.expanded: VerticalBox {
+                    padding: 0px; padding-left: 16px; spacing: 8px;
+                    for option in entry.options: HorizontalBox {
+                        padding: 0px; spacing: 12px;
+                        VerticalBox {
+                            padding: 0px; spacing: 4px;
+                            Text { text: option.title; font-size: 15px; }
+                            Text { text: option.key; font-size: 12px; opacity: 0.65; }
+                            Text { text: option.description; font-size: 12px; opacity: 0.75; wrap: word-wrap; }
+                        }
+                        Rectangle {
+                            width: 44px; min-height: 32px;
+                            Switch {
+                                width: 44px; height: 32px; y: (parent.height - self.height) / 2;
+                                enabled: root.enabled; checked <=> option.checked;
+                                toggled => { root.edit(entry.name, option.key, self.checked, false); }
+                            }
+                        }
+                        Rectangle {
+                            width: 32px; min-height: 32px;
+                            Button {
+                                width: 32px; height: 32px; y: (parent.height - self.height) / 2;
+                                accessible-label: "恢复继承";
+                                enabled: root.enabled && option.overridden;
+                                clicked => { root.edit(entry.name, option.key, false, true); }
+                            }
+                            Image {
+                                source: @image-url("reset_settings.svg"); width: 18px; height: 18px;
+                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                colorize: Palette.foreground; opacity: option.overridden ? 0.8 : 0.3;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

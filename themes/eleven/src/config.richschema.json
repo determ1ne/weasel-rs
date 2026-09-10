@@ -1,0 +1,95 @@
+{
+  "formatVersion": 1,
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "font": {
+        "type": "string",
+        "minLength": 1,
+        "title": "字体"
+      },
+      "fontSize": {
+        "description": "DIP: small=14, medium=18, large=22, extraLarge=28",
+        "oneOf": [
+          {
+            "enum": [
+              "small",
+              "medium",
+              "large",
+              "extraLarge"
+            ]
+          },
+          {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 256
+          }
+        ],
+        "title": "字号"
+      },
+      "accentColor": {
+        "$ref": "#/$defs/color",
+        "title": "强调色"
+      },
+      "backgroundColor": {
+        "$ref": "#/$defs/color",
+        "title": "背景色"
+      },
+      "textColor": {
+        "$ref": "#/$defs/color",
+        "title": "文字颜色"
+      }
+    },
+    "$defs": {
+      "value": {
+        "type": "string",
+        "pattern": "^(system|#?([0-9a-fA-F]{6}|[0-9a-fA-F]{8}))$"
+      },
+      "color": {
+        "description": "system 或 RGB/ARGB 十六进制颜色；system 保留系统外观，accentColor 从 DWM AccentColor (ABGR) 读取",
+        "oneOf": [
+          {
+            "$ref": "#/$defs/value"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "light": {
+                "$ref": "#/$defs/value"
+              },
+              "dark": {
+                "$ref": "#/$defs/value"
+              }
+            },
+            "required": [
+              "light",
+              "dark"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "additionalProperties": false
+  },
+  "ui": {
+    "fields": {
+      "/font": {
+        "order": 0
+      },
+      "/fontSize": {
+        "order": 10
+      },
+      "/accentColor": {
+        "order": 20
+      },
+      "/backgroundColor": {
+        "order": 30
+      },
+      "/textColor": {
+        "order": 40
+      }
+    }
+  }
+}

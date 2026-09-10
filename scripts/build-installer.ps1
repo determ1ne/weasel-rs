@@ -50,6 +50,9 @@ try {
             $requiredFiles += "target\x86_64-pc-windows-msvc\release\weasel_theme_$theme.$extension"
         }
     }
+    foreach ($theme in @('abc', 'eleven')) {
+        $requiredFiles += "target\x86_64-pc-windows-msvc\release\themes\weasel_theme_$theme.settings.json"
+    }
     if ($Mini) {
         $requiredFiles = @($requiredFiles | Where-Object { $_ -notlike '*.pdb' })
         $requiredFiles += 'scripts\download-runtime.ps1'

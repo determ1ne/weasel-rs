@@ -5,8 +5,8 @@
   "type": "module",
   "license": "BSD-3-Clause",
   "scripts": {
-    "build": "node generate-defaults.mjs && asc assembly/index.ts --target release",
-    "build:debug": "node generate-defaults.mjs && asc assembly/index.ts --target debug",
+    "build": "node generate-defaults.mjs && asc assembly/index.ts --target release && node ../../../scripts/package-theme-metadata.mjs --wasm build/weaselui.wasm config.json",
+    "build:debug": "node generate-defaults.mjs && asc assembly/index.ts --target debug && node ../../../scripts/package-theme-metadata.mjs --wasm build/weaselui-debug.wasm config.json",
     "test": "node test/theme-test.mjs"
   },
   "dependencies": { "@weasel-rs/sdk-as": "file:../sdk-as" },

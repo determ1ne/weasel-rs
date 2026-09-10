@@ -7,11 +7,14 @@
   "properties": {
     "$schema": {
       "description": "JSON Schema 文件的 URI",
-      "type": "string"
+      "type": "string",
+      "default": "config.schema.json"
     },
     "antialiasing": {
       "description": "是否启用文本抗锯齿渲染",
-      "type": "boolean"
+      "type": "boolean",
+      "title": "文本抗锯齿",
+      "default": true
     }
   },
   "additionalProperties": false,
@@ -19,5 +22,10 @@
     {
       "antialiasing": true
     }
-  ]
+  ],
+  "default": {
+    "$schema": "config.schema.json",
+    "antialiasing": true
+  },
+  "$comment": "Generated from the matching .richschema.json and .json; do not edit."
 }

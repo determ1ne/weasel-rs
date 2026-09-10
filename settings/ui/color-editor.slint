@@ -1,0 +1,125 @@
+import { Button, ComboBox, CheckBox, Slider, LineEdit, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
+export struct ColorValue { mode: int, light: color, dark: color, light-system: bool, dark-system: bool }
+export struct Channels { red: float, green: float, blue: float, alpha: float }
+export struct ParsedColor { valid: bool, value: color }
+export global ColorCodec {
+    pure callback decode(string) -> ColorValue;
+    pure callback encode(ColorValue) -> string;
+    pure callback channels(color) -> Channels;
+    pure callback hex(color) -> string;
+    pure callback parse-hex(string) -> ParsedColor;
+}
+export component ColorEditor inherits Rectangle {
+    in property <string> value;
+    in property <bool> enabled;
+    in property <bool> single-color: false;
+    callback edited(string);
+    private property <ColorValue> data: ColorCodec.decode(root.value);
+    width: root.data.mode == 0 ? 120px : root.data.mode == 1 ? 194px : 268px;
+    private property <int> selection: root.single-color ? 0 : root.data.mode;
+    changed value => {
+        root.data = ColorCodec.decode(root.value);
+        root.selection = root.single-color ? 0 : root.data.mode;
+    }
+    private property <bool> editing-dark;
+    private property <bool> use-system;
+    private property <float> red;
+    private property <float> green;
+    private property <float> blue;
+    private property <float> alpha;
+    private property <string> hex-input;
+    private property <bool> hex-valid: true;
+    function sync-hex() {
+        root.hex-input = ColorCodec.hex(root.draft);
+        root.hex-valid = true;
+    }
+    private property <color> draft: rgba(root.red, root.green, root.blue, root.alpha / 255);
+    public function open-picker(dark: bool) {
+        root.editing-dark = dark;
+        root.use-system = dark ? root.data.dark-system : root.data.light-system;
+        let channels = ColorCodec.channels(dark ? root.data.dark : root.data.light);
+        root.red = channels.red; root.green = channels.green;
+        root.blue = channels.blue; root.alpha = channels.alpha;
+        root.sync-hex();
+        picker.show();
+    }
+    HorizontalLayout {
+        height: 32px; y: (parent.height - self.height) / 2;
+        spacing: 8px;
+        ComboBox {
+            width: 120px; height: 32px; enabled: root.enabled;
+            model: root.single-color ? ["自定义"] : ["系统", "自定义", "浅色 / 深色"];
+            current-index <=> root.selection;
+            selected(value) => {
+                root.edited(ColorCodec.encode({
+                    mode: root.single-color ? 1 : self.current-index, light: root.data.light, dark: root.data.dark,
+                    light-system: self.current-index == 1 ? false : root.data.light-system,
+                    dark-system: root.data.dark-system
+                }));
+            }
+        }
+        if root.data.mode > 0: Button {
+            width: 66px; height: 32px; enabled: root.enabled;
+            text: root.data.mode == 2 ? "浅色…" : "颜色…";
+            clicked => { root.open-picker(false); }
+        }
+        if root.data.mode == 2: Button {
+            width: 66px; height: 32px; enabled: root.enabled;
+            text: "深色…"; clicked => { root.open-picker(true); }
+        }
+    }
+    picker := PopupWindow {
+        width: 350px; height: 390px;
+        close-policy: no-auto-close;
+        Rectangle {
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px; border-color: Palette.foreground.with-alpha(0.15);
+            VerticalBox {
+                padding: 18px; spacing: 10px;
+                Text { text: "选择颜色"; font-size: 18px; font-weight: 600; }
+                if root.data.mode == 2: CheckBox { text: "使用系统颜色"; checked <=> root.use-system; }
+                Rectangle {
+                    height: 34px; background: Palette.alternate-background;
+                    Rectangle { background: root.draft; }
+                    Text { text: ColorCodec.hex(root.draft); color: root.red + root.green + root.blue > 380 ? #000000 : #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                LineEdit {
+                    text <=> root.hex-input;
+                    placeholder-text: "#RRGGBB 或 #AARRGGBB";
+                    edited => {
+                        let parsed = ColorCodec.parse-hex(self.text);
+                        root.hex-valid = parsed.valid;
+                        if parsed.valid {
+                            let channels = ColorCodec.channels(parsed.value);
+                            root.red = channels.red; root.green = channels.green;
+                            root.blue = channels.blue; root.alpha = channels.alpha;
+                        }
+                    }
+                }
+                Text { text: root.hex-valid ? "6 位 RGB 或 8 位 ARGB，可省略 #。" : "颜色格式无效，请输入 6 或 8 位十六进制字符。"; font-size: 12px; wrap: word-wrap; }
+                HorizontalBox { padding: 0px; Text { text: "R"; } Slider { minimum: 0; maximum: 255; step: 1; value <=> root.red; changed => { root.sync-hex(); } } }
+                HorizontalBox { padding: 0px; Text { text: "G"; } Slider { minimum: 0; maximum: 255; step: 1; value <=> root.green; changed => { root.sync-hex(); } } }
+                HorizontalBox { padding: 0px; Text { text: "B"; } Slider { minimum: 0; maximum: 255; step: 1; value <=> root.blue; changed => { root.sync-hex(); } } }
+                HorizontalBox { padding: 0px; Text { text: "A"; } Slider { minimum: 0; maximum: 255; step: 1; value <=> root.alpha; changed => { root.sync-hex(); } } }
+                HorizontalBox {
+                    alignment: end;
+                    Button { text: "取消"; clicked => { picker.close(); } }
+                    Button {
+                        text: "确定";
+                        enabled: root.hex-valid;
+                        clicked => {
+                            root.edited(ColorCodec.encode({
+                                mode: root.data.mode,
+                                light: root.editing-dark ? root.data.light : root.draft,
+                                dark: root.editing-dark ? root.draft : root.data.dark,
+                                light-system: root.editing-dark ? root.data.light-system : root.data.mode == 2 && root.use-system,
+                                dark-system: root.editing-dark ? root.use-system : root.data.dark-system
+                            })); picker.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

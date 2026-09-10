@@ -1,0 +1,162 @@
+{
+  "formatVersion": 1,
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "weasel.schema.json",
+    "title": "Weasel User Settings",
+    "description": "Weasel-RS 用户设置文件",
+    "type": "object",
+    "properties": {
+      "$schema": {
+        "description": "JSON Schema 文件的 URI",
+        "type": "string"
+      },
+      "theme": {
+        "description": "主题名称",
+        "type": "string",
+        "enum": [
+          "eleven",
+          "ten",
+          "abc",
+          "void",
+          "wasm"
+        ],
+        "title": "主题"
+      },
+      "ascii_mode": {
+        "description": "新输入会话默认使用英文模式",
+        "type": "boolean",
+        "title": "默认英文模式"
+      },
+      "global_ascii_status": {
+        "description": "所有应用共享中英文状态",
+        "type": "boolean",
+        "title": "共享中英文状态"
+      },
+      "inline_preedit": {
+        "description": "是否在宿主编辑框内联显示预编辑文本",
+        "type": "boolean",
+        "title": "内联预编辑"
+      },
+      "preedit_type": {
+        "description": "外部预编辑显示内容：composition 为编码，preview 为当前有效候选文本",
+        "type": "string",
+        "enum": [
+          "composition",
+          "preview"
+        ],
+        "title": "预编辑内容"
+      },
+      "app_options": {
+        "description": "按宿主程序文件名配置新输入会话的默认选项",
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "ascii_mode": {
+              "description": "新会话默认使用英文模式；未指定时继承全局 ascii_mode，不覆盖已有会话的手动切换",
+              "type": "boolean",
+              "title": "默认英文模式"
+            },
+            "inline_preedit": {
+              "description": "是否在该宿主编辑框内联显示预编辑文本；未指定时继承全局 inline_preedit，主题不支持外部预编辑时仍回退内联",
+              "type": "boolean",
+              "title": "内联预编辑"
+            }
+          },
+          "additionalProperties": false
+        },
+        "examples": [
+          {
+            "cmd.exe": {
+              "ascii_mode": true
+            }
+          }
+        ],
+        "title": "应用专属设置"
+      },
+      "themeSettings": {
+        "description": "按主题划分的自定义设置，键为主题名称，值为该主题的设置对象",
+        "type": "object",
+        "properties": {
+          "wasm": {
+            "type": "object",
+            "properties": {
+              "theme": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]+$",
+                "description": "加载同名 .wasm 模块",
+                "title": "主题"
+              },
+              "modules": {
+                "type": "object",
+                "propertyNames": {
+                  "pattern": "^[A-Za-z0-9_-]+$"
+                },
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "title": "名称"
+                    },
+                    "config": {
+                      "type": "object",
+                      "title": "配置"
+                    },
+                    "file": {
+                      "type": "string",
+                      "description": "模块路径；依次查找程序目录 theme-wasm/<id>.wasm、用户数据目录 <id>.wasm",
+                      "title": "模块文件"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "title": "WASM 模块"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": {
+          "type": "object"
+        }
+      }
+    },
+    "additionalProperties": false,
+    "examples": [
+      {
+        "theme": "eleven",
+        "inline_preedit": true,
+        "themeSettings": {
+          "abc": {}
+        }
+      }
+    ]
+  },
+  "ui": {
+    "fields": {
+      "/theme": {
+        "order": 0
+      },
+      "/ascii_mode": {
+        "order": 10
+      },
+      "/global_ascii_status": {
+        "order": 20
+      },
+      "/inline_preedit": {
+        "order": 30
+      },
+      "/preedit_type": {
+        "order": 40
+      },
+      "/app_options": {
+        "order": 50
+      },
+      "/themeSettings": {
+        "order": 60
+      }
+    }
+  }
+}

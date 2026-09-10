@@ -1,0 +1,34 @@
+{
+  "formatVersion": 1,
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "config.schema.json",
+    "title": "Theme ABC Config",
+    "description": "theme_abc 配置文件",
+    "type": "object",
+    "properties": {
+      "$schema": {
+        "description": "JSON Schema 文件的 URI",
+        "type": "string"
+      },
+      "antialiasing": {
+        "description": "是否启用文本抗锯齿渲染",
+        "type": "boolean",
+        "title": "文本抗锯齿"
+      }
+    },
+    "additionalProperties": false,
+    "examples": [
+      {
+        "antialiasing": true
+      }
+    ]
+  },
+  "ui": {
+    "fields": {
+      "/antialiasing": {
+        "order": 0
+      }
+    }
+  }
+}

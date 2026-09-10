@@ -5,6 +5,7 @@ pub fn embed() {
         "weasel-broker" => ("Weasel-RS Broker", "weasel-broker.exe", false),
         "weasel-server" => ("Weasel-RS Rime Server", "weasel-server.exe", false),
         "weasel-renderer" => ("Weasel-RS Candidate Renderer", "weasel-renderer.exe", false),
+        "weasel-settings" => ("Weasel-RS Settings", "weasel-settings.exe", false),
         "weasel-tip" => ("Weasel-RS Text Input Processor", "weasel_tip.dll", true),
         "weasel-theme-ten" => ("Weasel-RS ten Theme", "weasel_theme_ten.dll", true),
         "weasel-theme-eleven" => ("Weasel-RS eleven Theme", "weasel_theme_eleven.dll", true),

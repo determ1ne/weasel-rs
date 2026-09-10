@@ -7,10 +7,11 @@
   "properties": {
     "$schema": {
       "description": "JSON Schema 文件的 URI",
-      "type": "string"
+      "type": "string",
+      "default": "weasel.schema.json"
     },
     "theme": {
-      "description": "主题名称（wasm 通过 themeSettings.wasm.file 指定 .wasm 文件）",
+      "description": "主题名称",
       "type": "string",
       "enum": [
         "eleven",
@@ -18,26 +19,36 @@
         "abc",
         "void",
         "wasm"
-      ]
+      ],
+      "title": "主题",
+      "default": "eleven"
     },
     "ascii_mode": {
-      "description": "新输入会话默认使用英文模式，可由 app_options 中的 ascii_mode 覆盖",
+      "description": "新输入会话默认使用英文模式",
       "type": "boolean",
+      "title": "默认英文模式",
       "default": false
     },
     "global_ascii_status": {
-      "description": "所有应用共享中英文状态，优先于应用默认值",
+      "description": "所有应用共享中英文状态",
       "type": "boolean",
+      "title": "共享中英文状态",
       "default": false
     },
     "inline_preedit": {
       "description": "是否在宿主编辑框内联显示预编辑文本",
-      "type": "boolean"
+      "type": "boolean",
+      "title": "内联预编辑",
+      "default": true
     },
     "preedit_type": {
       "description": "外部预编辑显示内容：composition 为编码，preview 为当前有效候选文本",
       "type": "string",
-      "enum": ["composition", "preview"],
+      "enum": [
+        "composition",
+        "preview"
+      ],
+      "title": "预编辑内容",
       "default": "composition"
     },
     "app_options": {
@@ -48,11 +59,13 @@
         "properties": {
           "ascii_mode": {
             "description": "新会话默认使用英文模式；未指定时继承全局 ascii_mode，不覆盖已有会话的手动切换",
-            "type": "boolean"
+            "type": "boolean",
+            "title": "默认英文模式"
           },
           "inline_preedit": {
             "description": "是否在该宿主编辑框内联显示预编辑文本；未指定时继承全局 inline_preedit，主题不支持外部预编辑时仍回退内联",
-            "type": "boolean"
+            "type": "boolean",
+            "title": "内联预编辑"
           }
         },
         "additionalProperties": false
@@ -63,7 +76,19 @@
             "ascii_mode": true
           }
         }
-      ]
+      ],
+      "title": "应用专属设置",
+      "default": {
+        "cmd.exe": {
+          "ascii_mode": true
+        },
+        "conhost.exe": {
+          "ascii_mode": true
+        },
+        "WindowsTerminal.exe": {
+          "ascii_mode": true
+        }
+      }
     },
     "themeSettings": {
       "description": "按主题划分的自定义设置，键为主题名称，值为该主题的设置对象",
@@ -75,8 +100,9 @@
             "theme": {
               "type": "string",
               "pattern": "^[A-Za-z0-9_-]+$",
-              "default": "weaselui",
-              "description": "加载同名 .wasm 模块"
+              "description": "加载同名 .wasm 模块",
+              "title": "主题",
+              "default": "weaselui"
             },
             "modules": {
               "type": "object",
@@ -87,25 +113,63 @@
                 "type": "object",
                 "properties": {
                   "name": {
-                    "type": "string"
+                    "type": "string",
+                    "title": "名称"
                   },
                   "config": {
-                    "type": "object"
+                    "type": "object",
+                    "title": "配置"
                   },
                   "file": {
                     "type": "string",
-                    "description": "模块路径；省略或空字符串时依次查找程序目录 theme-wasm/<id>.wasm、用户数据目录 <id>.wasm；显式相对路径以用户数据目录为基准"
+                    "description": "模块路径；依次查找程序目录 theme-wasm/<id>.wasm、用户数据目录 <id>.wasm",
+                    "title": "模块文件"
                   }
                 },
                 "additionalProperties": false
+              },
+              "title": "WASM 模块",
+              "default": {
+                "weaselui": {
+                  "name": "旧版 Weasel UI"
+                },
+                "glass": {
+                  "name": "Glass"
+                }
               }
             }
           },
-          "additionalProperties": false
+          "additionalProperties": false,
+          "default": {
+            "theme": "weaselui",
+            "modules": {
+              "weaselui": {
+                "name": "旧版 Weasel UI"
+              },
+              "glass": {
+                "name": "Glass"
+              }
+            }
+          }
         }
       },
       "additionalProperties": {
         "type": "object"
+      },
+      "default": {
+        "abc": {},
+        "eleven": {},
+        "wasm": {
+          "theme": "weaselui",
+          "modules": {
+            "weaselui": {
+              "name": "旧版 Weasel UI"
+            },
+            "glass": {
+              "name": "Glass"
+            }
+          }
+        }
       }
     }
   },
@@ -118,5 +182,40 @@
         "abc": {}
       }
     }
-  ]
+  ],
+  "default": {
+    "$schema": "weasel.schema.json",
+    "theme": "eleven",
+    "inline_preedit": true,
+    "preedit_type": "composition",
+    "ascii_mode": false,
+    "global_ascii_status": false,
+    "themeSettings": {
+      "abc": {},
+      "eleven": {},
+      "wasm": {
+        "theme": "weaselui",
+        "modules": {
+          "weaselui": {
+            "name": "旧版 Weasel UI"
+          },
+          "glass": {
+            "name": "Glass"
+          }
+        }
+      }
+    },
+    "app_options": {
+      "cmd.exe": {
+        "ascii_mode": true
+      },
+      "conhost.exe": {
+        "ascii_mode": true
+      },
+      "WindowsTerminal.exe": {
+        "ascii_mode": true
+      }
+    }
+  },
+  "$comment": "Generated from the matching .richschema.json and .json; do not edit."
 }

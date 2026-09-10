@@ -1,0 +1,23 @@
+[package]
+name = "weasel-settings"
+version = "0.1.2"
+edition = "2024"
+# 原创源码继续采用 BSD；链接 Slint 后的组合产物遵循 GPLv3，见 README。
+license.workspace = true
+
+[dependencies]
+serde_json = "1"
+tempfile = "3"
+wasmparser = "0.258"
+regex = "1"
+slint = { version = "=1.17.1", default-features = false, features = ["std", "backend-winit", "renderer-skia", "unstable-winit-030", "compat-1-2", "accessibility"] }
+windows-core = "0.100"
+windows-strings = "0.100"
+windows-version = "0.100"
+raw-window-handle = "0.6"
+weasel-common = { path = "../common" }
+
+[build-dependencies]
+windows-bindgen = "0.100"
+embed-resource = "3"
+slint-build = "=1.17.1"
