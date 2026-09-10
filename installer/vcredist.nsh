@@ -43,7 +43,24 @@ Function InstallRuntime_${ARCH}
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
   ClearErrors
+!ifdef MINI_INSTALLER
+  File "${PROJECT_ROOT}\scripts\download-runtime.ps1"
+  StrCpy $7 ""
+  IfSilent 0 +2
+    StrCpy $7 "-Silent"
+  DetailPrint "正在下载 Microsoft Visual C++ v14 Redistributable ${ARCH}…"
+  ; 使用系统目录为工作目录，避免 NSIS 的 System.dll 干扰 PowerShell 程序集加载。
+  SetOutPath "$SYSDIR"
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "$PLUGINSDIR\download-runtime.ps1" -Architecture ${ARCH} -Destination "$PLUGINSDIR\vc_redist.${ARCH}.exe" $7' $6
+  ${If} ${Errors}
+  ${OrIf} $6 != 0
+    MessageBox MB_OK|MB_ICONSTOP "运行库 ${ARCH} 下载或签名验证失败。请检查网络，或使用完整版安装包。" /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+!else
   File "${PROJECT_ROOT}\artifacts\vcredist\vc_redist.${ARCH}.exe"
+!endif
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法解压 Microsoft Visual C++ v14 Redistributable ${ARCH} 安装程序。" /SD IDOK
     SetErrorLevel 1

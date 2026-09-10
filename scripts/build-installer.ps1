@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     # Build an uncompressed installer that installs all components without a selection page.
-    [switch]$Dev
+    [switch]$Dev,
+    [switch]$Mini
 )
 
 Set-StrictMode -Version Latest
@@ -49,6 +50,10 @@ try {
             $requiredFiles += "target\x86_64-pc-windows-msvc\release\weasel_theme_$theme.$extension"
         }
     }
+    if ($Mini) {
+        $requiredFiles = @($requiredFiles | Where-Object { $_ -notlike '*.pdb' })
+        $requiredFiles += 'scripts\download-runtime.ps1'
+    }
     foreach ($relativePath in $requiredFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $projectRoot $relativePath) -PathType Leaf)) {
             throw "Missing $relativePath. Run scripts\build-release.ps1, scripts\download_librime.ps1 and scripts\download_vcredist.ps1 first."
@@ -58,6 +63,7 @@ try {
     $outputDirectory = Join-Path $projectRoot 'artifacts\installer'
     $null = New-Item -ItemType Directory -Path $outputDirectory -Force
     $buildSuffix = if ($Dev) { '-dev' } else { '' }
+    if ($Mini) { $buildSuffix += '-mini' }
     $outputFile = Join-Path $outputDirectory "Weasel-RS-$version-x64$buildSuffix-setup.exe"
     $runtimeDefinitions = @()
     foreach ($architecture in @('x86', 'x64')) {
@@ -74,9 +80,13 @@ try {
         }
         $runtimeVersion = '{0}.{1}.{2}.{3}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart
         $runtimeDefinitions += "/DVC_$($architecture.ToUpperInvariant())_VERSION=$runtimeVersion"
-        Write-Host "Bundling $architecture VC++ runtime $runtimeVersion"
+        Write-Host "Required $architecture VC++ runtime: $runtimeVersion"
     }
-    Write-Host 'Package contents: application binaries, Rime shared data and VC++ runtimes; fonts are not included.'
+    if ($Mini) {
+        Write-Host 'Mini: VC++ runtimes downloaded during installation; debug symbols excluded.'
+    } else {
+        Write-Host 'Full: VC++ runtimes bundled; debug symbols available as an optional component.'
+    }
     # WASM artifacts are optional; NSIS recursively includes them when present.
     Write-Host 'Optional WASM modules: artifacts\theme-wasm (no build is triggered).'
     $arguments = @(
@@ -87,6 +97,7 @@ try {
         (Join-Path $projectRoot 'installer\weasel-rs.nsi')
     )
     $buildDefinitions = @()
+    if ($Mini) { $buildDefinitions += '/DMINI_INSTALLER' }
     if ($Dev) {
         $buildDefinitions += '/DDEV_INSTALLER'
         Write-Host 'Dev installer: compression disabled; component selection skipped (all components selected).'

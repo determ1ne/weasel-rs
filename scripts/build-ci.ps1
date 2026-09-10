@@ -24,10 +24,14 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "$script failed (exit code $LASTEXITCODE)." }
     }
 
-    $installer = Join-Path $projectRoot "artifacts\installer\Weasel-RS-$version-x64-setup.exe"
-    $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-    $filename = Split-Path -Leaf $installer
-    Set-Content -LiteralPath "$installer.sha256" -Value "$hash  $filename" -Encoding utf8
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build-installer.ps1') -Mini
+    if ($LASTEXITCODE -ne 0) { throw 'Mini installer build failed.' }
+    foreach ($suffix in @('', '-mini')) {
+        $installer = Join-Path $projectRoot "artifacts\installer\Weasel-RS-$version-x64$suffix-setup.exe"
+        $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+        $filename = Split-Path -Leaf $installer
+        Set-Content -LiteralPath "$installer.sha256" -Value "$hash  $filename" -Encoding utf8
+    }
     if ($env:GITHUB_OUTPUT) {
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
     }

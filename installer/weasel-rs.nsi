@@ -408,6 +408,7 @@ SectionEnd
 
 SectionGroupEnd
 
+!ifndef MINI_INSTALLER
 Section /o "调试符号" SEC_SYMBOLS
   ClearErrors
   SetOutPath "$INSTDIR"
@@ -442,6 +443,7 @@ Section /o "调试符号" SEC_SYMBOLS
   ${EndIf}
 SectionEnd
 
+!endif
 ; Register only after every selected component has been copied successfully.
 Section "-注册与安装信息" SEC_REGISTER
   Call StopApplicationProcesses
@@ -528,7 +530,9 @@ FunctionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN} "小狼毫 RS 程序和所需运行库（必选）。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_LIBRIME} "Rime 输入引擎和共享方案数据（必选）。"
+!ifndef MINI_INSTALLER
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_SYMBOLS} "用于崩溃分析的调试符号。"
+!endif
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEMES} "选择安装的候选窗口主题。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_TEN} "Direct2D 候选栏，作为必选回退主题。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_ELEVEN} "XAML 候选栏，适用于 Windows 10 1903 及以上。"
