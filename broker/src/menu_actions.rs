@@ -5,6 +5,14 @@ use windows_strings::{HSTRING, PCWSTR, w};
 
 fn target(command: u32) -> Result<HSTRING, String> {
     match command {
+        SETTINGS => {
+            let paths = runtime_paths::RuntimePaths::discover().map_err(|e| e.to_string())?;
+            let executable = paths.executable_directory.join("weasel-settings.exe");
+            if !executable.is_file() {
+                return target(USER_DIRECTORY);
+            }
+            Ok(HSTRING::from(executable.as_os_str()))
+        }
         HELP => Ok(HSTRING::from("https://rime.im/docs/")),
         FORUM => Ok(HSTRING::from("https://rime.im/discuss/")),
         USER_DIRECTORY | PROGRAM_DIRECTORY | LOG_DIRECTORY => {

@@ -10,7 +10,9 @@ pub const FORUM: u32 = 1007;
 pub const RESTART: u32 = 1008;
 pub const ABOUT: u32 = 1009;
 pub const DIAGNOSTICS: u32 = 1010;
+pub const SETTINGS: u32 = 1011;
 pub const ITEMS: &[(u32, &str)] = &[
+    (SETTINGS, "设置 (&S)"),
     (USER_DIRECTORY, "用户文件夹 (&U)"),
     (PROGRAM_DIRECTORY, "程序文件夹 (&P)"),
     (LOG_DIRECTORY, "日志文件夹 (&L)"),
