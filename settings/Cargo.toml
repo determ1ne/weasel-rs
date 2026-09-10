@@ -1,6 +1,6 @@
 [package]
 name = "weasel-settings"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 # 原创源码继续采用 BSD；链接 Slint 后的组合产物遵循 GPLv3，见 README。
 license.workspace = true
