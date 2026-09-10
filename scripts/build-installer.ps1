@@ -25,6 +25,7 @@ try {
         'target\x86_64-pc-windows-msvc\release\weasel-broker.exe',
         'target\x86_64-pc-windows-msvc\release\weasel-server.exe',
         'target\x86_64-pc-windows-msvc\release\weasel-renderer.exe',
+        'target\x86_64-pc-windows-msvc\release\weasel-settings.exe',
         'target\x86_64-pc-windows-msvc\release\weasel_tip.dll',
         'target\i686-pc-windows-msvc\release\weasel_tip.dll',
         'artifacts\librime\dist\lib\rime.dll',
@@ -33,6 +34,7 @@ try {
         'target\x86_64-pc-windows-msvc\release\weasel_broker.pdb',
         'target\x86_64-pc-windows-msvc\release\weasel_server.pdb',
         'target\x86_64-pc-windows-msvc\release\weasel_renderer.pdb',
+        'target\x86_64-pc-windows-msvc\release\weasel_settings.pdb',
         'target\x86_64-pc-windows-msvc\release\weasel_tip.pdb',
         'target\i686-pc-windows-msvc\release\weasel_tip.pdb',
         'artifacts\vcredist\vc_redist.x86.exe',
@@ -42,6 +44,7 @@ try {
         'LICENSE',
         'THIRD-PARTY-LICENSES.txt',
         'THIRD-PARTY-GPL-3.0.txt',
+        'settings\LICENSE-NOTICE.txt',
         'installer\weasel-rs.nsi'
         'scripts\launch-broker.ps1'
     )

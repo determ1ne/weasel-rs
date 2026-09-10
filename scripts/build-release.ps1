@@ -37,6 +37,7 @@ try {
             '--target-dir', $targetDirectory
         )
         if ($buildTarget -eq 'x86_64-pc-windows-msvc') {
+            # 包含独立设置应用 weasel-settings；x86 仍只构建 TIP。
             $buildArguments += '--workspace'
             if ($SkipThemeWasm) {
                 $buildArguments += @('--exclude', 'weasel-theme-wasm')

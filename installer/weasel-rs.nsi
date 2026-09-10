@@ -248,6 +248,7 @@ FunctionEnd
   Delete /REBOOTOK "$INSTDIR\weasel-broker.exe"
   Delete /REBOOTOK "$INSTDIR\weasel-server.exe"
   Delete /REBOOTOK "$INSTDIR\weasel-renderer.exe"
+  Delete /REBOOTOK "$INSTDIR\weasel-settings.exe"
   Delete /REBOOTOK "$INSTDIR\x64\rime.dll"
   Delete /REBOOTOK "$INSTDIR\rime.dll"
   Delete /REBOOTOK "$INSTDIR\x64\weasel_tip.dll"
@@ -256,6 +257,7 @@ FunctionEnd
   Delete /REBOOTOK "$INSTDIR\weasel_broker.pdb"
   Delete /REBOOTOK "$INSTDIR\weasel_server.pdb"
   Delete /REBOOTOK "$INSTDIR\weasel_renderer.pdb"
+  Delete /REBOOTOK "$INSTDIR\weasel_settings.pdb"
   Delete /REBOOTOK "$INSTDIR\weasel_tip.pdb"
   Delete /REBOOTOK "$INSTDIR\x64\weasel_tip.pdb"
   Delete /REBOOTOK "$INSTDIR\rime.pdb"
@@ -266,6 +268,7 @@ FunctionEnd
   Delete /REBOOTOK "$INSTDIR\weasel.json"
   Delete /REBOOTOK "$INSTDIR\THIRD-PARTY-LICENSES.txt"
   Delete /REBOOTOK "$INSTDIR\THIRD-PARTY-GPL-3.0.txt"
+  Delete /REBOOTOK "$INSTDIR\SETTINGS-LICENSE.txt"
   Delete /REBOOTOK "$INSTDIR\Uninstall.exe"
   Delete /REBOOTOK "$INSTDIR\installer-runtime.ps1"
   Delete /REBOOTOK "$INSTDIR\weasel-installer-helper.exe"
@@ -350,6 +353,28 @@ Section "librime" SEC_LIBRIME
   ${EndIf}
 SectionEnd
 
+Section "设置应用" SEC_SETTINGS
+  ClearErrors
+  SetOutPath "$INSTDIR"
+  File "${X64_RELEASE}\weasel-settings.exe"
+  File /oname=SETTINGS-LICENSE.txt "${PROJECT_ROOT}\settings\LICENSE-NOTICE.txt"
+  ${If} ${Errors}
+    MessageBox MB_OK|MB_ICONSTOP "无法安装设置应用，请检查磁盘空间和文件权限。" /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+SectionEnd
+
+Section "-清理未选中的设置应用"
+  ; An upgrade must also honor deselection of a previously installed app.
+  ${IfNot} ${SectionIsSelected} ${SEC_SETTINGS}
+    Delete /REBOOTOK "$INSTDIR\weasel-settings.exe"
+    Delete /REBOOTOK "$INSTDIR\SETTINGS-LICENSE.txt"
+  ${EndIf}
+  ; Symbols are installed again below only when both components are selected.
+  Delete /REBOOTOK "$INSTDIR\weasel_settings.pdb"
+SectionEnd
+
 SectionGroup /e "候选主题" SEC_THEMES
 Section "ten（必选）" SEC_THEME_TEN
   SectionIn RO
@@ -421,6 +446,9 @@ Section /o "调试符号" SEC_SYMBOLS
   File "${X64_RELEASE}\weasel_broker.pdb"
   File "${X64_RELEASE}\weasel_server.pdb"
   File "${X64_RELEASE}\weasel_renderer.pdb"
+  ${If} ${SectionIsSelected} ${SEC_SETTINGS}
+    File "${X64_RELEASE}\weasel_settings.pdb"
+  ${EndIf}
   File "${PROJECT_ROOT}\artifacts\librime\dist\lib\rime.pdb"
   SetOutPath "$INSTDIR\x64"
   File "${X64_RELEASE}\weasel_tip.pdb"
@@ -536,6 +564,7 @@ FunctionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN} "小狼毫 RS 程序和所需运行库（必选）。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_LIBRIME} "Rime 输入引擎和共享方案数据（必选）。"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_SETTINGS} "图形化设置应用。"
 !ifndef MINI_INSTALLER
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_SYMBOLS} "用于崩溃分析的调试符号。"
 !endif

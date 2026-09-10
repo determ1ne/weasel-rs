@@ -21,6 +21,8 @@ Function ScanApplicationProcesses
       StrCpy $ProcessName "weasel-server.exe"
     ${ElseIf} $ProcessPass == 2
       StrCpy $ProcessName "weasel-renderer.exe"
+    ${ElseIf} $ProcessPass == 3
+      StrCpy $ProcessName "weasel-settings.exe"
     ${EndIf}
     StrCpy $ProcessHandle 0
     System::Call 'kernel32::CreateToolhelp32Snapshot(i 2, i 0) p.s'
@@ -80,7 +82,7 @@ Function ScanApplicationProcesses
     System::Free $ProcessEntry
     System::Call 'kernel32::CloseHandle(p $ProcessSnapshot)'
     IntOp $ProcessPass $ProcessPass + 1
-    IntCmp $ProcessPass 3 scan_done scan_pass scan_done
+    IntCmp $ProcessPass 4 scan_done scan_pass scan_done
   scan_entry_error:
     ${If} $ProcessHandle != 0
       System::Call 'kernel32::CloseHandle(p $ProcessHandle)'

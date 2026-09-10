@@ -1,0 +1,5 @@
+小狼毫RS 设置应用 / Weasel-RS Settings
+
+本组件按 GNU GPL version 3 分发。
+本项目原创源码仍采用 BSD-3-Clause；其他独立进程及主题遵循各自许可证。
+GNU GPLv3 全文见安装目录中的 THIRD-PARTY-GPL-3.0.txt。
