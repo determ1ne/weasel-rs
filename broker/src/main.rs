@@ -8,6 +8,7 @@ mod settings;
 mod settings_rpc;
 #[cfg(windows)]
 mod shortcut;
+mod shutdown;
 mod toast;
 
 #[cfg(windows)]
@@ -22,12 +23,28 @@ mod windows_tray;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Installer commands must not initialize the tray, console or managed children.
     let mut args = std::env::args_os().skip(1);
-    if args.next().as_deref() == Some(std::ffi::OsStr::new("--install-shortcut")) {
+    let command = args.next();
+    if command.as_deref() == Some(std::ffi::OsStr::new("--shutdown")) {
+        let directory = args.next().map(std::path::PathBuf::from).unwrap_or(
+            std::env::current_exe()?
+                .parent()
+                .ok_or("missing executable directory")?
+                .to_owned(),
+        );
+        if args.next().is_some() {
+            return Err("unexpected shutdown arguments".into());
+        }
+        return shutdown::run(&directory);
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("--install-shortcut")) {
         let path = args.next().ok_or("missing shortcut path")?;
         if args.next().is_some() {
             return Err("unexpected shortcut arguments".into());
         }
         return shortcut::install(std::path::Path::new(&path));
+    }
+    if command.is_some() {
+        return Err("unknown broker option".into());
     }
     if weasel_common::runtime_paths::is_development() {
         unsafe {

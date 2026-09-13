@@ -10,6 +10,13 @@ fn main() {
         .output(out.join("bindings.rs"))
         .input_default()
         .filters([
+            "Windows.Win32.FindWindowW",
+            "Windows.Win32.GetWindowThreadProcessId",
+            "Windows.Win32.OpenProcess",
+            "Windows.Win32.QueryFullProcessImageNameW",
+            "Windows.Win32.CloseHandle",
+            "Windows.Win32.PROCESS_QUERY_LIMITED_INFORMATION",
+            "Windows.Win32.SYNCHRONIZE",
             "Windows.Win32.CoCreateInstance",
             "Windows.Win32.CLSCTX_INPROC_SERVER",
             "Windows.Win32.ShellLink",
