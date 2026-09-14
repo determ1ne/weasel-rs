@@ -1,17 +1,29 @@
-# 小狼毫 RS
+# 小狼毫 RS 输入法
 
-小狼毫 RS （Weasel-RS） 是面向 Windows 的 Rime Rust 前端项目。
+基于 中州韵输入法引擎 / Rime Input Method Engine 的 Windows 输入法
 
-- `tip`：输入法 TIP
-- `broker`：组件协调与进程间通信
-- `server`：算法服务
-- `renderer`：候选词及输入界面渲染
-- `common`：各组件共享的库代码
-
-## 许可证
+项目主页：[https://rime.im](https://rime.im)
 
 项目使用 [BSD-3-Clause](LICENSE) 开源许可，
-第三方材料详见 [第三方许可清单](THIRD-PARTY-LICENSES.txt)。
+
+本项目基于诸多开源组件及技术，其许可清单见 [第三方许可清单](THIRD-PARTY-LICENSES.txt)。
+
+下载最新版本：[Releases](https://github.com/determ1ne/weasel-rs/releases)
+
+## 安装与使用
+
+软件适用于 Windows 10 (1809 版本及以上) ~ Windows 11，
+部分功能要求具有 Windows 10 (版本 1903) 或更新版本的操作系统。
+
+安装完成后，选择*输入法指示器*中的 Rime 图标，开始使用小狼毫进行输入。
+右键输入法状态指示器 / 系统*托盘区* Rime 图标，
+可通过设置 / 用户文件夹对小狼毫及 Rime 输入引擎进行自定义配置。
+
+Rime 配置决定输入法的输入方案与交互，见 [Rime定制指南](https://github.com/rime/home/wiki/CustomizationGuide) 进行配置。
+
+小狼毫配置决定输入法的外观、与操作系统和应用的交互方式，见程序附带【设置】应用或源码中的配置文件 schema 进行配置。
+
+小狼毫 RS **不兼容** 小狼毫 (C/C++版) 的配置文件 (weasel.yaml/weasel.custom.yaml) 。
 
 ## 构建
 
