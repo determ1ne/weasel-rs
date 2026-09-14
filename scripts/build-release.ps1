@@ -8,6 +8,22 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Resolve-Application {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    # Get-Command may return both a version manager's real executable and its
+    # shim. The invocation operator requires exactly one command path.
+    $command = Get-Command $Name -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+    if ($null -eq $command -or [string]::IsNullOrWhiteSpace($command.Source)) {
+        throw "Unable to resolve application: $Name"
+    }
+    $command.Source
+}
+
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $targetDirectory = Join-Path $projectRoot 'target'
 $buildTargets = @('x86_64-pc-windows-msvc', 'i686-pc-windows-msvc')
@@ -17,8 +33,8 @@ try {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         throw 'This build script requires Windows and the MSVC build tools.'
     }
-    $cargoCommand = (Get-Command cargo -CommandType Application -ErrorAction Stop).Source
-    $rustupCommand = (Get-Command rustup -CommandType Application -ErrorAction Stop).Source
+    $cargoCommand = Resolve-Application 'cargo'
+    $rustupCommand = Resolve-Application 'rustup'
     $installedTargets = @(& $rustupCommand target list --installed)
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to list installed Rust targets (exit code $LASTEXITCODE)."
@@ -58,7 +74,7 @@ try {
     $releaseDirectory = Join-Path $targetDirectory 'x86_64-pc-windows-msvc\release'
     $themeDirectory = Join-Path $releaseDirectory 'themes'
     $null = New-Item -ItemType Directory -Path $themeDirectory -Force
-    $nodeCommand = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+    $nodeCommand = Resolve-Application 'node'
     $metadataPackager = Join-Path $PSScriptRoot 'package-theme-metadata.mjs'
     foreach ($theme in @('abc', 'eleven')) {
         & $nodeCommand $metadataPackager --native (Join-Path $projectRoot "themes\$theme\src\config.json") (Join-Path $themeDirectory "weasel_theme_$theme.settings.json")
@@ -96,7 +112,7 @@ try {
                     $moduleName = $libraries[0].name.Replace('-', '_') + '.wasm'
                     $output = Join-Path $guestTarget "wasm32-unknown-unknown\release\$moduleName"
                 } else {
-                    $npmCommand = (Get-Command npm.cmd -CommandType Application -ErrorAction Stop).Source
+                    $npmCommand = Resolve-Application 'npm.cmd'
                     & $npmCommand ci --no-audit --no-fund
                     if ($LASTEXITCODE -ne 0) { throw "npm ci failed for $($guest.Name)." }
                     & $npmCommand run build
