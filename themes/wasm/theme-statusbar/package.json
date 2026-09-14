@@ -1,0 +1,17 @@
+{
+  "name": "weasel-theme-statusbar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "scripts": {
+    "build": "node generate-defaults.mjs && asc assembly/index.ts --target release && node ../../../scripts/package-theme-metadata.mjs --wasm build/statusbar.wasm config.json",
+    "build:debug": "node generate-defaults.mjs && asc assembly/index.ts --target debug && node ../../../scripts/package-theme-metadata.mjs --wasm build/statusbar-debug.wasm config.json"
+  },
+  "dependencies": {
+    "@weasel-rs/sdk-as": "file:../sdk-as"
+  },
+  "devDependencies": {
+    "assemblyscript": "0.28.20"
+  }
+}

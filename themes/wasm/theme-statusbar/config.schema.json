@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "config.schema.json",
+  "title": "Status Bar Theme",
+  "type": "object",
+  "properties": {
+    "$schema": { "type": "string", "default": "config.schema.json" },
+    "position_x": { "type": "number", "minimum": -8192, "maximum": 8192, "default": 24 },
+    "position_y": { "type": "number", "minimum": -8192, "maximum": 8192, "default": 24 },
+    "width": { "type": "number", "minimum": 320, "maximum": 800, "default": 452 },
+    "font_face": { "type": "string", "minLength": 1, "maxLength": 128, "default": "Microsoft YaHei UI" },
+    "font_size": { "type": "number", "minimum": 12, "maximum": 28, "default": 18 }
+  },
+  "additionalProperties": false
+}

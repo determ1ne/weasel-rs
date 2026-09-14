@@ -94,6 +94,10 @@ message RenderSnapshot {
   uint64 sequence = 12;
   // Present only when preedit is displayed outside the host application.
   RenderPreedit preedit = 13;
+  // Presentation ownership and mode are also sent without candidate content,
+  // allowing resident themes to act as an input-mode indicator.
+  bool active = 14;
+  optional bool ascii_mode = 15;
 }
 
 message RenderPreedit {

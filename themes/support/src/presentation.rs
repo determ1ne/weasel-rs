@@ -37,6 +37,38 @@ pub fn preview_position(width: i32, height: i32) -> (i32, i32) {
     }
 }
 
+/// Place a resident window at a stable DIP offset from the primary monitor's
+/// work-area origin. The result is clamped so configuration cannot strand the
+/// complete window outside the usable desktop.
+pub fn fixed_position(x: f32, y: f32, width: i32, height: i32, dpi: u32) -> (i32, i32) {
+    unsafe {
+        let origin = RECT {
+            left: 0,
+            top: 0,
+            right: 1,
+            bottom: 1,
+        };
+        let monitor = MonitorFromRect(&origin, MONITOR_DEFAULTTONEAREST as u32);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if monitor.0.is_null() || !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return (x.round() as i32, y.round() as i32);
+        }
+        let scale = dpi.max(1) as f32 / 96.0;
+        let requested_x = info.rcWork.left.saturating_add((x * scale).round() as i32);
+        let requested_y = info.rcWork.top.saturating_add((y * scale).round() as i32);
+        clamp_fixed(requested_x, requested_y, width, height, &info.rcWork)
+    }
+}
+
+fn clamp_fixed(x: i32, y: i32, width: i32, height: i32, work: &RECT) -> (i32, i32) {
+    let max_x = work.right.saturating_sub(width).max(work.left);
+    let max_y = work.bottom.saturating_sub(height).max(work.top);
+    (x.clamp(work.left, max_x), y.clamp(work.top, max_y))
+}
+
 pub fn popup_position(anchor: &RenderRect, width: i32, height: i32) -> (i32, i32) {
     unsafe {
         let rect = RECT {
@@ -151,5 +183,17 @@ mod tests {
         assert!(is_visible(&view));
         view.preedit = None;
         assert!(!is_visible(&view));
+    }
+
+    #[test]
+    fn fixed_position_is_clamped_to_the_work_area() {
+        let work = RECT {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1040,
+        };
+        assert_eq!(clamp_fixed(-1800, 40, 450, 72, &work), (-1800, 40));
+        assert_eq!(clamp_fixed(500, -10, 450, 72, &work), (-450, 0));
     }
 }

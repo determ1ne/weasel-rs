@@ -1,0 +1,13 @@
+{
+  "targets": {
+    "debug": {
+      "outFile": "build/statusbar-debug.wasm",
+      "debug": true
+    },
+    "release": {
+      "outFile": "build/statusbar.wasm",
+      "optimizeLevel": 3,
+      "shrinkLevel": 0
+    }
+  }
+}

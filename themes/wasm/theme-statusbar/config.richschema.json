@@ -1,0 +1,43 @@
+{
+  "formatVersion": 1,
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "config.schema.json",
+    "title": "经典桌面状态栏",
+    "description": "固定在桌面的蓝色双层输入状态栏；中文模式常驻，英文模式隐藏。",
+    "type": "object",
+    "properties": {
+      "$schema": { "type": "string", "title": "Schema" },
+      "position_x": {
+        "type": "number", "minimum": -8192, "maximum": 8192,
+        "title": "水平位置", "description": "相对主显示器工作区左侧的 DIP 距离"
+      },
+      "position_y": {
+        "type": "number", "minimum": -8192, "maximum": 8192,
+        "title": "垂直位置", "description": "相对主显示器工作区顶部的 DIP 距离"
+      },
+      "width": {
+        "type": "number", "minimum": 320, "maximum": 800,
+        "title": "状态栏宽度", "description": "参考图默认宽度为 452 DIP"
+      },
+      "font_face": {
+        "type": "string", "minLength": 1, "maxLength": 128,
+        "title": "字体"
+      },
+      "font_size": {
+        "type": "number", "minimum": 12, "maximum": 28,
+        "title": "字号"
+      }
+    },
+    "additionalProperties": false
+  },
+  "ui": {
+    "fields": {
+      "/position_x": { "order": 10 },
+      "/position_y": { "order": 20 },
+      "/width": { "order": 30 },
+      "/font_face": { "order": 40 },
+      "/font_size": { "order": 50 }
+    }
+  }
+}

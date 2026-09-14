@@ -276,9 +276,10 @@ async fn serve(paths: RuntimePaths) -> Result<(), String> {
         };
     let (publisher, snapshots) = renderer_bridge::RendererPublisher::channel();
     let capability = publisher.clone();
-    let eager_renderer = settings
-        .as_ref()
-        .is_some_and(|s| s.needs_external_preedit());
+    let eager_renderer = settings.as_ref().is_some_and(|s| {
+        s.needs_external_preedit()
+            || s.get::<String>(".theme").ok().flatten().as_deref() == Some("wasm")
+    });
     let mut engine = worker::Worker::spawn(engine::QUEUE_CAPACITY, move || {
         engine::Engine::new(paths, publisher, settings)
     })?;

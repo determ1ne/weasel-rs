@@ -13,6 +13,8 @@ pub fn view(snapshot: &RenderSnapshot, content_id: u64) -> CandidateView {
                 cursor: p.cursor_utf16,
             }),
         content_id,
+        active: snapshot.active,
+        ascii_mode: snapshot.ascii_mode,
         visible: snapshot.visible,
         anchor: snapshot.anchor.as_ref().map(|r| Anchor {
             left: r.left,
@@ -56,6 +58,7 @@ pub fn events(
             }
             UiAction::NavigatePrevious if previous => (RendererEventAction::NavigatePrevious, 0),
             UiAction::NavigateNext if next => (RendererEventAction::NavigateNext, 0),
+            UiAction::Dismiss => (RendererEventAction::Dismiss, 0),
             UiAction::OpenEmojiPanel => (RendererEventAction::OpenEmojiPanel, 0),
             _ => return,
         };

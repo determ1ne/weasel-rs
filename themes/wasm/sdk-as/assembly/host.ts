@@ -57,6 +57,8 @@ export const ACTION_PREVIOUS: i32 = 1;
 export const ACTION_NEXT: i32 = 2;
 /** 打开表情面板。 */
 export const ACTION_EMOJI: i32 = 3;
+/** 取消当前 composition。 */
+export const ACTION_DISMISS: i32 = 4;
 
 // ── 鼠标类型 ─────────────────────────────────────────────────────
 export const MOUSE_DOWN: i32 = 0;
@@ -101,3 +103,15 @@ export declare function set_text_glow(radius: f32, color: i32): void;
 @external("weasel", "set_backdrop")
 export declare function set_backdrop(enabled: i32, tint: i32, blur_sigma: f32,
   backdrop_balance: f32, afterglow_balance: f32, color_balance: f32, fallback_color: i32): void;
+
+/** 控制 resident 主题窗口是否可见；普通主题无需调用。 */
+@external("weasel", "set_visible")
+export declare function set_visible(visible: i32): void;
+
+/** 固定在主显示器工作区内；x/y 是从工作区左上角起算的 DIP。 */
+@external("weasel", "set_fixed_position")
+export declare function set_fixed_position(x: f32, y: f32): void;
+
+/** 从当前鼠标按下位置开始移动固定窗口；宿主负责捕获和跨屏坐标。 */
+@external("weasel", "begin_drag")
+export declare function begin_drag(): void;

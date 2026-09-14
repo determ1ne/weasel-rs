@@ -18,8 +18,8 @@ use crate::appearance::{self};
 use crate::d2d_bindings::*;
 use crate::presentation::{is_visible, popup_position, preview_position};
 use crate::protocol::{
-    ACTION_EMOJI, ACTION_ITEM, ACTION_NEXT, ACTION_PREVIOUS, DrawCommand, MOUSE_DOWN, MOUSE_LEAVE,
-    MOUSE_MOVE, MOUSE_UP,
+    ACTION_DISMISS, ACTION_EMOJI, ACTION_ITEM, ACTION_NEXT, ACTION_PREVIOUS, DrawCommand,
+    MOUSE_DOWN, MOUSE_LEAVE, MOUSE_MOVE, MOUSE_UP, PlacementStyle,
 };
 use crate::runtime::{WasmRuntime, now_ms};
 use crate::theme_api::{
@@ -59,9 +59,51 @@ impl Recovery {
     }
 }
 
+#[derive(Clone, Copy)]
+struct DragState {
+    cursor_x: i32,
+    cursor_y: i32,
+    window_x: i32,
+    window_y: i32,
+}
+
 /// DIP → 物理像素（96 基），最小 1px。
 fn pixels(dip: f32, dpi: u32) -> i32 {
     (dip * dpi.max(1) as f32 / 96.0).ceil().max(1.0) as i32
+}
+
+/// Keep a manually moved window reachable while allowing it to cross monitors.
+fn clamp_to_nearest_work_area(x: i32, y: i32, width: i32, height: i32) -> (i32, i32) {
+    unsafe {
+        let requested = RECT {
+            left: x,
+            top: y,
+            right: x.saturating_add(width.max(1)),
+            bottom: y.saturating_add(height.max(1)),
+        };
+        let monitor = MonitorFromRect(&requested, MONITOR_DEFAULTTONEAREST as u32);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if monitor.0.is_null() || !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return (x, y);
+        }
+        let max_x = info
+            .rcWork
+            .right
+            .saturating_sub(width)
+            .max(info.rcWork.left);
+        let max_y = info
+            .rcWork
+            .bottom
+            .saturating_sub(height)
+            .max(info.rcWork.top);
+        (
+            x.clamp(info.rcWork.left, max_x),
+            y.clamp(info.rcWork.top, max_y),
+        )
+    }
 }
 
 /// 动作 id → 高层 `UiAction`（越界 id 丢弃）。
@@ -71,6 +113,7 @@ fn ui_action(action: i32, index: i32) -> Option<UiAction> {
         ACTION_PREVIOUS => UiAction::NavigatePrevious,
         ACTION_NEXT => UiAction::NavigateNext,
         ACTION_EMOJI => UiAction::OpenEmojiPanel,
+        ACTION_DISMISS => UiAction::Dismiss,
         _ => return None,
     })
 }
@@ -105,6 +148,9 @@ pub struct Window {
     error: RefCell<Option<String>>,
     recovery: RefCell<Recovery>,
     positioning: Cell<bool>,
+    drag: Cell<Option<DragState>>,
+    /// Physical screen position chosen by the user for this process lifetime.
+    manual_position: Cell<Option<(i32, i32)>>,
     panel: Cell<crate::protocol::PanelStyle>,
     backdrop: Cell<crate::protocol::BackdropStyle>,
     preview: bool,
@@ -133,6 +179,8 @@ impl Window {
             error: RefCell::new(None),
             recovery: RefCell::new(Recovery::default()),
             positioning: Cell::new(false),
+            drag: Cell::new(None),
+            manual_position: Cell::new(None),
             panel: Cell::new(Default::default()),
             backdrop: Cell::new(Default::default()),
             preview,
@@ -161,6 +209,68 @@ impl Window {
         }
     }
 
+    fn begin_drag(&self) -> windows_core::Result<bool> {
+        if !matches!(
+            self.app.borrow().runtime.placement(),
+            PlacementStyle::Fixed { .. }
+        ) {
+            return Ok(false);
+        }
+        let mut cursor = POINT::default();
+        let mut rect = RECT::default();
+        unsafe {
+            GetCursorPos(&mut cursor).ok()?;
+            GetWindowRect(self.hwnd.get(), &mut rect).ok()?;
+            self.manual_position.set(Some((rect.left, rect.top)));
+            self.drag.set(Some(DragState {
+                cursor_x: cursor.x,
+                cursor_y: cursor.y,
+                window_x: rect.left,
+                window_y: rect.top,
+            }));
+            let _ = SetCapture(self.hwnd.get());
+        }
+        Ok(true)
+    }
+
+    fn move_drag(&self) -> windows_core::Result<bool> {
+        let Some(drag) = self.drag.get() else {
+            return Ok(false);
+        };
+        let mut cursor = POINT::default();
+        let mut rect = RECT::default();
+        unsafe {
+            GetCursorPos(&mut cursor).ok()?;
+            GetWindowRect(self.hwnd.get(), &mut rect).ok()?;
+        }
+        let x = drag
+            .window_x
+            .saturating_add(cursor.x.saturating_sub(drag.cursor_x));
+        let y = drag
+            .window_y
+            .saturating_add(cursor.y.saturating_sub(drag.cursor_y));
+        let (x, y) = clamp_to_nearest_work_area(
+            x,
+            y,
+            (rect.right - rect.left).max(1),
+            (rect.bottom - rect.top).max(1),
+        );
+        self.manual_position.set(Some((x, y)));
+        unsafe {
+            SetWindowPos(
+                self.hwnd.get(),
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                0,
+                0,
+                (SWP_NOSIZE | SWP_NOACTIVATE) as u32,
+            )
+            .ok()?;
+        }
+        Ok(true)
+    }
+
     /// 按主题声明尺寸与锚点定位窗口（DPI 变化时有限次重算）。
     fn position(&self) -> windows_core::Result<()> {
         if self.positioning.replace(true) {
@@ -177,26 +287,42 @@ impl Window {
             let dpi = self.dpi.get();
             let bounds = {
                 let app = self.app.borrow();
-                app.anchor.as_ref().filter(|a| a.valid).and_then(|anchor| {
-                    let (dip_w, dip_h) = app.size;
-                    if dip_w <= 0.0 || dip_h <= 0.0 {
-                        return None;
-                    }
+                let (dip_w, dip_h) = app.size;
+                if dip_w <= 0.0 || dip_h <= 0.0 {
+                    None
+                } else {
                     let edge = crate::geometry::insets(&app.runtime.panel_style());
                     let width = pixels(dip_w + edge.left + edge.right, dpi);
                     let height = pixels(dip_h + edge.top + edge.bottom, dpi);
-                    Some(if self.preview {
-                        preview_position(width, height)
+                    let position = if let Some((x, y)) = self.manual_position.get() {
+                        Some(clamp_to_nearest_work_area(x, y, width, height))
+                    } else if self.preview {
+                        Some(preview_position(width, height))
                     } else {
-                        let (x, y) = popup_position(anchor, pixels(dip_w, dpi), pixels(dip_h, dpi));
-                        // Anchor belongs to the content, not the shadow-expanded surface.
-                        (
-                            x - (edge.left * dpi as f32 / 96.0).round() as i32,
-                            y - (edge.top * dpi as f32 / 96.0).round() as i32,
-                        )
-                    })
-                    .map(|(x, y)| (x, y, width, height))
-                })
+                        match app.runtime.placement() {
+                            PlacementStyle::Fixed { x, y } => Some(
+                                crate::presentation::fixed_position(x, y, width, height, dpi),
+                            ),
+                            PlacementStyle::Anchored => app
+                                .anchor
+                                .as_ref()
+                                .filter(|anchor| anchor.valid)
+                                .map(|anchor| {
+                                    let (x, y) = popup_position(
+                                        anchor,
+                                        pixels(dip_w, dpi),
+                                        pixels(dip_h, dpi),
+                                    );
+                                    // Anchor belongs to the content, not the shadow-expanded surface.
+                                    (
+                                        x - (edge.left * dpi as f32 / 96.0).round() as i32,
+                                        y - (edge.top * dpi as f32 / 96.0).round() as i32,
+                                    )
+                                }),
+                        }
+                    };
+                    position.map(|(x, y)| (x, y, width, height))
+                }
             };
             let Some((x, y, width, height)) = bounds else {
                 return Ok(());
@@ -275,6 +401,7 @@ impl Window {
                             .is_some_and(|v| v.enabled),
                         UiAction::NavigatePrevious => content.last.can_page_previous,
                         UiAction::NavigateNext => content.last.can_page_next,
+                        UiAction::Dismiss => true,
                         UiAction::OpenEmojiPanel => true,
                     };
                     let events = content.events.clone();
@@ -341,6 +468,24 @@ impl Window {
         Ok(())
     }
 
+    fn sync_visibility(&self) {
+        let visible = self.app.borrow().runtime.visible();
+        unsafe {
+            let _ = ShowWindow(
+                self.hwnd.get(),
+                if visible {
+                    if self.preview {
+                        SW_SHOW
+                    } else {
+                        SW_SHOWNOACTIVATE
+                    }
+                } else {
+                    SW_HIDE
+                },
+            );
+        }
+    }
+
     /// 渲染入口：同内容快照只重定位；新快照交给 wasm 重排。
     pub(crate) fn render(
         &self,
@@ -349,9 +494,10 @@ impl Window {
     ) -> Result<(), String> {
         let moved = {
             let app = self.app.borrow();
-            app.content
-                .as_ref()
-                .is_some_and(|c| is_visible(snapshot) && same_content(&c.last, snapshot))
+            app.content.as_ref().is_some_and(|c| {
+                (is_visible(snapshot) || (app.runtime.resident() && snapshot.active))
+                    && same_content(&c.last, snapshot)
+            })
         };
         if moved {
             {
@@ -366,7 +512,11 @@ impl Window {
             return self.health();
         }
         self.health()?;
-        if !is_visible(snapshot) {
+        let accepted = {
+            let app = self.app.borrow();
+            is_visible(snapshot) || (app.runtime.resident() && snapshot.active)
+        };
+        if !accepted {
             self.hide();
             return Ok(());
         }
@@ -403,22 +553,14 @@ impl Window {
             )
         };
         self.apply_side_effects(&actions, frame_requested, notes)?;
-        unsafe {
-            let _ = ShowWindow(
-                self.hwnd.get(),
-                if self.preview {
-                    SW_SHOW
-                } else {
-                    SW_SHOWNOACTIVATE
-                },
-            );
-        }
+        self.sync_visibility();
         self.invalidate();
         self.health()
     }
 
     pub(crate) fn hide(&self) {
         let had_content = self.app.borrow_mut().content.take().is_some();
+        self.drag.set(None);
         self.cancel();
         let mut app = self.app.borrow_mut();
         if had_content {
@@ -472,6 +614,7 @@ impl Window {
             }
         };
         self.apply_side_effects(&actions, frame_requested, notes)?;
+        self.sync_visibility();
         self.invalidate();
         self.health()
     }
@@ -484,7 +627,7 @@ impl Window {
         let edge = crate::geometry::insets(&self.app.borrow().runtime.panel_style());
         let x = (param.0 as u16 as i16) as f32 * 96.0 / dpi - edge.left;
         let y = ((param.0 >> 16) as u16 as i16) as f32 * 96.0 / dpi - edge.top;
-        let (actions, frame_requested, notes, changed) = {
+        let (actions, frame_requested, notes, changed, drag_requested) = {
             let mut app = self.app.borrow_mut();
             app.runtime.mouse(kind, x, y)?;
             let commands = app.runtime.take_commands();
@@ -499,16 +642,21 @@ impl Window {
                 app.runtime.take_frame_request(),
                 app.runtime.take_notes(),
                 changed,
+                app.runtime.take_drag_request(),
             )
         };
         if kind == MOUSE_DOWN {
-            unsafe {
-                let _ = SetCapture(self.hwnd.get());
+            let dragging = drag_requested && self.begin_drag().map_err(|e| e.to_string())?;
+            if !dragging {
+                unsafe {
+                    let _ = SetCapture(self.hwnd.get());
+                }
             }
         } else if kind == MOUSE_UP {
             self.cancel();
         }
         self.apply_side_effects(&actions, frame_requested, notes)?;
+        self.sync_visibility();
         if changed {
             self.invalidate();
         }
@@ -535,6 +683,7 @@ impl Window {
             )
         };
         self.apply_side_effects(&actions, frame_requested, notes)?;
+        self.sync_visibility();
         self.invalidate();
         Ok(())
     }
@@ -747,7 +896,9 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
                 WM_DPICHANGED => {
                     window.dpi.set((wp.0 as u32 & 0xffff).max(1));
-                    window.cancel();
+                    if window.drag.get().is_none() {
+                        window.cancel();
+                    }
                     if let Err(e) = window.position() {
                         window.fail(e);
                     }
@@ -777,12 +928,30 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     return LRESULT(0);
                 }
                 WM_LBUTTONUP => {
+                    if window.drag.get().is_some() {
+                        if let Err(e) = window.move_drag() {
+                            window.fail(e);
+                        }
+                        window.drag.set(None);
+                        window.cancel();
+                        return LRESULT(0);
+                    }
                     if let Err(e) = window.mouse(MOUSE_UP, lp) {
                         window.fail(e);
                     }
                     return LRESULT(0);
                 }
                 WM_MOUSEMOVE => {
+                    match window.move_drag() {
+                        Ok(true) => return LRESULT(0),
+                        Ok(false) => {}
+                        Err(e) => {
+                            window.drag.set(None);
+                            window.cancel();
+                            window.fail(e);
+                            return LRESULT(0);
+                        }
+                    }
                     if let Err(e) = window.mouse(MOUSE_MOVE, lp) {
                         window.fail(e);
                     }
@@ -795,7 +964,13 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     let _ = TrackMouseEvent(&mut track);
                     return LRESULT(0);
                 }
+                WM_MOUSELEAVE if window.drag.get().is_some() => {
+                    // Capture keeps delivering movement outside the old window
+                    // rectangle; a pending TrackMouseEvent must not end the drag.
+                    return LRESULT(0);
+                }
                 WM_MOUSELEAVE | WM_CAPTURECHANGED | WM_CANCELMODE => {
+                    window.drag.set(None);
                     window.cancel();
                     if let Err(e) = window.mouse(MOUSE_LEAVE, lp) {
                         window.fail(e);

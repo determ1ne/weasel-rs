@@ -138,6 +138,8 @@ pub(crate) fn render_snapshot(
         sequence: 0, // Assigned only when published; independent of input revision.
         session_id,
         revision,
+        active: true,
+        ascii_mode: response.ascii_mode,
         visible: (!response.candidates.is_empty()
             || (response.external_preedit && response.composing))
             && anchor.valid,

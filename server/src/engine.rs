@@ -438,6 +438,9 @@ impl Engine {
                         if response.state_updated {
                             client.last_response = response.clone();
                         }
+                        if response.ascii_mode.is_some() {
+                            client.last_response.ascii_mode = response.ascii_mode;
+                        }
                         client.last_response.token = client.route.token.clone();
                         let snapshot = (response.state_updated || focus_changed).then(|| {
                             render_snapshot(
@@ -546,6 +549,9 @@ impl Engine {
                         response.revision = client.revision;
                         if response.state_updated {
                             client.last_response = response.clone();
+                        }
+                        if response.ascii_mode.is_some() {
+                            client.last_response.ascii_mode = response.ascii_mode;
                         }
                         // Focus acknowledgements must not replay the previous commit.
                         client.last_response.token = client.route.token.clone();

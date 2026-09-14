@@ -39,10 +39,17 @@ impl From<Result<Box<dyn ThemeBackend>, String>> for ThemeCreation {
 pub struct ThemeCapabilities {
     /// Whether this backend can display preedit outside the host application.
     pub preedit: bool,
+    /// Whether this backend consumes focused, mode-only snapshots and may keep
+    /// a window visible when there is no preedit or candidate list.
+    #[serde(default)]
+    pub resident: bool,
 }
 
 impl ThemeCapabilities {
-    pub const CANDIDATES_ONLY: Self = Self { preedit: false };
+    pub const CANDIDATES_ONLY: Self = Self {
+        preedit: false,
+        resident: false,
+    };
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -68,6 +75,11 @@ pub struct CandidateView {
     /// Opaque presentation identity. Changes on content or routing changes,
     /// but not on geometry-only updates. Not an RPC revision or session ID.
     pub content_id: u64,
+    /// The input context currently owns presentation. Resident themes use this
+    /// to hide when the input service is no longer active in an editor.
+    pub active: bool,
+    /// Current Rime ASCII mode. None means the engine could not determine it.
+    pub ascii_mode: Option<bool>,
     pub visible: bool,
     pub anchor: Option<Anchor>,
     pub items: Vec<CandidateItem>,
@@ -80,6 +92,8 @@ pub struct CandidateView {
 
 pub fn same_content(a: &CandidateView, b: &CandidateView) -> bool {
     a.content_id == b.content_id
+        && a.active == b.active
+        && a.ascii_mode == b.ascii_mode
         && a.preedit == b.preedit
         && a.items == b.items
         && a.selected_index == b.selected_index
@@ -121,6 +135,7 @@ pub enum UiAction {
     ItemInvoked(u32),
     NavigatePrevious,
     NavigateNext,
+    Dismiss,
     OpenEmojiPanel,
 }
 

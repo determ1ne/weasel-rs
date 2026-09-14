@@ -1,5 +1,5 @@
 // Host snapshot adapter. No JSON parser or fixed-address transfer arena.
-import { candidate as data, OBJECT, NUMBER } from "./data";
+import { candidate as data, BOOLEAN, OBJECT, NUMBER } from "./data";
 
 export class ViewItem {
   primary: string = "";
@@ -12,6 +12,9 @@ export class View {
   preeditCursor: i32 = 0;
   hasPreedit: bool = false;
   contentId: i64 = 0;
+  active: bool = false;
+  hasAsciiMode: bool = false;
+  asciiMode: bool = true;
   visible: bool = true;
   anchorValid: bool = false;
   anchorLeft: i32 = 0;
@@ -34,6 +37,9 @@ export function readView(): View | null {
   if (data.kind("") != OBJECT) return null;
   const v = new View();
   v.contentId = data.integer("/content_id");
+  v.active = data.boolean("/active");
+  v.hasAsciiMode = data.kind("/ascii_mode") == BOOLEAN;
+  if (v.hasAsciiMode) v.asciiMode = data.boolean("/ascii_mode");
   v.visible = data.boolean("/visible");
   v.hasPreedit = data.kind("/preedit") == OBJECT;
   if (v.hasPreedit) {

@@ -259,6 +259,7 @@ impl Drop for Apartment {
 
 struct Presentation {
     theme_name: &'static str,
+    capabilities: crate::theme_api::ThemeCapabilities,
     backend: Box<dyn ThemeBackend>,
     events: EventSender,
     last: Option<RenderSnapshot>,
@@ -266,6 +267,10 @@ struct Presentation {
 }
 
 impl Presentation {
+    fn should_render(&self, view: &crate::theme_api::CandidateView) -> bool {
+        crate::presentation::is_visible(view) || (self.capabilities.resident && view.active)
+    }
+
     fn hide(&mut self) {
         self.backend.hide();
         crate::notifications::drain(self.theme_name, self.backend.as_mut());
@@ -289,7 +294,7 @@ impl Presentation {
                         .ok_or("presentation identity exhausted")?;
                 }
                 let view = crate::theme_adapter::view(&snapshot, self.content_id);
-                if crate::presentation::is_visible(&view) {
+                if self.should_render(&view) {
                     let events =
                         crate::theme_adapter::events(owner, &snapshot, self.events.sender.clone());
                     {
@@ -319,7 +324,7 @@ impl Presentation {
         if current_owner == Some(self.events.owner) {
             if let Some(snapshot) = &self.last {
                 let view = crate::theme_adapter::view(snapshot, self.content_id);
-                if crate::presentation::is_visible(&view) {
+                if self.should_render(&view) {
                     let events = crate::theme_adapter::events(
                         self.events.owner,
                         snapshot,
@@ -371,6 +376,7 @@ fn run_ui(
         ));
         let mut presentation = Presentation {
             theme_name: registration.name(),
+            capabilities: registration.capabilities(),
             backend,
             events,
             last: None,
@@ -594,6 +600,7 @@ mod tests {
         let (sender, _) = tokio::sync::mpsc::channel(1);
         let mut ui = Presentation {
             theme_name: "test",
+            capabilities: crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY,
             backend: Box::new(FakeBackend(calls.clone())),
             events: EventSender { owner: 0, sender },
             last: None,

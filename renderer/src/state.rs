@@ -110,6 +110,8 @@ pub fn validate(snapshot: &RenderSnapshot) -> Result<(), String> {
 
 pub fn same_content(a: &RenderSnapshot, b: &RenderSnapshot) -> bool {
     a.session_id == b.session_id
+        && a.active == b.active
+        && a.ascii_mode == b.ascii_mode
         && a.preedit == b.preedit
         && a.token == b.token
         && a.revision == b.revision

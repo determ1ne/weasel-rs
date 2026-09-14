@@ -25,6 +25,8 @@ pub const EXPORT_FRAME: &str = "frame";
 pub const EXPORT_HIDE: &str = "hide";
 /// `refresh(dark)`，外观变化。
 pub const EXPORT_REFRESH: &str = "refresh";
+/// Optional `probe_resident() -> 0|1`. Missing means an ordinary anchored theme.
+pub const EXPORT_PROBE_RESIDENT: &str = "probe_resident";
 
 // ── host 导入（wasm → host 调用）────────────────────────────────────
 /// `measure_text(ptr, len, font, size) -> f32`，返回文本宽度（DIP）。
@@ -46,6 +48,12 @@ pub const IMPORT_SET_SIZE: &str = "set_size";
 /// Microsoft's DropShadow.BlurRadius reference does not specify a maximum.
 pub const IMPORT_SET_PANEL: &str = "set_panel";
 pub const IMPORT_SET_BACKDROP: &str = "set_backdrop";
+/// `set_visible(0|1)` lets a resident guest hide without destroying its state.
+pub const IMPORT_SET_VISIBLE: &str = "set_visible";
+/// `set_fixed_position(x, y)` uses DIP offsets from the primary work area.
+pub const IMPORT_SET_FIXED_POSITION: &str = "set_fixed_position";
+/// `begin_drag()` asks the host to move a fixed window from this pointer-down.
+pub const IMPORT_BEGIN_DRAG: &str = "begin_drag";
 
 /// Persistent background material; weights form a convex RGB blend.
 /// The host owns GPU resources and supplies an opaque fallback when unavailable.
@@ -94,6 +102,8 @@ pub const ACTION_PREVIOUS: i32 = 1;
 pub const ACTION_NEXT: i32 = 2;
 /// 打开表情面板。
 pub const ACTION_EMOJI: i32 = 3;
+/// Dismiss the current composition without activating the renderer window.
+pub const ACTION_DISMISS: i32 = 4;
 
 // ── 鼠标类型 ─────────────────────────────────────────────────────────
 pub const MOUSE_DOWN: i32 = 0;
@@ -126,6 +136,18 @@ pub struct PanelStyle {
     pub offset_x: f32,
     pub offset_y: f32,
     pub color: u32,
+}
+
+/// Native placement policy selected by a guest. Anchored is the normal
+/// candidate-window behavior; Fixed is relative to the primary work area.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum PlacementStyle {
+    #[default]
+    Anchored,
+    Fixed {
+        x: f32,
+        y: f32,
+    },
 }
 
 /// 单条绘制命令；坐标为 DIP，颜色为 0xAARRGGBB。

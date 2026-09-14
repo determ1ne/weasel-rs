@@ -18,11 +18,13 @@ use wasmtime::{
 };
 
 use crate::protocol::{
-    ABI_VERSION, ACTION_EMOJI, ACTION_ITEM, DrawCommand, ERR_OK, EXPORT_ABI_VERSION, EXPORT_FRAME,
-    EXPORT_HIDE, EXPORT_INIT, EXPORT_MOUSE, EXPORT_REFRESH, EXPORT_RENDER, IMPORT_ABORT,
-    IMPORT_ABORT_MODULE, IMPORT_DRAW_TEXT, IMPORT_FILL_RECT, IMPORT_FILL_ROUNDED_RECT, IMPORT_LOG,
-    IMPORT_MEASURE_TEXT, IMPORT_MODULE, IMPORT_REQUEST_FRAME, IMPORT_SEND_ACTION, IMPORT_SET_PANEL,
-    IMPORT_SET_SIZE, IMPORT_STROKE_RECT, IMPORT_TIME_MS, MAX_STRING_BYTES, MEMORY, PanelStyle,
+    ABI_VERSION, ACTION_DISMISS, ACTION_ITEM, DrawCommand, ERR_OK, EXPORT_ABI_VERSION,
+    EXPORT_FRAME, EXPORT_HIDE, EXPORT_INIT, EXPORT_MOUSE, EXPORT_PROBE_RESIDENT, EXPORT_REFRESH,
+    EXPORT_RENDER, IMPORT_ABORT, IMPORT_ABORT_MODULE, IMPORT_BEGIN_DRAG, IMPORT_DRAW_TEXT,
+    IMPORT_FILL_RECT, IMPORT_FILL_ROUNDED_RECT, IMPORT_LOG, IMPORT_MEASURE_TEXT, IMPORT_MODULE,
+    IMPORT_REQUEST_FRAME, IMPORT_SEND_ACTION, IMPORT_SET_FIXED_POSITION, IMPORT_SET_PANEL,
+    IMPORT_SET_SIZE, IMPORT_SET_VISIBLE, IMPORT_STROKE_RECT, IMPORT_TIME_MS, MAX_STRING_BYTES,
+    MEMORY, MOUSE_DOWN, PanelStyle, PlacementStyle,
 };
 
 /// 线性内存上限（字节）：主题持有视图副本与布局状态，128 MiB 远超正常需求，
@@ -71,6 +73,13 @@ pub struct HostState {
     pub size: (f32, f32),
     pub panel_style: PanelStyle,
     pub backdrop_style: crate::protocol::BackdropStyle,
+    /// Visibility and placement are retained theme presentation state. Render
+    /// starts visible for backward compatibility; resident guests may opt out.
+    pub visible: bool,
+    pub placement: PlacementStyle,
+    /// A drag request is valid only while the guest handles a pointer-down.
+    mouse_kind: Option<i32>,
+    drag_requested: bool,
     /// 主题请求了下一动画帧。
     pub frame_requested: bool,
     /// 主题请求的高层动作 `(action, index)`。
@@ -101,6 +110,10 @@ impl Default for HostState {
             size: (0.0, 0.0),
             panel_style: PanelStyle::default(),
             backdrop_style: Default::default(),
+            visible: true,
+            placement: PlacementStyle::Anchored,
+            mouse_kind: None,
+            drag_requested: false,
             frame_requested: false,
             actions: Vec::new(),
             notes: Vec::new(),
@@ -383,6 +396,41 @@ fn set_size(mut caller: Caller<'_, HostState>, w: f32, h: f32) -> wasmtime::Resu
     Ok(())
 }
 
+fn set_visible(mut caller: Caller<'_, HostState>, visible: i32) -> wasmtime::Result<()> {
+    caller.data_mut().charge(0)?;
+    if !matches!(visible, 0 | 1) {
+        return Err(wasmtime::format_err!("set_visible expects 0 or 1"));
+    }
+    caller.data_mut().visible = visible != 0;
+    Ok(())
+}
+
+fn set_fixed_position(mut caller: Caller<'_, HostState>, x: f32, y: f32) -> wasmtime::Result<()> {
+    caller.data_mut().charge(0)?;
+    if !x.is_finite()
+        || !y.is_finite()
+        || !(-8192.0..=8192.0).contains(&x)
+        || !(-8192.0..=8192.0).contains(&y)
+    {
+        return Err(wasmtime::format_err!("invalid fixed window position"));
+    }
+    caller.data_mut().placement = PlacementStyle::Fixed { x, y };
+    Ok(())
+}
+
+fn begin_drag(mut caller: Caller<'_, HostState>) -> wasmtime::Result<()> {
+    caller.data_mut().charge(0)?;
+    if caller.data().mouse_kind != Some(MOUSE_DOWN) {
+        caller
+            .data_mut()
+            .notes
+            .push("begin_drag ignored outside pointer-down".into());
+        return Ok(());
+    }
+    caller.data_mut().drag_requested = true;
+    Ok(())
+}
+
 fn send_action(mut caller: Caller<'_, HostState>, action: i32, index: i32) -> wasmtime::Result<()> {
     caller.data_mut().charge(0)?;
     let st = caller.data_mut();
@@ -394,7 +442,7 @@ fn send_action(mut caller: Caller<'_, HostState>, action: i32, index: i32) -> wa
     if st.actions.len() >= 16 {
         return Err(wasmtime::format_err!("too many theme actions"));
     }
-    if !matches!(action, ACTION_ITEM..=ACTION_EMOJI) || index < 0 {
+    if !matches!(action, ACTION_ITEM..=ACTION_DISMISS) || index < 0 {
         st.notes.push(format!(
             "send_action ignored: action={action} index={index}"
         ));
@@ -475,6 +523,9 @@ fn register_imports(linker: &mut Linker<HostState>) -> Result<(), String> {
     register(linker.func_wrap(IMPORT_MODULE, IMPORT_STROKE_RECT, stroke_rect))?;
     register(linker.func_wrap(IMPORT_MODULE, IMPORT_DRAW_TEXT, draw_text))?;
     register(linker.func_wrap(IMPORT_MODULE, IMPORT_SET_SIZE, set_size))?;
+    register(linker.func_wrap(IMPORT_MODULE, IMPORT_SET_VISIBLE, set_visible))?;
+    register(linker.func_wrap(IMPORT_MODULE, IMPORT_SET_FIXED_POSITION, set_fixed_position))?;
+    register(linker.func_wrap(IMPORT_MODULE, IMPORT_BEGIN_DRAG, begin_drag))?;
     register(linker.func_wrap(IMPORT_MODULE, IMPORT_SEND_ACTION, send_action))?;
     register(linker.func_wrap(IMPORT_MODULE, IMPORT_REQUEST_FRAME, request_frame))?;
     // time_ms 无参数：func_wrap 不支持零参闭包，用 func_new 显式给出类型。
@@ -509,6 +560,7 @@ pub struct WasmRuntime {
     frame_fn: TypedFunc<f64, ()>,
     hide_fn: TypedFunc<(), ()>,
     refresh_fn: TypedFunc<i32, ()>,
+    resident: bool,
 }
 
 impl std::fmt::Debug for WasmRuntime {
@@ -602,6 +654,7 @@ impl WasmRuntime {
             frame_fn,
             hide_fn,
             refresh_fn,
+            resident: false,
         })
     }
 
@@ -673,6 +726,24 @@ impl WasmRuntime {
         } else if preedit {
             // TODO: reject modules without a preedit probe once guest support lands.
         }
+        self.resident = if self
+            .instance
+            .get_export(&mut self.store, EXPORT_PROBE_RESIDENT)
+            .is_some()
+        {
+            let value = self
+                .instance
+                .get_typed_func::<(), i32>(&mut self.store, EXPORT_PROBE_RESIDENT)
+                .map_err(err_string)?
+                .call(&mut self.store, ())
+                .map_err(err_string)?;
+            if !matches!(value, 0 | 1) {
+                return Err("resident probe must return 0 or 1".into());
+            }
+            value != 0
+        } else {
+            false
+        };
         Ok(())
     }
 
@@ -689,6 +760,9 @@ impl WasmRuntime {
     /// Publish a host-owned typed snapshot. Guest queries only the fields it needs.
     pub fn render(&mut self, view: &crate::theme_api::CandidateView) -> Result<(), String> {
         self.store.data_mut().view = serde_json::to_value(view).map_err(|e| e.to_string())?;
+        // Existing ABI-1 themes never call set_visible and therefore retain
+        // the original behavior of showing every accepted render.
+        self.store.data_mut().visible = true;
         self.set_fuel(RENDER_FUEL)?;
         let code = self
             .render_fn
@@ -700,13 +774,23 @@ impl WasmRuntime {
     /// 转发鼠标事件（窗口局部 DIP 坐标）。
     pub fn mouse(&mut self, kind: i32, x: f32, y: f32) -> Result<(), String> {
         self.set_fuel(EVENT_FUEL)?;
-        self.store.data_mut().accept_actions = matches!(
-            kind,
-            crate::protocol::MOUSE_DOWN | crate::protocol::MOUSE_UP
-        );
-        self.mouse_fn
+        {
+            let state = self.store.data_mut();
+            state.accept_actions = matches!(
+                kind,
+                crate::protocol::MOUSE_DOWN | crate::protocol::MOUSE_UP
+            );
+            state.mouse_kind = Some(kind);
+            state.drag_requested = false;
+        }
+        let result = self
+            .mouse_fn
             .call(&mut self.store, (kind, x, y))
-            .map_err(err_string)
+            .map_err(err_string);
+        let state = self.store.data_mut();
+        state.accept_actions = false;
+        state.mouse_kind = None;
+        result
     }
 
     /// 触发动画帧回调。
@@ -722,7 +806,9 @@ impl WasmRuntime {
         self.set_fuel(EVENT_FUEL)?;
         let result = self.hide_fn.call(&mut self.store, ()).map_err(err_string);
         self.store.data_mut().view = serde_json::Value::Null;
+        self.store.data_mut().visible = false;
         self.store.data_mut().actions.clear();
+        self.store.data_mut().drag_requested = false;
         result
     }
 
@@ -754,6 +840,22 @@ impl WasmRuntime {
 
     pub fn size(&self) -> (f32, f32) {
         self.store.data().size
+    }
+
+    pub fn resident(&self) -> bool {
+        self.resident
+    }
+
+    pub fn visible(&self) -> bool {
+        self.store.data().visible
+    }
+
+    pub fn placement(&self) -> PlacementStyle {
+        self.store.data().placement
+    }
+
+    pub fn take_drag_request(&mut self) -> bool {
+        std::mem::take(&mut self.store.data_mut().drag_requested)
     }
 
     /// 取走动画帧请求标志。
@@ -916,6 +1018,41 @@ mod tests {
         );
         assert_eq!(rt.panel_style().corner_radius, 10.0);
         assert!(!rt.take_commands().is_empty());
+    }
+
+    #[test]
+    #[ignore = "build theme-statusbar with npm run build first"]
+    fn statusbar_resident_mode_contract() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("theme-statusbar/build/statusbar.wasm"),
+        )
+        .unwrap();
+        let mut runtime = WasmRuntime::new(&bytes).unwrap();
+        runtime.configure(true).unwrap();
+        assert!(runtime.resident());
+        runtime.init(crate::protocol::MODE_LIVE, false).unwrap();
+
+        let mut view = CandidateView {
+            active: true,
+            ascii_mode: Some(false),
+            ..Default::default()
+        };
+        runtime.render(&view).unwrap();
+        assert!(runtime.visible());
+        assert!(matches!(
+            runtime.placement(),
+            crate::protocol::PlacementStyle::Fixed { .. }
+        ));
+        assert!(!runtime.take_commands().is_empty());
+        runtime
+            .mouse(crate::protocol::MOUSE_DOWN, 20.0, 10.0)
+            .unwrap();
+        assert!(runtime.take_drag_request());
+
+        view.ascii_mode = Some(true);
+        runtime.render(&view).unwrap();
+        assert!(!runtime.visible());
     }
 
     #[test]

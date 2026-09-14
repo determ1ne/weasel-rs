@@ -41,6 +41,8 @@ pub fn synthetic_snapshot() -> RenderSnapshot {
         .collect();
     RenderSnapshot {
         preedit: None,
+        active: true,
+        ascii_mode: Some(false),
         visible: true,
         sequence: 1,
         session_id: 1,

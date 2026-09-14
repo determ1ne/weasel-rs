@@ -68,7 +68,12 @@ impl ThemeFactory for Factory {
 
     fn capabilities(&self) -> ThemeCapabilities {
         // The guest probes the actual requirement during creation.
-        ThemeCapabilities { preedit: true }
+        ThemeCapabilities {
+            preedit: true,
+            // Individual guests opt in with `probe_resident`; declaring the
+            // superset here lets renderer deliver mode-only snapshots.
+            resident: true,
+        }
     }
 
     fn create(&self, mode: UiMode, settings: &ConfigSnapshot) -> ThemeCreation {

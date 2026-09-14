@@ -923,7 +923,10 @@ impl crate::theme_api::ThemeFactory for Factory {
         "abc"
     }
     fn capabilities(&self) -> crate::theme_api::ThemeCapabilities {
-        crate::theme_api::ThemeCapabilities { preedit: true }
+        crate::theme_api::ThemeCapabilities {
+            preedit: true,
+            resident: false,
+        }
     }
     fn default_settings(&self) -> Result<serde_json::Value, String> {
         serde_json::from_str(include_str!("config.json"))

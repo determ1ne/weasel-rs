@@ -2,6 +2,7 @@
 pub const ABI_VERSION: i32 = 1;
 /// Bold variant of the primary text font (slot 0), usable for measurement and drawing.
 pub const FONT_TEXT_BOLD: i32 = 4;
+pub const ACTION_DISMISS: i32 = 4;
 pub const CANDIDATE: Data = Data(0);
 pub const OPTIONS: Data = Data(1);
 /// Host-provided global presentation settings (currently preedit_type).
@@ -74,6 +75,9 @@ pub mod raw {
             color_balance: f32,
             fallback_color: i32,
         );
+        pub fn set_visible(visible: i32);
+        pub fn set_fixed_position(x: f32, y: f32);
+        pub fn begin_drag();
         pub fn set_size(w: f32, h: f32);
         pub fn send_action(action: i32, index: i32);
         pub fn request_frame();
@@ -195,6 +199,18 @@ pub fn set_size(w: f32, h: f32) {
     unsafe {
         raw::set_size(w, h);
     }
+}
+/// Show or hide a resident theme while retaining guest state.
+pub fn set_visible(visible: bool) {
+    unsafe { raw::set_visible(visible as i32) }
+}
+/// Place a resident theme at DIP offsets from the primary work area.
+pub fn set_fixed_position(x: f32, y: f32) {
+    unsafe { raw::set_fixed_position(x, y) }
+}
+/// Begin moving a fixed window from the current pointer-down callback.
+pub fn begin_drag() {
+    unsafe { raw::begin_drag() }
 }
 /// Native panel: finite DIP corner radius 0..=4096, shadow radius 0..=250,
 /// offsets -1024..=1024, ARGB color. These are host contract bounds.

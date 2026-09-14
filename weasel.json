@@ -17,6 +17,9 @@
         },
         "glass": {
           "name": "Glass"
+        },
+        "statusbar": {
+          "name": "经典桌面状态栏"
         }
       }
     }
