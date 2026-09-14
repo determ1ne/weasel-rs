@@ -8,8 +8,9 @@ Var ProcessEntry
 Var ProcessHandle
 Var ProcessName
 Var ProcessPass
+Var ProcessId
 
-; ScanResult: 0 = clear, 10 = matching process, 1 = error.
+; ScanResult: 0 = clear, 10 = service running, 20 = settings open, 1 = error.
 ; This installer is x86-unicode, so PROCESSENTRY32W is 556 bytes even on x64.
 ; Never terminate by filename alone: query and terminate the same open handle.
 Function ScanApplicationProcesses
@@ -43,6 +44,7 @@ Function ScanApplicationProcesses
       StrCmp $5 18 scan_end scan_entry_error
     ${EndIf}
     System::Call '*$ProcessEntry(i, i, i.r1, i, i, i, i, i, i, &w260.r2)'
+    StrCpy $ProcessId $1
     StrCmp $2 $ProcessName 0 scan_next
     ; QUERY_LIMITED_INFORMATION | SYNCHRONIZE (+ TERMINATE after consent).
     StrCpy $0 0x101000
@@ -59,11 +61,18 @@ Function ScanApplicationProcesses
     System::Call 'kernel32::QueryFullProcessImageNameW(p $ProcessHandle, i 0, w .r3, *i r4) i.r0'
     StrCmp $0 0 scan_entry_error
     StrCmp $3 "$INSTDIR\$ProcessName" 0 scan_close_process
+    ; Never discard an editor's unsaved configuration, including a process
+    ; that appeared after the read-only scan.
+    ${If} $ProcessPass == 3
+      StrCpy $ScanResult 20
+      Goto scan_close_process
+    ${EndIf}
     ${If} $ScanMode == 0
       StrCpy $ScanResult 10
     ${Else}
       System::Call 'kernel32::WaitForSingleObject(p $ProcessHandle, i 0) i.r0'
       ${If} $0 != 0
+        DetailPrint "结束未退出的进程：$ProcessName（PID $ProcessId）"
         System::Call 'kernel32::TerminateProcess(p $ProcessHandle, i 1) i.r0'
         ${If} $0 == 0
           ; The process may have exited between the wait and termination.

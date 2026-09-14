@@ -37,7 +37,7 @@
 Function InstallRuntime_${ARCH}
   !insertmacro CheckRuntime ${ARCH} ${VERSION}
   ${If} $9 == 1
-    DetailPrint "Microsoft Visual C++ v14 Redistributable ${ARCH}: 已安装相同或更新版本，跳过。"
+    !insertmacro InstallLog "Microsoft Visual C++ v14 Redistributable ${ARCH}: 已安装相同或更新版本，跳过。"
     Return
   ${EndIf}
   InitPluginsDir
@@ -48,7 +48,7 @@ Function InstallRuntime_${ARCH}
   StrCpy $7 ""
   IfSilent 0 +2
     StrCpy $7 "-Silent"
-  DetailPrint "正在下载 Microsoft Visual C++ v14 Redistributable ${ARCH}…"
+  !insertmacro InstallLog "正在下载 Microsoft Visual C++ v14 Redistributable ${ARCH}…"
   ; 使用系统目录为工作目录，避免 NSIS 的 System.dll 干扰 PowerShell 程序集加载。
   SetOutPath "$SYSDIR"
   ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "$PLUGINSDIR\download-runtime.ps1" -Architecture ${ARCH} -Destination "$PLUGINSDIR\vc_redist.${ARCH}.exe" $7' $6
@@ -66,7 +66,7 @@ Function InstallRuntime_${ARCH}
     SetErrorLevel 1
     Abort
   ${EndIf}
-  DetailPrint "正在安装 Microsoft Visual C++ v14 Redistributable ${ARCH} ${VERSION}…"
+  !insertmacro InstallLog "正在安装 Microsoft Visual C++ v14 Redistributable ${ARCH} ${VERSION}…"
   StrCpy $6 -1
   ClearErrors
   ExecWait '"$PLUGINSDIR\vc_redist.${ARCH}.exe" /install /quiet /norestart /log "$TEMP\Weasel-RS-vcredist-${ARCH}.log"' $6
@@ -78,7 +78,7 @@ Function InstallRuntime_${ARCH}
     Return
   ${ElseIf} $6 == 3010
     SetRebootFlag true
-    DetailPrint "Microsoft Visual C++ v14 Redistributable ${ARCH} 安装成功，需要重启。"
+    !insertmacro InstallLog "Microsoft Visual C++ v14 Redistributable ${ARCH} 安装成功，需要重启。"
     Return
   ${ElseIf} $6 == 1638
   ${OrIf} $6 == -2147023258 ; HRESULT_FROM_WIN32(ERROR_PRODUCT_VERSION)

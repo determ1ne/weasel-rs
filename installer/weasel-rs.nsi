@@ -11,7 +11,9 @@ RequestExecutionLevel admin
 !include LogicLib.nsh
 !include x64.nsh
 !include FileFunc.nsh
+!include TextFunc.nsh
 !include Sections.nsh
+!include WordFunc.nsh
 
 !ifndef PROJECT_ROOT
   !error "Use scripts\build-installer.ps1 to supply PROJECT_ROOT."
@@ -64,13 +66,17 @@ Var CopiedFiles
 Var TriedRegistration
 Var InstallerMutex
 Var IsUpgrade
+Var InstalledVersion
 Var OldDll
 Var BackupDll
 Var BackupList
 
+!include "${PROJECT_ROOT}\installer\records.nsh"
+!include "${PROJECT_ROOT}\installer\cleanup-backups.nsh"
 !include "${PROJECT_ROOT}\installer\vcredist.nsh"
 !include "${PROJECT_ROOT}\installer\processes.nsh"
 !include "${PROJECT_ROOT}\installer\launch-broker.nsh"
+!include "${PAYLOAD_INCLUDE}"
 
 Function .onInstSuccess
   ${If} ${RebootFlag}
@@ -134,6 +140,24 @@ Function .onInit
       Quit
     ${EndIf}
     StrCpy $IsUpgrade 1
+    ReadRegStr $InstalledVersion HKLM "${UNINSTALL_KEY}" "DisplayVersion"
+    ${If} $InstalledVersion != ""
+      ${VersionCompare} "$InstalledVersion" "${PRODUCT_VERSION}" $1
+      ${If} $1 == 1
+        MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "已安装 $InstalledVersion，即将安装较旧版本 ${PRODUCT_VERSION}。是否继续降级？" /SD IDNO IDYES version_confirmed
+        SetErrorLevel 1
+        Quit
+        version_confirmed:
+      ${EndIf}
+      ${If} $1 == 0
+        MessageBox MB_OKCANCEL|MB_ICONINFORMATION "已安装 ${PRODUCT_VERSION}。继续将覆盖安装，保留用户数据。" /SD IDOK IDOK version_ready
+        Quit
+      ${ElseIf} $1 == 2
+        MessageBox MB_OKCANCEL|MB_ICONINFORMATION "将从 $InstalledVersion 升级到 ${PRODUCT_VERSION}，保留用户数据。" /SD IDOK IDOK version_ready
+        Quit
+      ${EndIf}
+      version_ready:
+    ${EndIf}
   ${EndIf}
   ; Also reject manual registrations, so rollback cannot remove someone else's TIP.
   SetRegView 32
@@ -175,15 +199,41 @@ Function StopApplicationProcesses
   StrCpy $ScanMode 0
   Call ScanApplicationProcesses
   StrCmp $ScanResult 0 processes_stopped
+  StrCmp $ScanResult 20 settings_open
   StrCmp $ScanResult 10 0 process_error
+  ; Use the bundled new broker, because an old installed broker may not know
+  ; --shutdown. This command does not start a tray or managed children.
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File /oname=shutdown-broker.exe "${X64_RELEASE}\weasel-broker.exe"
+  DetailPrint "正在请求算法服务正常退出……"
+  nsExec::ExecToLog /TIMEOUT=40000 '"$PLUGINSDIR\shutdown-broker.exe" --shutdown "$INSTDIR"'
+  Pop $0
+  !insertmacro InstallLog "INFO: 退出命令返回：$0"
+  SetOutPath "$INSTDIR"
+  StrCpy $ScanMode 0
+  Call ScanApplicationProcesses
+  StrCmp $ScanResult 0 processes_stopped
+  StrCmp $ScanResult 20 settings_open
+  StrCmp $ScanResult 10 0 process_error
+  MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "算法服务未能正常退出。是否强制结束仍在运行的小狼毫RS服务进程？" /SD IDNO IDYES force_stop
+  SetErrorLevel 1
+  Abort
+  force_stop:
   StrCpy $ScanMode 1
   Call ScanApplicationProcesses
+  StrCmp $ScanResult 20 settings_open
   StrCmp $ScanResult 0 0 process_error
   StrCpy $ScanMode 0
   Call ScanApplicationProcesses
   StrCmp $ScanResult 0 processes_stopped
+  StrCmp $ScanResult 20 settings_open
   process_error:
     MessageBox MB_OK|MB_ICONSTOP "无法检查或结束小狼毫RS 进程，请手动退出相关程序后重试。" /SD IDOK
+    SetErrorLevel 1
+    Abort
+  settings_open:
+    MessageBox MB_OK|MB_ICONEXCLAMATION "设置应用仍在运行。请保存修改并关闭设置应用，然后重新运行安装程序。" /SD IDOK
     SetErrorLevel 1
     Abort
   processes_stopped:
@@ -271,6 +321,8 @@ FunctionEnd
   Delete /REBOOTOK "$INSTDIR\SETTINGS-LICENSE.txt"
   Delete /REBOOTOK "$INSTDIR\Uninstall.exe"
   Delete /REBOOTOK "$INSTDIR\installer-runtime.ps1"
+  Delete "$INSTDIR\files.lst"
+  Delete "$INSTDIR\files.pending.lst"
   Delete /REBOOTOK "$INSTDIR\weasel-installer-helper.exe"
   RMDir "$INSTDIR\x86"
   RMDir "$INSTDIR\x64"
@@ -280,11 +332,15 @@ FunctionEnd
 
 Section "Weasel-RS" SEC_MAIN
   SectionIn RO
+  Call BeginInstallLog
   ; Shared prerequisites remain installed even if our own install later fails.
   Call InstallRuntime_x86
   Call InstallRuntime_x64
   InitPluginsDir
   Call StopApplicationProcesses
+  Call RemoveOldPayload
+  Call BeginRecords
+  !insertmacro InstallLog "INFO: 开始替换旧文件"
   StrCpy $OldDll "$INSTDIR\x64\weasel_tip.dll"
   Call RetireDll
   ; Retire both the current layout and DLLs left by older installers.
@@ -315,21 +371,30 @@ Section "Weasel-RS" SEC_MAIN
   Call RetireDll
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_wasm.pdb"
   SetOverwrite on
+  ; Remove stale symbols even when upgrading with a Mini installer.
+  Delete /REBOOTOK "$INSTDIR\weasel_broker.pdb"
+  Delete /REBOOTOK "$INSTDIR\weasel_server.pdb"
+  Delete /REBOOTOK "$INSTDIR\weasel_renderer.pdb"
+  Delete /REBOOTOK "$INSTDIR\weasel_tip.pdb"
+  Delete /REBOOTOK "$INSTDIR\x64\weasel_tip.pdb"
+  Delete /REBOOTOK "$INSTDIR\x86\weasel_tip.pdb"
+  Delete /REBOOTOK "$INSTDIR\rime.pdb"
+  Delete /REBOOTOK "$INSTDIR\x64\rime.pdb"
   SetOutPath "$INSTDIR"
   StrCpy $CopiedFiles 1
   ClearErrors
-  File "${X64_RELEASE}\weasel-broker.exe"
-  File "${X64_RELEASE}\weasel-server.exe"
-  File "${X64_RELEASE}\weasel-renderer.exe"
-  File "${PROJECT_ROOT}\server\src\styles-LICENSE.txt"
-  File "${PROJECT_ROOT}\LICENSE"
-  File "${PROJECT_ROOT}\weasel.json"
-  File "${PROJECT_ROOT}\THIRD-PARTY-LICENSES.txt"
-  File "${PROJECT_ROOT}\THIRD-PARTY-GPL-3.0.txt"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel-broker.exe" "weasel-broker.exe"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel-server.exe" "weasel-server.exe"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel-renderer.exe" "weasel-renderer.exe"
+  !insertmacro ManagedFile "${PROJECT_ROOT}\server\src\styles-LICENSE.txt" "styles-LICENSE.txt"
+  !insertmacro ManagedFile "${PROJECT_ROOT}\LICENSE" "LICENSE"
+  !insertmacro ManagedFile "${PROJECT_ROOT}\weasel.json" "weasel.json"
+  !insertmacro ManagedFile "${PROJECT_ROOT}\THIRD-PARTY-LICENSES.txt" "THIRD-PARTY-LICENSES.txt"
+  !insertmacro ManagedFile "${PROJECT_ROOT}\THIRD-PARTY-GPL-3.0.txt" "THIRD-PARTY-GPL-3.0.txt"
   SetOutPath "$INSTDIR\x64"
-  File "${X64_RELEASE}\weasel_tip.dll"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel_tip.dll" "weasel_tip.dll"
   SetOutPath "$INSTDIR\x86"
-  File "${X86_RELEASE}\weasel_tip.dll"
+  !insertmacro ManagedFile "${X86_RELEASE}\weasel_tip.dll" "weasel_tip.dll"
   CreateDirectory "$INSTDIR\rime-data"
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装 Weasel-RS 文件，请检查磁盘空间和文件权限。" /SD IDOK
@@ -343,9 +408,9 @@ Section "librime" SEC_LIBRIME
   Call StopApplicationProcesses
   ClearErrors
   SetOutPath "$INSTDIR"
-  File "${PROJECT_ROOT}\artifacts\librime\dist\lib\rime.dll"
+  !insertmacro ManagedFile "${PROJECT_ROOT}\artifacts\librime\dist\lib\rime.dll" "rime.dll"
   SetOutPath "$INSTDIR\rime-data"
-  File /r "${PROJECT_ROOT}\assets\rime-data\*"
+  !insertmacro RimePayload
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装 librime，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -356,8 +421,8 @@ SectionEnd
 Section "设置应用" SEC_SETTINGS
   ClearErrors
   SetOutPath "$INSTDIR"
-  File "${X64_RELEASE}\weasel-settings.exe"
-  File /oname=SETTINGS-LICENSE.txt "${PROJECT_ROOT}\settings\LICENSE-NOTICE.txt"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel-settings.exe" "weasel-settings.exe"
+  !insertmacro ManagedFile "${PROJECT_ROOT}\settings\LICENSE-NOTICE.txt" "SETTINGS-LICENSE.txt"
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装设置应用，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -380,7 +445,7 @@ Section "ten（必选）" SEC_THEME_TEN
   SectionIn RO
   ClearErrors
   SetOutPath "$INSTDIR\themes"
-  File "${X64_RELEASE}\weasel_theme_ten.dll"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_ten.dll" "weasel_theme_ten.dll"
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装 ten 主题，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -391,8 +456,8 @@ SectionEnd
 Section "eleven" SEC_THEME_ELEVEN
   ClearErrors
   SetOutPath "$INSTDIR\themes"
-  File "${X64_RELEASE}\weasel_theme_eleven.dll"
-  File "${X64_RELEASE}\themes\weasel_theme_eleven.settings.json"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_eleven.dll" "weasel_theme_eleven.dll"
+  !insertmacro ManagedFile "${X64_RELEASE}\themes\weasel_theme_eleven.settings.json" "weasel_theme_eleven.settings.json"
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装 eleven 主题，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -403,8 +468,8 @@ SectionEnd
 Section "abc" SEC_THEME_ABC
   ClearErrors
   SetOutPath "$INSTDIR\themes"
-  File "${X64_RELEASE}\weasel_theme_abc.dll"
-  File "${X64_RELEASE}\themes\weasel_theme_abc.settings.json"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_abc.dll" "weasel_theme_abc.dll"
+  !insertmacro ManagedFile "${X64_RELEASE}\themes\weasel_theme_abc.settings.json" "weasel_theme_abc.settings.json"
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装 abc 主题，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -415,7 +480,7 @@ SectionEnd
 Section "void" SEC_THEME_VOID
   ClearErrors
   SetOutPath "$INSTDIR\themes"
-  File "${X64_RELEASE}\weasel_theme_void.dll"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_void.dll" "weasel_theme_void.dll"
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装 void 主题，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -426,10 +491,12 @@ SectionEnd
 Section "wasm" SEC_THEME_WASM
   ClearErrors
   SetOutPath "$INSTDIR\themes"
-  File /nonfatal "${X64_RELEASE}\weasel_theme_wasm.dll"
+!if /FileExists "${X64_RELEASE}\weasel_theme_wasm.dll"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_wasm.dll" "weasel_theme_wasm.dll"
+!endif
   SetOutPath "$INSTDIR\theme-wasm"
   ; Optional artifacts: preserve offline/skipped-build packaging.
-  File /nonfatal /r "${PROJECT_ROOT}\artifacts\theme-wasm\*"
+  !insertmacro WasmPayload
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装 WASM 主题，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -443,32 +510,34 @@ SectionGroupEnd
 Section /o "调试符号" SEC_SYMBOLS
   ClearErrors
   SetOutPath "$INSTDIR"
-  File "${X64_RELEASE}\weasel_broker.pdb"
-  File "${X64_RELEASE}\weasel_server.pdb"
-  File "${X64_RELEASE}\weasel_renderer.pdb"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel_broker.pdb" "weasel_broker.pdb"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel_server.pdb" "weasel_server.pdb"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel_renderer.pdb" "weasel_renderer.pdb"
   ${If} ${SectionIsSelected} ${SEC_SETTINGS}
-    File "${X64_RELEASE}\weasel_settings.pdb"
+    !insertmacro ManagedFile "${X64_RELEASE}\weasel_settings.pdb" "weasel_settings.pdb"
   ${EndIf}
-  File "${PROJECT_ROOT}\artifacts\librime\dist\lib\rime.pdb"
+  !insertmacro ManagedFile "${PROJECT_ROOT}\artifacts\librime\dist\lib\rime.pdb" "rime.pdb"
   SetOutPath "$INSTDIR\x64"
-  File "${X64_RELEASE}\weasel_tip.pdb"
+  !insertmacro ManagedFile "${X64_RELEASE}\weasel_tip.pdb" "weasel_tip.pdb"
   SetOutPath "$INSTDIR\x86"
-  File "${X86_RELEASE}\weasel_tip.pdb"
+  !insertmacro ManagedFile "${X86_RELEASE}\weasel_tip.pdb" "weasel_tip.pdb"
   SetOutPath "$INSTDIR\themes"
   ${If} ${SectionIsSelected} ${SEC_THEME_TEN}
-    File "${X64_RELEASE}\weasel_theme_ten.pdb"
+    !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_ten.pdb" "weasel_theme_ten.pdb"
   ${EndIf}
   ${If} ${SectionIsSelected} ${SEC_THEME_ELEVEN}
-    File "${X64_RELEASE}\weasel_theme_eleven.pdb"
+    !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_eleven.pdb" "weasel_theme_eleven.pdb"
   ${EndIf}
   ${If} ${SectionIsSelected} ${SEC_THEME_ABC}
-    File "${X64_RELEASE}\weasel_theme_abc.pdb"
+    !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_abc.pdb" "weasel_theme_abc.pdb"
   ${EndIf}
   ${If} ${SectionIsSelected} ${SEC_THEME_VOID}
-    File "${X64_RELEASE}\weasel_theme_void.pdb"
+    !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_void.pdb" "weasel_theme_void.pdb"
   ${EndIf}
   ${If} ${SectionIsSelected} ${SEC_THEME_WASM}
-    File /nonfatal "${X64_RELEASE}\weasel_theme_wasm.pdb"
+!if /FileExists "${X64_RELEASE}\weasel_theme_wasm.pdb"
+    !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_wasm.pdb" "weasel_theme_wasm.pdb"
+!endif
   ${EndIf}
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装调试符号，请检查磁盘空间和文件权限。" /SD IDOK
@@ -480,6 +549,7 @@ SectionEnd
 !endif
 ; Register only after every selected component has been copied successfully.
 Section "-注册与安装信息" SEC_REGISTER
+  !insertmacro InstallLog "INFO: 开始注册 TIP"
   Call StopApplicationProcesses
   ; RegDLL is 32-bit in this installer; use native regsvr32 for the x64 DLL.
   SetOutPath "$INSTDIR"
@@ -497,6 +567,7 @@ Section "-注册与安装信息" SEC_REGISTER
 
   ClearErrors
   WriteUninstaller "$INSTDIR\Uninstall.exe"
+  FileWriteUTF16LE $ManifestHandle "Uninstall.exe$\r$\n"
   WriteRegStr HKLM "${PRODUCT_KEY}" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "${PRODUCT_NAME}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
@@ -516,9 +587,10 @@ Section "-注册与安装信息" SEC_REGISTER
     Goto install_failed
   ${EndIf}
   IfErrors install_failed
-  DetailPrint "正在为当前账户部署 Rime 数据……"
+  !insertmacro InstallLog "INFO: 正在为当前账户部署 Rime 数据……"
   nsExec::ExecToLog '"$INSTDIR\weasel-server.exe" --deploy --silent'
   Pop $0
+  !insertmacro InstallLog "INFO: 部署退出码=$0"
   ${If} $0 != 0
     ; Registration and uninstall metadata already exist. Preserve this usable
     ; recovery point rather than unregistering/deleting an installed program.
@@ -528,7 +600,9 @@ Section "-注册与安装信息" SEC_REGISTER
     Abort
   ${EndIf}
   ClearErrors
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "小狼毫RS算法服务" '$\"$INSTDIR\weasel-broker.exe$\"'
+  ${If} $IsUpgrade == 0
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "小狼毫RS算法服务" '$\"$INSTDIR\weasel-broker.exe$\"'
+  ${EndIf}
   ${If} ${Errors}
     StrCpy $IsUpgrade 1
     MessageBox MB_OK|MB_ICONSTOP "无法设置当前账户的登录启动项。程序文件已保留，请检查注册表权限后重试。" /SD IDOK
@@ -536,8 +610,10 @@ Section "-注册与安装信息" SEC_REGISTER
     Abort
   ${EndIf}
   Call DeleteRetiredDlls
-  DetailPrint "正在启动算法服务……"
+  Call CleanupOldDllBackups
+  !insertmacro InstallLog "INFO: 正在启动算法服务……"
   Call LaunchBrokerUnelevated
+  Call FinishRecords
   Goto install_done
   install_failed:
     MessageBox MB_OK|MB_ICONSTOP "安装或 TIP 注册失败。请检查文件权限和 x86/x64 VC++ 运行库。" /SD IDOK
@@ -545,6 +621,7 @@ Section "-注册与安装信息" SEC_REGISTER
     Abort
   install_done:
 SectionEnd
+
 
 !ifdef DEV_INSTALLER
 ; SEC_REGISTER is the final installation section. Select every component,
@@ -578,6 +655,16 @@ FunctionEnd
 !endif
 
 Function .onInstFailed
+  !insertmacro InstallLog "ERROR: 安装未完成；pending 清单及旧 DLL 备份保留；日志：$InstallLog"
+  ${If} $ManifestHandle != ""
+    FileClose $ManifestHandle
+    StrCpy $ManifestHandle ""
+  ${EndIf}
+  ${If} $InstallLogHandle != ""
+    FileClose $InstallLogHandle
+    StrCpy $InstallLogHandle ""
+    MessageBox MB_OK|MB_ICONEXCLAMATION "安装未完成。安装日志：$InstallLog" /SD IDOK
+  ${EndIf}
   ${If} $IsUpgrade == 1
     ; Never remove the previous installation's registration or user data.
     MessageBox MB_OK|MB_ICONEXCLAMATION "安装未完成，现有文件及注册信息已保留。请重新运行安装程序完成更新。" /SD IDOK

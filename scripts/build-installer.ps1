@@ -68,6 +68,34 @@ try {
 
     $outputDirectory = Join-Path $projectRoot 'artifacts\installer'
     $null = New-Item -ItemType Directory -Path $outputDirectory -Force
+    # Expand recursive payloads at build time, never scan the installed directory.
+    $payloadInclude = Join-Path $outputDirectory 'payload-files.nsh'
+    $payloadLines = [Collections.Generic.List[string]]::new()
+    foreach ($payload in @(
+        @{ Macro = 'RimePayload'; Source = 'assets\rime-data'; Target = 'rime-data' },
+        @{ Macro = 'WasmPayload'; Source = 'artifacts\theme-wasm'; Target = 'theme-wasm' }
+    )) {
+        $payloadLines.Add('!macro ' + $payload.Macro)
+        $sourceDirectory = Join-Path $projectRoot $payload.Source
+        if (Test-Path -LiteralPath $sourceDirectory) {
+            $entries = @(Get-Item -LiteralPath $sourceDirectory) + @(Get-ChildItem -LiteralPath $sourceDirectory -Recurse -Force)
+            if ($entries | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }) {
+                throw "Payload contains a reparse point: $sourceDirectory"
+            }
+            foreach ($file in Get-ChildItem -LiteralPath $sourceDirectory -Recurse -File | Sort-Object FullName) {
+                if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Payload contains a reparse point: $($file.FullName)" }
+                $relative = $file.FullName.Substring($sourceDirectory.Length + 1)
+                if ($relative -match '[\$"\r\n]' -or $file.FullName -match '[\$"\r\n]') { throw "Unsupported payload filename: $relative" }
+                $parent = Split-Path -Parent $relative
+                $destination = $payload.Target
+                if ($parent) { $destination += '\' + $parent }
+                $payloadLines.Add('SetOutPath "$INSTDIR\' + $destination + '"')
+                $payloadLines.Add('!insertmacro ManagedFile "' + $file.FullName + '" "' + $file.Name + '"')
+            }
+        }
+        $payloadLines.Add('!macroend')
+    }
+    [IO.File]::WriteAllLines($payloadInclude, $payloadLines, [Text.UTF8Encoding]::new($false))
     $buildSuffix = if ($Dev) { '-dev' } else { '' }
     if ($Mini) { $buildSuffix += '-mini' }
     $outputFile = Join-Path $outputDirectory "Weasel-RS-$version-x64$buildSuffix-setup.exe"
@@ -100,6 +128,7 @@ try {
         "/DPROJECT_ROOT=$projectRoot",
         "/DPRODUCT_VERSION=$version",
         "/DOUTPUT_FILE=$outputFile",
+        "/DPAYLOAD_INCLUDE=$payloadInclude",
         (Join-Path $projectRoot 'installer\weasel-rs.nsi')
     )
     $buildDefinitions = @()
