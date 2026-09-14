@@ -510,6 +510,7 @@ librime-lua ec52e48 — BSD-3-Clause
 librime-octagram dfcc151 — GPL-3.0
 librime-predict 920bd41 — BSD-3-Clause
 Microsoft UI XAML — MIT
+Google Material Symbols — Apache-2.0
 win32metadata — MIT
 Mozc — BSD-3-Clause
 Weasel — GPL-3.0
