@@ -1,7 +1,7 @@
-//! Bounded, text-free flight recorder. No host-thread disk I/O or symbol loading.
+//! Fault containment and on-demand reports. Normal callbacks and lock access do
+//! not record events; fault reports still perform disk I/O on a helper thread.
 use std::{
     cell::RefCell,
-    collections::VecDeque,
     panic::Location,
     sync::{
         Arc, Mutex, Weak,
@@ -10,7 +10,6 @@ use std::{
     time::SystemTime,
 };
 
-const CAPACITY: usize = 128;
 static WRITERS: AtomicUsize = AtomicUsize::new(0);
 static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
 static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
@@ -52,7 +51,6 @@ impl std::fmt::Debug for Event {
 
 struct Recorder {
     id: usize,
-    events: Mutex<VecDeque<Event>>,
     first_fault: Mutex<Option<Event>>,
     saved: Arc<AtomicBool>,
 }
@@ -64,47 +62,10 @@ pub(crate) struct FaultState {
     report_attempts: AtomicUsize,
 }
 
-pub(crate) struct TrackedGuard<'a, T> {
-    guard: std::sync::MutexGuard<'a, T>,
-    fault: &'a FaultState,
-    address: u64,
-}
-
-impl<T> std::ops::Deref for TrackedGuard<'_, T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        &self.guard
-    }
-}
-impl<T> std::ops::DerefMut for TrackedGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.guard
-    }
-}
-impl<T> Drop for TrackedGuard<'_, T> {
-    fn drop(&mut self) {
-        self.fault.event("lock.release", self.address);
-    }
-}
-
 impl FaultState {
-    #[track_caller]
-    pub(crate) fn track<'a, T>(
-        &'a self,
-        guard: std::sync::MutexGuard<'a, T>,
-        address: u64,
-    ) -> TrackedGuard<'a, T> {
-        self.event("lock.acquired", address);
-        TrackedGuard {
-            guard,
-            fault: self,
-            address,
-        }
-    }
     pub(crate) fn new(_: bool) -> Self {
         let recorder = Arc::new(Recorder {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
-            events: Mutex::new(VecDeque::with_capacity(CAPACITY)),
             first_fault: Mutex::new(None),
             saved: Arc::new(AtomicBool::new(false)),
         });
@@ -119,26 +80,6 @@ impl FaultState {
 
     pub(crate) fn load(&self, ordering: Ordering) -> bool {
         self.flag.load(ordering)
-    }
-
-    #[track_caller]
-    pub(crate) fn event(&self, kind: &'static str, value: u64) {
-        if self.load(Ordering::Acquire) {
-            return;
-        }
-        let event = Event {
-            time: SystemTime::now(),
-            thread: std::thread::current().id(),
-            site: Location::caller(),
-            kind,
-            value,
-        };
-        if let Ok(mut events) = self.recorder.events.try_lock() {
-            if events.len() == CAPACITY {
-                events.pop_front();
-            }
-            events.push_back(event);
-        }
     }
 
     #[track_caller]
@@ -207,7 +148,6 @@ impl FaultState {
             kind: reason,
             value: code,
         };
-        self.event(reason, code);
         if !cfg!(test) {
             self.recorder.save(None, None, Some((context_id, cause)));
         }
@@ -233,11 +173,6 @@ impl Recorder {
         }
         let dialog_guard = Dialog(dialog.is_some());
         // Separate fault record survives even if the ring is temporarily busy.
-        let events = self
-            .events
-            .try_lock()
-            .map(|v| v.clone())
-            .unwrap_or_default();
         if WRITERS
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n < 2).then_some(n + 1)
@@ -275,11 +210,7 @@ impl Recorder {
                         weasel_common::about::show(&about);
                         return;
                     }
-                    let mut summary = format!("{about}\n\nTIP 实例：{id}\n首次故障：{fault:?}\n\n最近事件（完整记录见文件）：\n");
-                    for event in events.iter().rev().take(8).rev() {
-                        use std::fmt::Write;
-                        let _ = writeln!(summary, "{}:{} {} {:#x}", event.site.file(), event.site.line(), event.kind, event.value);
-                    }
+                    let mut summary = format!("{about}\n\nTIP 实例：{id}\n首次故障：{fault:?}\n");
                     let mut report = format!(
                         "weasel-tip {} arch={} pid={} instance={}\nfirst_fault={fault:?}\n",
                         env!("CARGO_PKG_VERSION"),
@@ -289,19 +220,9 @@ impl Recorder {
                     );
                     if let Some((context, cause)) = &quarantine {
                         use std::fmt::Write;
-                        let _ = writeln!(report, "quarantine_context={context}\nquarantine_cause={cause:?}");
-                    }
-                    for event in events {
-                        use std::fmt::Write;
                         let _ = writeln!(
                             report,
-                            "{} DEBUG {:?} {}:{} {} value={:#x}",
-                            weasel_common::logging::timestamp(event.time),
-                            event.thread,
-                            event.site.file(),
-                            event.site.line(),
-                            event.kind,
-                            event.value
+                            "quarantine_context={context}\nquarantine_cause={cause:?}"
                         );
                     }
                     let mut roots = Vec::new();
@@ -312,22 +233,20 @@ impl Recorder {
                     let mut saved = None;
                     for root in roots {
                         let dir = root.join("Weasel-RS/Diagnostics");
-                        if write_report(
-                            &dir,
-                            slot,
-                            report.as_bytes(),
-                        )
-                        .is_ok()
-                        {
-                            saved = Some(dir.join(format!("tip-{}-{slot}.log", std::process::id())));
-                            if dialog.is_none() && quarantine.is_none() { report_saved.store(true, Ordering::Release); }
+                        if write_report(&dir, slot, report.as_bytes()).is_ok() {
+                            saved =
+                                Some(dir.join(format!("tip-{}-{slot}.log", std::process::id())));
+                            if dialog.is_none() && quarantine.is_none() {
+                                report_saved.store(true, Ordering::Release);
+                            }
                             break;
                         }
                     }
                     if dialog == Some(true) {
                         summary.push_str(&match saved {
                             Some(path) => format!("\n日志：{}", path.display()),
-                            None => "\n日志保存失败（目录可能不可写），可按 Ctrl+C 复制此对话框。".into(),
+                            None => "\n日志保存失败（目录可能不可写），可按 Ctrl+C 复制此对话框。"
+                                .into(),
                         });
                         summary.push_str("\n\nCtrl+C 可复制对话框内容。");
                         weasel_common::about::show(&summary);
@@ -395,10 +314,6 @@ mod tests {
         assert!(!fault.load(Ordering::Acquire));
         assert!(!fault.recorder.saved.load(Ordering::Acquire));
         assert!(fault.recorder.first_fault.lock().unwrap().is_none());
-        assert_eq!(
-            fault.recorder.events.lock().unwrap().back().unwrap().kind,
-            "edit.request_failed"
-        );
         fault.mark("edit.write_uncertain", 1);
         assert_eq!(
             fault
@@ -465,34 +380,5 @@ mod tests {
             std::fs::remove_file(file.path()).unwrap();
         }
         std::fs::remove_dir(dir).unwrap();
-    }
-
-    #[test]
-    fn lock_history_records_acquisition_and_release() {
-        let state = FaultState::new(false);
-        let mutex = Mutex::new(1);
-        {
-            let mut guard = state.track(mutex.lock().unwrap(), 123);
-            *guard = 2;
-        }
-        let events = state.recorder.events.lock().unwrap();
-        assert_eq!(events[0].kind, "lock.acquired");
-        assert_eq!(events[1].kind, "lock.release");
-        assert_eq!(events[0].value, events[1].value);
-    }
-
-    #[test]
-    fn ring_is_bounded_and_frozen_after_fault() {
-        let state = FaultState::new(false);
-        for n in 0..1000 {
-            state.event("edit", n);
-        }
-        assert_eq!(state.recorder.events.lock().unwrap().len(), CAPACITY);
-        state.flag.store(true, Ordering::Release);
-        state.event("ignored", 0);
-        assert_eq!(
-            state.recorder.events.lock().unwrap().back().unwrap().value,
-            999
-        );
     }
 }

@@ -151,25 +151,17 @@ pub(crate) struct TextService {
 
 impl TextService {
     #[track_caller]
-    fn lock<'a, T>(
-        &'a self,
-        state: &'a Mutex<T>,
-    ) -> Result<crate::diagnostics::TrackedGuard<'a, T>> {
+    fn lock<'a, T>(&'a self, state: &'a Mutex<T>) -> Result<std::sync::MutexGuard<'a, T>> {
         // Apartment state must never block a reentrant COM callback.
-        let address = state as *const Mutex<T> as usize as u64;
-        self.faulted.event("lock.try", address);
         match state.try_lock() {
-            Ok(guard) => Ok(self.faulted.track(guard, address)),
-            Err(error) => {
-                let reason = match error {
-                    std::sync::TryLockError::WouldBlock => {
-                        self.faulted.event("lock.would_block", address);
-                        self.faulted.request_maintenance();
-                        return Err(Error::from_hresult(boundary::E_PENDING));
-                    }
-                    std::sync::TryLockError::Poisoned(_) => "lock.poisoned",
-                };
-                self.faulted.mark(reason, address);
+            Ok(guard) => Ok(guard),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                self.faulted.request_maintenance();
+                Err(Error::from_hresult(boundary::E_PENDING))
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                let address = state as *const Mutex<T> as usize as u64;
+                self.faulted.mark("lock.poisoned", address);
                 Err(Error::from_hresult(boundary::E_FAIL))
             }
         }

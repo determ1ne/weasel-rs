@@ -277,8 +277,7 @@ impl TextService {
             ascii_mode: None,
         };
         let result = self.lock(&state.rpc)?.context_command(command);
-        if let Err(error) = result {
-            self.faulted.event(error.name(), action as u64);
+        if result.is_err() {
             // The worker invalidates its epoch on rejection. A failed context
             // transition is not replayable while a composition may exist.
             if self.lock(&state.composition)?.is_some() || invalidate {
@@ -314,34 +313,12 @@ impl TextService {
                 if !state.alive.load(Ordering::Acquire)
                     || !self.lock(&state.route)?.accept(&token, &response)
                 {
-                    weasel_common::input_trace!(
-                        "reply.drop expected={:?} token={:?} revision={}",
-                        token,
-                        response.token,
-                        response.revision
-                    );
                     continue;
                 }
                 self.update_secure_policy(
                     response.allow_rime_in_secure_fields,
                     token.connection_epoch,
                 );
-                if response.sensitive_input {
-                    weasel_common::input_trace!(
-                        "reply.accept token={:?} revision={} sensitive=true",
-                        response.token,
-                        response.revision
-                    );
-                } else {
-                    weasel_common::input_trace!(
-                        "reply.accept token={:?} revision={} state={} preedit_bytes={} commit_bytes={}",
-                        response.token,
-                        response.revision,
-                        response.state_updated,
-                        response.composition.len(),
-                        response.commit_text.len()
-                    );
-                }
                 state.reconciling.store(false, Ordering::Release);
                 if let Some(ascii) = response.ascii_mode {
                     *self.lock(&state.input_mode)? = Some((token.connection_epoch, ascii));

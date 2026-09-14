@@ -202,7 +202,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let deploy_ui_mode = std::env::args().any(|arg| arg == "--deploy-ui");
     let deploy_mode = std::env::args().any(|arg| arg == "--deploy");
     let paths = RuntimePaths::discover()?;
-    weasel_common::input_diagnostics::enable(paths.development);
     paths.ensure()?;
     if paths.development && !deploy_ui_mode && !deploy_mode {
         unsafe {

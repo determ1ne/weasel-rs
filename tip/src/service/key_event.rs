@@ -182,35 +182,9 @@ impl TextService {
             return Ok(BOOL(0));
         }
         let token = state.token()?;
-        let sensitive_input = self.secure_field_visible(&state);
-        if sensitive_input {
-            weasel_common::input_trace!(
-                "key.identity context={} up={} test={} sensitive=true",
-                state.id,
-                key_up,
-                test
-            );
-        } else {
-            weasel_common::input_trace!(
-                "key.identity context={} vk={} lp={} up={} test={} message_time={}",
-                state.id,
-                wparam.0,
-                lparam.0,
-                key_up,
-                test,
-                unsafe { bindings::GetMessageTime() }
-            );
-        }
         {
             let mut cached = self.lock(&self.tested_key)?;
             if TestedKey::reuse(&mut cached, &token, key_up, test) {
-                weasel_common::input_trace!(
-                    "key.pending_hit context={} up={} test={} consumed={}",
-                    state.id,
-                    key_up,
-                    test,
-                    !test
-                );
                 return Ok(BOOL(1));
             }
         }
@@ -219,14 +193,8 @@ impl TextService {
             return Ok(BOOL(0));
         }
         event.token = Some(token);
-        event.sensitive_input = sensitive_input;
         let response = self.lock(&state.rpc)?.process_key_event(event);
         let Some(response) = response else {
-            weasel_common::input_trace!(
-                "key.fallback context={} test={} reason=no_response",
-                state.id,
-                test
-            );
             // The out-of-process server is optional during activation.  Let
             // the host handle the key as ordinary text and retry connection
             // on the next input event.
@@ -234,13 +202,6 @@ impl TextService {
             return Ok(BOOL(0));
         };
         let eaten = response.eaten;
-        weasel_common::input_trace!(
-            "key.direct_reply token={:?} revision={} eaten={} test={}",
-            response.token,
-            response.revision,
-            eaten,
-            test
-        );
         // Connection may have been established during this request. Use the
         // response epoch, and never retain a result from a superseded session.
         if let Some(token) = response.token.as_ref() {

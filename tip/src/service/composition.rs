@@ -9,12 +9,6 @@ impl TextService {
         step: EditStep,
         session: IUnknown,
     ) -> Result<()> {
-        self.faulted.event(step.name(), response.revision);
-        if let Some(token) = &response.token {
-            self.faulted.event("edit.context", token.context_id);
-            self.faulted.event("edit.epoch", token.connection_epoch);
-            self.faulted.event("edit.generation", token.generation);
-        }
         if response::validate(&response).is_err() {
             if let Some(state) = self.find_context(&context)? {
                 self.quarantine(&state, "response.invalid", response.revision);
@@ -36,12 +30,6 @@ impl TextService {
             step,
             session,
         };
-        weasel_common::input_trace!(
-            "edit.queue token={:?} revision={} step={}",
-            pending.response.token,
-            pending.response.revision,
-            step.name()
-        );
         {
             let mut queue = self.lock(&self.pending_edit)?;
             if queue.len() >= 64 {
@@ -103,25 +91,11 @@ impl TextService {
         let state = pending.state.clone();
         self.active_edit_context
             .store(pending.state.id, Ordering::Release);
-        self.faulted.event("edit.ticket", ticket);
-        weasel_common::input_trace!(
-            "edit.request ticket={} token={:?} revision={} step={}",
-            ticket,
-            pending.response.token,
-            pending.response.revision,
-            step.name()
-        );
         let session: ITfEditSession =
             edit_session::ResponseEdit::new(self, pending, generation, ticket).into();
         let request = unsafe {
             context.RequestEditSession(tid, &session, TF_ES_ASYNCDONTCARE | TF_ES_READWRITE)
         };
-        weasel_common::input_trace!(
-            "edit.request_result ticket={} step={} result={:?}",
-            ticket,
-            step.name(),
-            request
-        );
         if self.edit_ticket.load(Ordering::Acquire) != ticket
             || self.generation.load(Ordering::Acquire) != generation
         {

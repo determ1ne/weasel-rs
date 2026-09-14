@@ -114,7 +114,6 @@ fn main() {
             "Windows.Win32.VK_LWIN",
             "Windows.Win32.VK_OEM_PERIOD",
             "Windows.Win32.GetKeyboardState",
-            "Windows.Win32.GetMessageTime",
             "Windows.Win32.GetKeyboardLayout",
             "Windows.Win32.ToUnicodeEx",
             "Weasel.CLSID_WEASEL_TIP",

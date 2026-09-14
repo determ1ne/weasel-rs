@@ -21,7 +21,6 @@ pub struct KeyEvent {
     pub keycode: Option<i32>,
     pub modifiers: i32,
     pub token: Option<ContextToken>,
-    pub sensitive_input: bool,
 }
 
 /// Local editing adapter. On the wire, InputResult separates optional state
@@ -46,7 +45,6 @@ pub struct KeyEventResponse {
     pub revision: u64,
     pub ascii_mode: Option<bool>,
     pub allow_rime_in_secure_fields: Option<bool>,
-    pub sensitive_input: bool,
 }
 pub mod envelope {
     use super::*;

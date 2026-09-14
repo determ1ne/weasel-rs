@@ -36,7 +36,6 @@ pub(crate) enum Work {
 
 struct ClientSession {
     inline_preedit: bool,
-    sensitive_input: bool,
     connection_id: u64,
     connection: Arc<RpcConnection>,
     alive: Arc<AtomicBool>,
@@ -339,7 +338,6 @@ impl Engine {
                             settings
                                 .app_inline_preedit(connection.client_executable().unwrap_or(""))
                         }),
-                        sensitive_input: false,
                         connection_id,
                         connection: connection.clone(),
                         alive,
@@ -403,25 +401,6 @@ impl Engine {
         }
         match envelope.payload {
             Some(Payload::KeyEvent(key_event)) => {
-                let started = std::time::Instant::now();
-                if key_event.sensitive_input {
-                    weasel_common::input_trace!(
-                        "engine.begin client={} request={} token={:?} sensitive=true",
-                        client_id,
-                        envelope.request_id,
-                        key_event.token
-                    );
-                } else {
-                    weasel_common::input_trace!(
-                        "engine.begin client={} request={} token={:?} vk={} lp={} up={}",
-                        client_id,
-                        envelope.request_id,
-                        key_event.token,
-                        key_event.virtual_key,
-                        key_event.lparam,
-                        key_event.key_up
-                    );
-                }
                 let (response, snapshot) = {
                     let client = self
                         .clients
@@ -439,14 +418,10 @@ impl Engine {
                         let focus_changed = self.active_client != Some(client_id);
                         self.active_client = Some(client_id);
                         client.route.focused = true;
-                        let sensitive_response =
-                            key_event.sensitive_input || client.sensitive_input;
                         if let Some(ascii) = self.global_ascii {
                             client.session.set_ascii_mode(ascii);
                         }
                         let mut response = client.session.process_key(&key_event);
-                        response.sensitive_input = sensitive_response;
-                        client.sensitive_input = response.composing && sensitive_response;
                         if self.global_ascii.is_some()
                             && let Some(ascii) = response.ascii_mode
                         {
@@ -475,29 +450,6 @@ impl Engine {
                         (response, snapshot)
                     }
                 };
-                if response.sensitive_input {
-                    weasel_common::input_trace!(
-                        "engine.end client={} request={} token={:?} revision={} sensitive=true elapsed_us={}",
-                        client_id,
-                        envelope.request_id,
-                        response.token,
-                        response.revision,
-                        started.elapsed().as_micros()
-                    );
-                } else {
-                    weasel_common::input_trace!(
-                        "engine.end client={} request={} token={:?} revision={} eaten={} state={} preedit_bytes={} commit_bytes={} elapsed_us={}",
-                        client_id,
-                        envelope.request_id,
-                        response.token,
-                        response.revision,
-                        response.eaten,
-                        response.state_updated,
-                        response.composition.len(),
-                        response.commit_text.len(),
-                        started.elapsed().as_micros()
-                    );
-                }
                 reply(
                     &connection,
                     envelope.request_id,
@@ -580,16 +532,6 @@ impl Engine {
                             }
                             _ => client.session.context_action(action),
                         };
-                        response.sensitive_input = client.sensitive_input;
-                        if matches!(
-                            action,
-                            ContextAction::Cancel
-                                | ContextAction::Submit
-                                | ContextAction::HostTerminated
-                        ) && !response.composing
-                        {
-                            client.sensitive_input = false;
-                        }
                         if action == ContextAction::ToggleAscii
                             && self.global_ascii.is_some()
                             && let Some(ascii) = response.ascii_mode
@@ -656,10 +598,6 @@ impl Engine {
             return;
         }
         let mut response = client.session.process_renderer_event(&event);
-        response.sensitive_input = client.sensitive_input;
-        if !response.composing {
-            client.sensitive_input = false;
-        }
         response.external_preedit =
             response.composing && self.renderer.supports_preedit() && !client.inline_preedit;
         client.revision = client.revision.wrapping_add(1);

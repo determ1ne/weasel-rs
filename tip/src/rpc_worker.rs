@@ -31,15 +31,6 @@ pub(crate) enum CommandError {
     Closed,
     Full,
 }
-impl CommandError {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::NotStarted => "context.worker_absent",
-            Self::Closed => "context.queue_closed",
-            Self::Full => "context.queue_full",
-        }
-    }
-}
 
 enum RpcCommand {
     Log {
@@ -747,11 +738,6 @@ impl RpcWorker {
                     std::mem::forget(module);
                 }
                 drop(thread);
-                weasel_common::input_trace!(
-                    "rpc.stop detached wait_result={:?} timeout_ms={}; DLL retained until process exit",
-                    result,
-                    STOP_TIMEOUT_MS
-                );
             }
         }
         // A timed-out worker may hold the old queue lock or publish late data.

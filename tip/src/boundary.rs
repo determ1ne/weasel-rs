@@ -25,9 +25,6 @@ pub(crate) fn guard<T>(
     if faulted.is_some_and(|flag| flag.load(Ordering::Acquire)) {
         return Err(Error::from_hresult(E_FAIL));
     }
-    if let Some(flag) = faulted {
-        flag.event("callback.enter", 0);
-    }
     let result = match catch_unwind(AssertUnwindSafe(operation)) {
         Ok(result) => result,
         Err(payload) => {
@@ -39,15 +36,6 @@ pub(crate) fn guard<T>(
             Err(Error::from_hresult(E_FAIL))
         }
     };
-    if let Some(flag) = faulted {
-        flag.event(
-            "callback.exit",
-            result
-                .as_ref()
-                .err()
-                .map_or(0, |e| e.code().0 as u32 as u64),
-        );
-    }
     result
 }
 

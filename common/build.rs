@@ -23,7 +23,6 @@ fn main() {
             "Windows.Win32.MessageBoxW",
             "Windows.Win32.MB_OK",
             "Windows.Win32.MB_SETFOREGROUND",
-            "Windows.Win32.OutputDebugStringW",
             "Windows.Win32.GetCurrentProcess",
             "Windows.Win32.OpenProcessToken",
             "Windows.Win32.GetTokenInformation",

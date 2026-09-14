@@ -85,30 +85,15 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
         // the pointed-to COM allocation alive throughout this callback.
         let service = unsafe { &*self.service };
         let _reservation = safety::EditReservation::new(service, self.ticket, self.generation);
-        let started = std::time::Instant::now();
-        weasel_common::input_trace!(
-            "edit.enter ticket={} activation={} cookie={:?}",
-            self.ticket,
-            self.generation,
-            ec
-        );
         let result = boundary::guard(Some(&service.faulted), || {
             if !service.activated.load(Ordering::Acquire)
                 || service.generation.load(Ordering::Acquire) != self.generation
                 || service.edit_ticket.load(Ordering::Acquire) != self.ticket
             {
-                weasel_common::input_trace!(
-                    "edit.skip ticket={} reason=stale_activation_or_ticket",
-                    self.ticket
-                );
                 return Ok(());
             }
             let pending = service.lock(&self.pending)?.take();
             let Some(pending) = pending else {
-                weasel_common::input_trace!(
-                    "edit.skip ticket={} reason=already_consumed",
-                    self.ticket
-                );
                 return Ok(());
             };
             let state = pending.state.clone();
@@ -135,14 +120,6 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
                     return Err(error);
                 }
             };
-            weasel_common::input_trace!(
-                "edit.apply ticket={} token={:?} revision={} step={} valid={}",
-                self.ticket,
-                pending.response.token,
-                pending.response.revision,
-                pending.step.name(),
-                valid
-            );
             let result = if valid {
                 service.edit_mutated.store(false, Ordering::Release);
                 state.editing.store(true, Ordering::Release);
@@ -212,9 +189,6 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
                     .as_bool()
                     {
                         let error = Error::from_thread();
-                        service
-                            .faulted
-                            .event("edit.post_failed", error.code().0 as u32 as u64);
                         service.faulted.request_maintenance();
                         return Err(error);
                     }
@@ -222,12 +196,6 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
             }
             result
         });
-        weasel_common::input_trace!(
-            "edit.exit ticket={} hr={:?} elapsed_us={}",
-            self.ticket,
-            result.as_ref().err().map(|e| e.code()),
-            started.elapsed().as_micros()
-        );
         result
     }
 }

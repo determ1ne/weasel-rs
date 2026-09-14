@@ -243,16 +243,6 @@ impl RpcClient {
                 // A single ordered stream for TIP document edits. Mixing direct
                 // replies and unsolicited commits on different paths reorders them.
                 if let Some(Payload::KeyEventResponse(response)) = envelope.payload.as_ref() {
-                    if response.sensitive_input {
-                        crate::input_trace!(
-                            "rpc.rx request={} token={:?} revision={} sensitive=true",
-                            envelope.request_id,
-                            response.token,
-                            response.revision
-                        );
-                    } else {
-                        crate::input_trace!("rpc.rx request={} token={:?} revision={} eaten={} state={} preedit_bytes={} commit_bytes={}", envelope.request_id, response.token, response.revision, response.eaten, response.state_updated, response.composition.len(), response.commit_text.len());
-                    }
                     let _ = reader_key_responses.send(response.clone());
                 }
                 if envelope.request_id == 0
@@ -575,26 +565,6 @@ impl RpcClient {
             return Err(RpcError::Protocol("request ID exhausted".into()));
         }
         let (tx, rx) = oneshot::channel();
-        match &payload {
-            Payload::KeyEvent(key) if key.sensitive_input => {
-                crate::input_trace!("rpc.tx request={} token={:?} sensitive=true", id, key.token)
-            }
-            Payload::KeyEvent(key) => crate::input_trace!(
-                "rpc.tx request={} token={:?} vk={} lp={} up={}",
-                id,
-                key.token,
-                key.virtual_key,
-                key.lparam,
-                key.key_up
-            ),
-            Payload::ContextCommand(command) => crate::input_trace!(
-                "rpc.context request={} token={:?} action={}",
-                id,
-                command.token,
-                command.action
-            ),
-            _ => (),
-        }
         {
             let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
             let requests = pending.as_mut().ok_or(RpcError::Disconnected)?;

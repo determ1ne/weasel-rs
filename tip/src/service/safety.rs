@@ -33,7 +33,6 @@ impl Drop for EditReservation<'_> {
 
 impl TextService {
     pub(super) fn reject_readonly_edit(&self, state: &ContextState) -> Result<()> {
-        self.faulted.event("edit.readonly", state.id);
         self.lock(&self.tested_key)?.take();
         self.discard_context_edits(state.id)?;
         state.generation.fetch_add(1, Ordering::AcqRel);
@@ -48,10 +47,7 @@ impl TextService {
         state.composition_epoch.store(0, Ordering::Release);
         state.disconnect_requested.store(false, Ordering::Release);
         self.edit_requested.store(false, Ordering::Release);
-        let result = self.lock(&state.rpc)?.context_command(command);
-        if let Err(error) = result {
-            self.faulted.event(error.name(), state.id);
-        }
+        let _ = self.lock(&state.rpc)?.context_command(command);
         // Existing host text is left untouched. Once writable, the normal
         // disconnected-composition path ends any remaining composition.
         Ok(())

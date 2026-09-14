@@ -8,17 +8,6 @@ impl TextService {
         owner: IUnknown,
         secure_mode: bool,
     ) -> Result<()> {
-        // The marker belongs to the TIP DLL directory, not the host EXE.
-        weasel_common::input_diagnostics::enable(
-            crate::registration::module_path()
-                .ok()
-                .and_then(|path| {
-                    std::path::PathBuf::from(path.to_string_lossy())
-                        .parent()
-                        .map(|directory| directory.join(".dev").is_file())
-                })
-                .unwrap_or(false),
-        );
         let result = (|| {
             self.activate_with_thread_manager(
                 thread_mgr,
