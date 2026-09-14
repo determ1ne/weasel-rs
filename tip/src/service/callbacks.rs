@@ -3,7 +3,7 @@ use super::*;
 impl ITfTextInputProcessor_Impl for TextService_Impl {
     fn Activate(&self, ptim: Ref<'_, ITfThreadMgr>, tid: TfClientId) -> Result<()> {
         boundary::guard(Some(&self.faulted), || {
-            self.activate_tsf(ptim, tid, self.to_interface())
+            self.activate_tsf(ptim, tid, self.to_interface(), false)
         })
     }
 
@@ -16,14 +16,14 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 }
 
 impl ITfTextInputProcessorEx_Impl for TextService_Impl {
-    fn ActivateEx(
-        &self,
-        ptim: Ref<'_, ITfThreadMgr>,
-        tid: TfClientId,
-        _dwflags: u32,
-    ) -> Result<()> {
+    fn ActivateEx(&self, ptim: Ref<'_, ITfThreadMgr>, tid: TfClientId, dwflags: u32) -> Result<()> {
         boundary::guard(Some(&self.faulted), || {
-            self.activate_tsf(ptim, tid, self.to_interface())
+            self.activate_tsf(
+                ptim,
+                tid,
+                self.to_interface(),
+                dwflags & TF_TMF_SECUREMODE as u32 != 0,
+            )
         })
     }
 }
@@ -65,7 +65,8 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
     fn OnPushContext(&self, pic: Ref<'_, ITfContext>) -> Result<()> {
         boundary::guard(Some(&self.faulted), || {
             if let Some(context) = pic.to_owned() {
-                self.ensure_context(context, &self.to_interface())?;
+                let state = self.ensure_context(context, &self.to_interface())?;
+                self.request_secure_field_probe(&state, self.to_interface(), false)?;
             }
             self.subscribe_to_focused_context(self.to_interface(), self.to_interface())
         })
@@ -137,18 +138,12 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         }
 
         let started = std::time::Instant::now();
-        weasel_common::input_trace!(
-            "callback.begin name=OnTestKeyDown vk={} lp={}",
-            wparam.0,
-            lparam.0
-        );
+        weasel_common::input_trace!("callback.begin name=OnTestKeyDown");
         let result = boundary::guard(Some(&self.faulted), || {
             self.forward_key_event(pic, wparam, lparam, false, true, self.to_interface())
         });
         weasel_common::input_trace!(
-            "callback.end name=OnTestKeyDown vk={} lp={} eaten={:?} hr={:?} elapsed_us={}",
-            wparam.0,
-            lparam.0,
+            "callback.end name=OnTestKeyDown eaten={:?} hr={:?} elapsed_us={}",
             result.as_ref().ok().map(|v| v.as_bool()),
             result.as_ref().err().map(|e| e.code()),
             started.elapsed().as_micros()
@@ -167,18 +162,12 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         }
 
         let started = std::time::Instant::now();
-        weasel_common::input_trace!(
-            "callback.begin name=OnTestKeyUp vk={} lp={}",
-            wparam.0,
-            lparam.0
-        );
+        weasel_common::input_trace!("callback.begin name=OnTestKeyUp");
         let result = boundary::guard(Some(&self.faulted), || {
             self.forward_key_event(pic, wparam, lparam, true, true, self.to_interface())
         });
         weasel_common::input_trace!(
-            "callback.end name=OnTestKeyUp vk={} lp={} eaten={:?} hr={:?} elapsed_us={}",
-            wparam.0,
-            lparam.0,
+            "callback.end name=OnTestKeyUp eaten={:?} hr={:?} elapsed_us={}",
             result.as_ref().ok().map(|v| v.as_bool()),
             result.as_ref().err().map(|e| e.code()),
             started.elapsed().as_micros()
@@ -192,18 +181,12 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         }
 
         let started = std::time::Instant::now();
-        weasel_common::input_trace!(
-            "callback.begin name=OnKeyDown vk={} lp={}",
-            wparam.0,
-            lparam.0
-        );
+        weasel_common::input_trace!("callback.begin name=OnKeyDown");
         let result = boundary::guard(Some(&self.faulted), || {
             self.forward_key_event(pic, wparam, lparam, false, false, self.to_interface())
         });
         weasel_common::input_trace!(
-            "callback.end name=OnKeyDown vk={} lp={} eaten={:?} hr={:?} elapsed_us={}",
-            wparam.0,
-            lparam.0,
+            "callback.end name=OnKeyDown eaten={:?} hr={:?} elapsed_us={}",
             result.as_ref().ok().map(|v| v.as_bool()),
             result.as_ref().err().map(|e| e.code()),
             started.elapsed().as_micros()
@@ -217,18 +200,12 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         }
 
         let started = std::time::Instant::now();
-        weasel_common::input_trace!(
-            "callback.begin name=OnKeyUp vk={} lp={}",
-            wparam.0,
-            lparam.0
-        );
+        weasel_common::input_trace!("callback.begin name=OnKeyUp");
         let result = boundary::guard(Some(&self.faulted), || {
             self.forward_key_event(pic, wparam, lparam, true, false, self.to_interface())
         });
         weasel_common::input_trace!(
-            "callback.end name=OnKeyUp vk={} lp={} eaten={:?} hr={:?} elapsed_us={}",
-            wparam.0,
-            lparam.0,
+            "callback.end name=OnKeyUp eaten={:?} hr={:?} elapsed_us={}",
             result.as_ref().ok().map(|v| v.as_bool()),
             result.as_ref().err().map(|e| e.code()),
             started.elapsed().as_micros()

@@ -104,6 +104,8 @@ impl LanguageBar {
             connected: AtomicBool::new(true),
             available: AtomicBool::new(false),
             suspended: AtomicBool::new(false),
+            secure_field: AtomicBool::new(false),
+            allow_rime_in_secure_fields: AtomicBool::new(false),
             light_background: AtomicBool::new(taskbar_is_light()),
             _module: ModuleLease::new(),
         });
@@ -118,9 +120,21 @@ impl LanguageBar {
         ascii: Option<bool>,
         connection_failed: bool,
         suspended: bool,
+        secure_field: bool,
+        allow_rime_in_secure_fields: bool,
     ) -> Result<()> {
         let suspended_changed =
             self.button.suspended.swap(suspended, Ordering::AcqRel) != suspended;
+        let secure_changed = self
+            .button
+            .secure_field
+            .swap(secure_field, Ordering::AcqRel)
+            != secure_field;
+        let secure_policy_changed = self
+            .button
+            .allow_rime_in_secure_fields
+            .swap(allow_rime_in_secure_fields, Ordering::AcqRel)
+            != allow_rime_in_secure_fields;
         {
             let mut target = self
                 .button
@@ -152,7 +166,9 @@ impl LanguageBar {
             || mode_changed
             || connection_changed
             || availability_changed
-            || theme_changed;
+            || theme_changed
+            || secure_changed
+            || secure_policy_changed;
         if !changed {
             return Ok(());
         }
@@ -175,7 +191,7 @@ impl LanguageBar {
 
 impl LanguageBar {
     fn suspend(&self) -> Result<()> {
-        self.update(None, None, true, true)
+        self.update(None, None, true, true, false, false)
     }
 }
 
@@ -203,6 +219,8 @@ struct ModeButton {
     connected: AtomicBool,
     available: AtomicBool,
     suspended: AtomicBool,
+    secure_field: AtomicBool,
+    allow_rime_in_secure_fields: AtomicBool,
     light_background: AtomicBool,
     _module: ModuleLease,
 }
@@ -211,6 +229,8 @@ impl ModeButton {
     fn text(&self) -> &'static str {
         if self.suspended.load(Ordering::Acquire) {
             "!"
+        } else if self.secure_field.load(Ordering::Acquire) {
+            "密"
         } else if !self.mode_known.load(Ordering::Acquire) {
             "…"
         } else if self.ascii.load(Ordering::Acquire) {
@@ -263,6 +283,12 @@ impl ITfLangBarItem_Impl for ModeButton_Impl {
         boundary::guard(None, || {
             Ok(BSTR::from(if self.suspended.load(Ordering::Acquire) {
                 "输入服务已暂停；Shift＋右键可查看诊断信息"
+            } else if self.secure_field.load(Ordering::Acquire) {
+                if self.allow_rime_in_secure_fields.load(Ordering::Acquire) {
+                    "您选择让 Rime 处理密码输入。如果没有特殊需求，您应该关闭此选项。在设置中了解详情。"
+                } else {
+                    "正在输入密码"
+                }
             } else if !self.connected.load(Ordering::Acquire) {
                 "无法连接到 Rime"
             } else if !self.mode_known.load(Ordering::Acquire) {
@@ -285,6 +311,7 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
             if click != TF_LBI_CLK_LEFT
                 || !self.available.load(Ordering::Acquire)
                 || self.suspended.load(Ordering::Acquire)
+                || self.secure_field.load(Ordering::Acquire)
             {
                 return Ok(());
             }
@@ -336,6 +363,8 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
                 self.ascii.load(Ordering::Acquire),
                 light_background,
                 self.mode_known.load(Ordering::Acquire),
+                self.secure_field.load(Ordering::Acquire),
+                self.allow_rime_in_secure_fields.load(Ordering::Acquire),
             )
         })
     }
@@ -398,7 +427,22 @@ fn icon_name(connected: bool, ascii: bool, light_background: bool) -> PCWSTR {
     }
 }
 
-fn mode_icon_name(connected: bool, ascii: bool, light_background: bool, known: bool) -> PCWSTR {
+fn mode_icon_name(
+    connected: bool,
+    ascii: bool,
+    light_background: bool,
+    known: bool,
+    secure_field: bool,
+    allow_rime_in_secure_fields: bool,
+) -> PCWSTR {
+    if secure_field {
+        return match (allow_rime_in_secure_fields, light_background) {
+            (false, true) => w!("KEY_DARK"),
+            (false, false) => w!("KEY_LIGHT"),
+            (true, true) => w!("KEY_ALERT_DARK"),
+            (true, false) => w!("KEY_ALERT_LIGHT"),
+        };
+    }
     if connected && !known {
         w!("BRAND")
     } else {
@@ -411,6 +455,8 @@ fn load_mode_icon(
     ascii: bool,
     light_background: bool,
     known: bool,
+    secure_field: bool,
+    allow_rime_in_secure_fields: bool,
 ) -> Result<HICON> {
     let mut module = HMODULE::default();
     // GetModuleHandleW(None) would look in the host EXE, not our TIP DLL.
@@ -427,7 +473,14 @@ fn load_mode_icon(
     let handle = unsafe {
         LoadImageW(
             Some(module),
-            mode_icon_name(connected, ascii, light_background, known),
+            mode_icon_name(
+                connected,
+                ascii,
+                light_background,
+                known,
+                secure_field,
+                allow_rime_in_secure_fields,
+            ),
             IMAGE_ICON as u32,
             GetSystemMetrics(SM_CXSMICON).max(1),
             GetSystemMetrics(SM_CYSMICON).max(1),
@@ -453,6 +506,8 @@ mod tests {
             connected: AtomicBool::new(true),
             available: AtomicBool::new(false),
             suspended: AtomicBool::new(false),
+            secure_field: AtomicBool::new(false),
+            allow_rime_in_secure_fields: AtomicBool::new(false),
             light_background: AtomicBool::new(taskbar_is_light()),
             _module: ModuleLease::new(),
         })
@@ -570,6 +625,38 @@ mod tests {
                 BSTR::from(expected)
             );
         }
+        button.secure_field.store(true, Ordering::Release);
+        button
+            .allow_rime_in_secure_fields
+            .store(false, Ordering::Release);
+        assert_eq!(unsafe { item.GetText().unwrap() }, BSTR::from("密"));
+        assert_eq!(
+            unsafe { item.GetTooltipString().unwrap() },
+            BSTR::from("正在输入密码")
+        );
+        button
+            .allow_rime_in_secure_fields
+            .store(true, Ordering::Release);
+        assert!(
+            String::from_utf16_lossy(&unsafe { item.GetTooltipString().unwrap() })
+                .contains("应该关闭此选项")
+        );
+        for (allow, light, expected) in [
+            (false, true, "KEY_DARK"),
+            (false, false, "KEY_LIGHT"),
+            (true, true, "KEY_ALERT_DARK"),
+            (true, false, "KEY_ALERT_LIGHT"),
+        ] {
+            assert_eq!(
+                unsafe {
+                    mode_icon_name(true, false, light, true, true, allow)
+                        .to_string()
+                        .unwrap()
+                },
+                expected
+            );
+            assert!(include_str!("../../icons.rc").contains(&format!("{expected} ICON ")));
+        }
     }
 
     #[test]
@@ -585,7 +672,7 @@ mod tests {
         for ascii in [false, true] {
             assert_eq!(
                 unsafe {
-                    mode_icon_name(true, ascii, true, false)
+                    mode_icon_name(true, ascii, true, false, false, false)
                         .to_string()
                         .unwrap()
                 },
@@ -593,7 +680,7 @@ mod tests {
             );
             assert_eq!(
                 unsafe {
-                    mode_icon_name(false, ascii, true, false)
+                    mode_icon_name(false, ascii, true, false, false, false)
                         .to_string()
                         .unwrap()
                 },
@@ -636,7 +723,22 @@ impl TextService {
         let suspended = state
             .as_ref()
             .is_some_and(|state| state.suspended.load(Ordering::Acquire));
-        if let Err(error) = bar.update(state.as_ref(), ascii, connection_failed, suspended) {
+        let secure_field = state
+            .as_ref()
+            .is_some_and(|state| self.secure_field_visible(state));
+        let allow_rime_in_secure_fields = state
+            .as_ref()
+            .map(|state| self.allow_rime_for_secure_field(state))
+            .transpose()?
+            .unwrap_or(false);
+        if let Err(error) = bar.update(
+            state.as_ref(),
+            ascii,
+            connection_failed,
+            suspended,
+            secure_field,
+            allow_rime_in_secure_fields,
+        ) {
             self.lock(&self.rpc)?
                 .log("warn", format!("language bar update failed: {error}"));
         }

@@ -36,6 +36,7 @@ pub(crate) enum Work {
 
 struct ClientSession {
     inline_preedit: bool,
+    sensitive_input: bool,
     connection_id: u64,
     connection: Arc<RpcConnection>,
     alive: Arc<AtomicBool>,
@@ -49,6 +50,7 @@ struct ClientSession {
 pub(crate) struct Engine {
     // None 保留每应用行为；Some 为服务生命周期内的共享模式。
     global_ascii: Option<bool>,
+    allow_rime_in_secure_fields: bool,
     settings: Option<weasel_common::settings::ConfigSnapshot>,
     // Field order is intentional: destroy every session before dropping the engine.
     clients: HashMap<u64, ClientSession>,
@@ -108,7 +110,13 @@ mod preedit_tests {
     }
 }
 
-fn reply(connection: &RpcConnection, request_id: u64, response: KeyEventResponse) {
+fn reply(
+    connection: &RpcConnection,
+    request_id: u64,
+    mut response: KeyEventResponse,
+    allow_rime_in_secure_fields: bool,
+) {
+    response.allow_rime_in_secure_fields = Some(allow_rime_in_secure_fields);
     if let Err(error) = connection.enqueue(Envelope {
         request_id,
         payload: Some(Payload::KeyEventResponse(host_response(response))),
@@ -151,6 +159,9 @@ impl Engine {
                     .unwrap_or(false)
                     .then(|| s.get::<bool>(".ascii_mode").ok().flatten().unwrap_or(false))
             }),
+            allow_rime_in_secure_fields: settings
+                .as_ref()
+                .is_some_and(|settings| settings.allow_rime_in_secure_fields()),
             settings,
             clients: HashMap::new(),
             rime,
@@ -243,7 +254,12 @@ impl Engine {
                     revision: client.revision + 1,
                     ..Default::default()
                 };
-                reply(&connection, envelope.request_id, response);
+                reply(
+                    &connection,
+                    envelope.request_id,
+                    response,
+                    self.allow_rime_in_secure_fields,
+                );
                 if self.active_client == Some(client_id) {
                     self.renderer.publish(RenderSnapshot {
                         session_id: client_id,
@@ -323,6 +339,7 @@ impl Engine {
                             settings
                                 .app_inline_preedit(connection.client_executable().unwrap_or(""))
                         }),
+                        sensitive_input: false,
                         connection_id,
                         connection: connection.clone(),
                         alive,
@@ -387,15 +404,24 @@ impl Engine {
         match envelope.payload {
             Some(Payload::KeyEvent(key_event)) => {
                 let started = std::time::Instant::now();
-                weasel_common::input_trace!(
-                    "engine.begin client={} request={} token={:?} vk={} lp={} up={}",
-                    client_id,
-                    envelope.request_id,
-                    key_event.token,
-                    key_event.virtual_key,
-                    key_event.lparam,
-                    key_event.key_up
-                );
+                if key_event.sensitive_input {
+                    weasel_common::input_trace!(
+                        "engine.begin client={} request={} token={:?} sensitive=true",
+                        client_id,
+                        envelope.request_id,
+                        key_event.token
+                    );
+                } else {
+                    weasel_common::input_trace!(
+                        "engine.begin client={} request={} token={:?} vk={} lp={} up={}",
+                        client_id,
+                        envelope.request_id,
+                        key_event.token,
+                        key_event.virtual_key,
+                        key_event.lparam,
+                        key_event.key_up
+                    );
+                }
                 let (response, snapshot) = {
                     let client = self
                         .clients
@@ -413,10 +439,14 @@ impl Engine {
                         let focus_changed = self.active_client != Some(client_id);
                         self.active_client = Some(client_id);
                         client.route.focused = true;
+                        let sensitive_response =
+                            key_event.sensitive_input || client.sensitive_input;
                         if let Some(ascii) = self.global_ascii {
                             client.session.set_ascii_mode(ascii);
                         }
                         let mut response = client.session.process_key(&key_event);
+                        response.sensitive_input = sensitive_response;
+                        client.sensitive_input = response.composing && sensitive_response;
                         if self.global_ascii.is_some()
                             && let Some(ascii) = response.ascii_mode
                         {
@@ -445,19 +475,35 @@ impl Engine {
                         (response, snapshot)
                     }
                 };
-                weasel_common::input_trace!(
-                    "engine.end client={} request={} token={:?} revision={} eaten={} state={} preedit_bytes={} commit_bytes={} elapsed_us={}",
-                    client_id,
+                if response.sensitive_input {
+                    weasel_common::input_trace!(
+                        "engine.end client={} request={} token={:?} revision={} sensitive=true elapsed_us={}",
+                        client_id,
+                        envelope.request_id,
+                        response.token,
+                        response.revision,
+                        started.elapsed().as_micros()
+                    );
+                } else {
+                    weasel_common::input_trace!(
+                        "engine.end client={} request={} token={:?} revision={} eaten={} state={} preedit_bytes={} commit_bytes={} elapsed_us={}",
+                        client_id,
+                        envelope.request_id,
+                        response.token,
+                        response.revision,
+                        response.eaten,
+                        response.state_updated,
+                        response.composition.len(),
+                        response.commit_text.len(),
+                        started.elapsed().as_micros()
+                    );
+                }
+                reply(
+                    &connection,
                     envelope.request_id,
-                    response.token,
-                    response.revision,
-                    response.eaten,
-                    response.state_updated,
-                    response.composition.len(),
-                    response.commit_text.len(),
-                    started.elapsed().as_micros()
+                    response,
+                    self.allow_rime_in_secure_fields,
                 );
-                reply(&connection, envelope.request_id, response);
                 if let Some(snapshot) = snapshot {
                     self.renderer.publish(snapshot);
                 }
@@ -534,6 +580,16 @@ impl Engine {
                             }
                             _ => client.session.context_action(action),
                         };
+                        response.sensitive_input = client.sensitive_input;
+                        if matches!(
+                            action,
+                            ContextAction::Cancel
+                                | ContextAction::Submit
+                                | ContextAction::HostTerminated
+                        ) && !response.composing
+                        {
+                            client.sensitive_input = false;
+                        }
                         if action == ContextAction::ToggleAscii
                             && self.global_ascii.is_some()
                             && let Some(ascii) = response.ascii_mode
@@ -571,7 +627,12 @@ impl Engine {
                         (response, snapshot)
                     }
                 };
-                reply(&connection, envelope.request_id, response);
+                reply(
+                    &connection,
+                    envelope.request_id,
+                    response,
+                    self.allow_rime_in_secure_fields,
+                );
                 if let Some(snapshot) = snapshot {
                     self.renderer.publish(snapshot);
                 }
@@ -595,6 +656,10 @@ impl Engine {
             return;
         }
         let mut response = client.session.process_renderer_event(&event);
+        response.sensitive_input = client.sensitive_input;
+        if !response.composing {
+            client.sensitive_input = false;
+        }
         response.external_preedit =
             response.composing && self.renderer.supports_preedit() && !client.inline_preedit;
         client.revision = client.revision.wrapping_add(1);
@@ -604,7 +669,7 @@ impl Engine {
         let snapshot =
             render_snapshot(event.session_id, client.revision, &response, &client.anchor);
         let connection = Arc::clone(&client.connection);
-        reply(&connection, 0, response);
+        reply(&connection, 0, response, self.allow_rime_in_secure_fields);
         self.renderer.publish(snapshot);
     }
 }
@@ -642,7 +707,12 @@ impl Processor<Work> for Engine {
                     response.open_emoji_panel = false;
                     response.state_updated = true;
                     response.eaten = false;
-                    reply(&client.connection, 0, response);
+                    reply(
+                        &client.connection,
+                        0,
+                        response,
+                        self.allow_rime_in_secure_fields,
+                    );
                     if self.active_client == Some(*id) {
                         self.renderer.publish(render_snapshot(
                             *id,

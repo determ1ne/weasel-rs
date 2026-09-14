@@ -71,6 +71,8 @@ message InputKey {
   bool released = 4;
   uint32 virtual_key = 5;
   int64 native_lparam = 6;
+  // Suppress diagnostic details for password and other secure input ranges.
+  bool sensitive_input = 7;
 }
 
 message Pong { string text = 1; }
@@ -86,6 +88,9 @@ message InputResult {
   InputState state = 4;
   EditEffects effects = 5;
   optional bool ascii_mode = 6;
+  // Safe default is false when talking to an older server.
+  optional bool allow_rime_in_secure_fields = 7;
+  bool sensitive_input = 8;
 }
 message InputState {
   string preedit = 1;

@@ -15,6 +15,15 @@ impl TextService {
         let Some(state) = self.find_context(&context)? else {
             return Ok(());
         };
+        let record = record.to_owned();
+        let selection_changed = record
+            .as_ref()
+            .map(|record| unsafe { record.GetSelectionStatus() })
+            .transpose()?
+            .is_some_and(|changed| changed.as_bool());
+        if selection_changed {
+            self.refresh_secure_field_from_cookie(&state, ec);
+        }
         // Start/Update/End are separate write sessions. Do not interpret the
         // temporary empty range between our own steps as a host cancellation.
         if state.suspended.load(Ordering::Acquire)
@@ -40,10 +49,10 @@ impl TextService {
         if host_deleted_preedit(range_empty, expected_empty) {
             return self.send_context_action(&state, ContextAction::Cancel, true);
         }
-        let Some(record) = record.to_owned() else {
+        let Some(_record) = record else {
             return Ok(());
         };
-        if !unsafe { record.GetSelectionStatus()? }.as_bool() {
+        if !selection_changed {
             return Ok(());
         }
         let mut selection = TF_SELECTION {

@@ -100,6 +100,7 @@ pub fn encode(envelope: &m::Envelope) -> Result<m::RpcFrame, RpcError> {
                     released: v.key_up,
                     virtual_key: v.virtual_key,
                     native_lparam: v.lparam,
+                    sensitive_input: v.sensitive_input,
                 })),
             })
         }
@@ -202,6 +203,7 @@ pub fn unpack(frame: m::RpcFrame) -> Result<m::Envelope, RpcError> {
                             virtual_key: v.virtual_key,
                             lparam: v.native_lparam,
                             test: false,
+                            sensitive_input: v.sensitive_input,
                         })
                     }
                 },
@@ -349,6 +351,8 @@ fn pack_input(v: m::KeyEventResponse) -> Result<m::InputResult, RpcError> {
             open_emoji_panel: v.open_emoji_panel,
         }),
         ascii_mode: v.ascii_mode,
+        allow_rime_in_secure_fields: v.allow_rime_in_secure_fields,
+        sensitive_input: v.sensitive_input,
     })
 }
 fn unpack_input(v: m::InputResult) -> Result<m::KeyEventResponse, RpcError> {
@@ -357,6 +361,8 @@ fn unpack_input(v: m::InputResult) -> Result<m::KeyEventResponse, RpcError> {
         revision: v.revision,
         eaten: v.handled,
         ascii_mode: v.ascii_mode,
+        allow_rime_in_secure_fields: v.allow_rime_in_secure_fields,
+        sensitive_input: v.sensitive_input,
         ..Default::default()
     };
     if let Some(s) = v.state {

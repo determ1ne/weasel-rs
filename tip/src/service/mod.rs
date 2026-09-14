@@ -18,6 +18,7 @@ mod lifecycle;
 mod range;
 mod response;
 mod safety;
+mod secure_input;
 use display_attribute::{DisplayAttributeEnumerator, DisplayAttributeInfo};
 
 use std::{
@@ -25,7 +26,7 @@ use std::{
     ptr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
 };
 
@@ -37,16 +38,17 @@ use crate::bindings::{
     ITfCompartmentEventSink_Impl, ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl,
     ITfContext, ITfContextComposition, ITfContextView, ITfDisplayAttributeInfo,
     ITfDisplayAttributeInfo_Impl, ITfDisplayAttributeProvider, ITfDisplayAttributeProvider_Impl,
-    ITfDocumentMgr, ITfEditRecord, ITfEditSession, ITfEditSession_Impl, ITfInsertAtSelection,
-    ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfProperty, ITfRange, ITfSource,
-    ITfTextEditSink, ITfTextEditSink_Impl, ITfTextInputProcessor, ITfTextInputProcessor_Impl,
-    ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl, ITfTextLayoutSink,
-    ITfTextLayoutSink_Impl, ITfThreadFocusSink, ITfThreadFocusSink_Impl, ITfThreadMgr,
-    ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl, LPARAM, RECT, S_FALSE, TF_AE_NONE,
-    TF_ANCHOR_END, TF_ANCHOR_START, TF_ATTR_INPUT, TF_CT_NONE, TF_DA_COLOR, TF_DA_COLOR_0,
-    TF_DISPLAYATTRIBUTE, TF_ES_ASYNCDONTCARE, TF_ES_READ, TF_ES_READWRITE, TF_IAS_QUERYONLY,
-    TF_LS_DOT, TF_SELECTION, TF_SELECTIONSTYLE, TfClientId, TfEditCookie, TfGuidAtom, TfLayoutCode,
-    VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VARTYPE, VT_I4, WPARAM,
+    ITfDocumentMgr, ITfEditRecord, ITfEditSession, ITfEditSession_Impl, ITfInputScope,
+    ITfInsertAtSelection, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfProperty,
+    ITfRange, ITfReadOnlyProperty, ITfSource, ITfTextEditSink, ITfTextEditSink_Impl,
+    ITfTextInputProcessor, ITfTextInputProcessor_Impl, ITfTextInputProcessorEx,
+    ITfTextInputProcessorEx_Impl, ITfTextLayoutSink, ITfTextLayoutSink_Impl, ITfThreadFocusSink,
+    ITfThreadFocusSink_Impl, ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl,
+    LPARAM, RECT, S_FALSE, TF_AE_NONE, TF_ANCHOR_END, TF_ANCHOR_START, TF_ATTR_INPUT, TF_CT_NONE,
+    TF_DA_COLOR, TF_DA_COLOR_0, TF_DISPLAYATTRIBUTE, TF_ES_ASYNCDONTCARE, TF_ES_READ,
+    TF_ES_READWRITE, TF_IAS_QUERYONLY, TF_LS_DOT, TF_SELECTION, TF_SELECTIONSTYLE,
+    TF_TMF_SECUREMODE, TfClientId, TfEditCookie, TfGuidAtom, TfLayoutCode, VARIANT, VARIANT_0,
+    VARIANT_0_0, VARIANT_0_0_0, VARTYPE, VT_I4, VT_UNKNOWN, WPARAM,
 };
 use crate::rpc_worker::RpcWorker;
 use crate::{bindings, boundary, update_window};
@@ -141,6 +143,9 @@ pub(crate) struct TextService {
     edit_ticket: AtomicU64,
     active_edit_context: AtomicU64,
     display_attribute_atom: Mutex<Option<TfGuidAtom>>,
+    secure_mode: AtomicBool,
+    allow_rime_in_secure_fields: AtomicBool,
+    secure_policy_epoch: AtomicU64,
     _module: ModuleLease,
 }
 
@@ -194,6 +199,9 @@ impl TextService {
             edit_ticket: AtomicU64::new(0),
             active_edit_context: AtomicU64::new(0),
             display_attribute_atom: Mutex::new(None),
+            secure_mode: AtomicBool::new(false),
+            allow_rime_in_secure_fields: AtomicBool::new(false),
+            secure_policy_epoch: AtomicU64::new(0),
             _module: ModuleLease::new(),
         }
     }

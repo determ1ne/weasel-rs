@@ -7,6 +7,19 @@
 #[win32]
 mod Windows {
     mod Win32 {
+        #[repr(i32)]
+        enum InputScopeManual {
+            IS_PASSWORD = 31,
+            IS_NUMERIC_PASSWORD = 63,
+        }
+
+        // InputScope.h is absent from the default Win32 metadata set.
+        // Only the first method is needed; its slot follows IUnknown.
+        #[guid(0xfde1eaee_6924_4cdf_91e7_da38cff5559d)]
+        interface ITfInputScope: IUnknown {
+            fn GetInputScopes(&self, scopes: *mut *mut InputScopeManual, count: *mut u32) -> HRESULT;
+        }
+
         mod UI {
             mod TextServices {
                 // Modern taskbar input-mode button (ctffunc.h / Weasel Globals.cpp).
@@ -58,6 +71,8 @@ mod Windows {
                     0x3d02cab6_2b8e_4781_ba20_1c9267529467;
                 const GUID_PROP_ATTRIBUTE: GUID =
                     0x34b45670_7526_11d2_a147_00105a2799b5;
+                const GUID_PROP_INPUTSCOPE: GUID =
+                    0x1713dd5a_68e7_4a5b_9af6_592a595c778d;
 
                 #[repr(i32)]
                 enum TfAnchorManual {

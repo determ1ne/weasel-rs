@@ -6,6 +6,7 @@ impl TextService {
         thread_mgr: Ref<'_, ITfThreadMgr>,
         tid: TfClientId,
         owner: IUnknown,
+        secure_mode: bool,
     ) -> Result<()> {
         // The marker belongs to the TIP DLL directory, not the host EXE.
         weasel_common::input_diagnostics::enable(
@@ -19,7 +20,13 @@ impl TextService {
                 .unwrap_or(false),
         );
         let result = (|| {
-            self.activate_with_thread_manager(thread_mgr, tid, owner.cast()?, owner.cast()?)?;
+            self.activate_with_thread_manager(
+                thread_mgr,
+                tid,
+                owner.cast()?,
+                owner.cast()?,
+                secure_mode,
+            )?;
             // Notifications must have a destination before creating context RPCs.
             self.start_update_window(owner.clone())?;
             let manager = self.lock(&self.thread_mgr)?.clone();
@@ -45,6 +52,7 @@ impl TextService {
         tid: TfClientId,
         sink: ITfThreadMgrEventSink,
         key_sink: ITfKeyEventSink,
+        secure_mode: bool,
     ) -> Result<()> {
         // TSF normally activates a TIP once per instance, but a reactivation
         // must not leave the previous sink registered on the thread manager.
@@ -92,6 +100,10 @@ impl TextService {
         *self.lock(&self.keystroke_mgr)? = Some(keystroke_mgr);
         *self.lock(&self.keystroke_client_id)? = Some(tid);
         self.lock(&self.rpc)?.start();
+        self.secure_mode.store(secure_mode, Ordering::Release);
+        self.allow_rime_in_secure_fields
+            .store(false, Ordering::Release);
+        self.secure_policy_epoch.store(0, Ordering::Release);
         self.load_input_mode()?;
         self.register_display_attribute()?;
         self.activated.store(true, Ordering::Release);
@@ -109,7 +121,11 @@ impl TextService {
             Some(context) => Some(self.ensure_context(context, &edit_sink.cast()?)?),
             None => None,
         };
-        self.focus_context(next)
+        self.focus_context(next.clone())?;
+        if let Some(state) = next {
+            self.request_secure_field_probe(&state, edit_sink.cast()?, false)?;
+        }
+        Ok(())
     }
 
     pub(super) fn subscribe_to_focused_context(
@@ -256,6 +272,7 @@ impl TextService {
                     return Ok(());
                 }
                 service.drain_context_updates(&session)?;
+                service.reconcile_secure_field()?;
                 service.refresh_language_bar()?;
                 service.schedule_edit()?;
                 Ok(())

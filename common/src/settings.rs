@@ -39,6 +39,14 @@ impl ConfigSnapshot {
             .unwrap_or(true)
     }
 
+    /// 安全输入区域默认不离开宿主进程；只有用户明确选择后才交给 Rime。
+    pub fn allow_rime_in_secure_fields(&self) -> bool {
+        self.0
+            .get("allow_rime_in_secure_fields")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
     pub fn app_inline_preedit(&self, executable: &str) -> bool {
         self.app_bool(executable, "inline_preedit")
             .unwrap_or_else(|| self.inline_preedit())

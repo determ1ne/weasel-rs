@@ -243,7 +243,16 @@ impl RpcClient {
                 // A single ordered stream for TIP document edits. Mixing direct
                 // replies and unsolicited commits on different paths reorders them.
                 if let Some(Payload::KeyEventResponse(response)) = envelope.payload.as_ref() {
-                    crate::input_trace!("rpc.rx request={} token={:?} revision={} eaten={} state={} preedit_bytes={} commit_bytes={}", envelope.request_id, response.token, response.revision, response.eaten, response.state_updated, response.composition.len(), response.commit_text.len());
+                    if response.sensitive_input {
+                        crate::input_trace!(
+                            "rpc.rx request={} token={:?} revision={} sensitive=true",
+                            envelope.request_id,
+                            response.token,
+                            response.revision
+                        );
+                    } else {
+                        crate::input_trace!("rpc.rx request={} token={:?} revision={} eaten={} state={} preedit_bytes={} commit_bytes={}", envelope.request_id, response.token, response.revision, response.eaten, response.state_updated, response.composition.len(), response.commit_text.len());
+                    }
                     let _ = reader_key_responses.send(response.clone());
                 }
                 if envelope.request_id == 0
@@ -567,6 +576,9 @@ impl RpcClient {
         }
         let (tx, rx) = oneshot::channel();
         match &payload {
+            Payload::KeyEvent(key) if key.sensitive_input => {
+                crate::input_trace!("rpc.tx request={} token={:?} sensitive=true", id, key.token)
+            }
             Payload::KeyEvent(key) => crate::input_trace!(
                 "rpc.tx request={} token={:?} vk={} lp={} up={}",
                 id,

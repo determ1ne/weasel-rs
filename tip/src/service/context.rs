@@ -25,6 +25,9 @@ pub(super) struct ContextState {
     pub route: Mutex<ResponseRoute>,
     // Engine mode belongs to a connection epoch, not merely a document.
     pub input_mode: Mutex<Option<(u64, bool)>>,
+    pub secure_field: AtomicU8,
+    pub secure_probe: Mutex<secure_input::SecureProbeSchedule>,
+    pub secure_bypass_active: AtomicBool,
     cookies: Mutex<Vec<u32>>,
 }
 
@@ -151,6 +154,9 @@ impl TextService {
             host_selection: Mutex::new(None),
             route: Mutex::new(ResponseRoute::default()),
             input_mode: Mutex::new(None),
+            secure_field: AtomicU8::new(secure_input::UNKNOWN),
+            secure_probe: Mutex::default(),
+            secure_bypass_active: AtomicBool::new(false),
             cookies: Mutex::new(Vec::new()),
         });
         let source: ITfSource = state.context.cast()?;
@@ -316,14 +322,26 @@ impl TextService {
                     );
                     continue;
                 }
-                weasel_common::input_trace!(
-                    "reply.accept token={:?} revision={} state={} preedit_bytes={} commit_bytes={}",
-                    response.token,
-                    response.revision,
-                    response.state_updated,
-                    response.composition.len(),
-                    response.commit_text.len()
+                self.update_secure_policy(
+                    response.allow_rime_in_secure_fields,
+                    token.connection_epoch,
                 );
+                if response.sensitive_input {
+                    weasel_common::input_trace!(
+                        "reply.accept token={:?} revision={} sensitive=true",
+                        response.token,
+                        response.revision
+                    );
+                } else {
+                    weasel_common::input_trace!(
+                        "reply.accept token={:?} revision={} state={} preedit_bytes={} commit_bytes={}",
+                        response.token,
+                        response.revision,
+                        response.state_updated,
+                        response.composition.len(),
+                        response.commit_text.len()
+                    );
+                }
                 state.reconciling.store(false, Ordering::Release);
                 if let Some(ascii) = response.ascii_mode {
                     *self.lock(&state.input_mode)? = Some((token.connection_epoch, ascii));

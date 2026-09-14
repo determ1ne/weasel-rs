@@ -73,6 +73,12 @@ fn overlay(base: &mut Value, bytes: &[u8]) -> Result<(), String> {
     {
         return Err("global_ascii_status must be a boolean".into());
     }
+    if next
+        .get("allow_rime_in_secure_fields")
+        .is_some_and(|v| !v.is_boolean())
+    {
+        return Err("allow_rime_in_secure_fields must be a boolean".into());
+    }
     if next.get("ascii_mode").is_some_and(|v| !v.is_boolean()) {
         return Err("ascii_mode must be a boolean".into());
     }

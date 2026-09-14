@@ -167,19 +167,40 @@ impl TextService {
             return Ok(BOOL(0));
         }
         self.focus_context(Some(state.clone()))?;
+        if state.secure_field.load(Ordering::Acquire) == secure_input::UNKNOWN {
+            // Resolve the first key synchronously. If the host refuses a read
+            // session, fail closed for this key and retry on the next callback.
+            let _ = self.request_secure_field_probe(&state, session.clone(), true);
+        }
+        if self.should_bypass_secure_field(&state)? {
+            self.lock(&self.tested_key)?.take();
+            self.reconcile_secure_field()?;
+            self.refresh_language_bar()?;
+            return Ok(BOOL(0));
+        }
         if self.cleanup_disconnected_composition(&state, &session)? {
             return Ok(BOOL(0));
         }
         let token = state.token()?;
-        weasel_common::input_trace!(
-            "key.identity context={} vk={} lp={} up={} test={} message_time={}",
-            state.id,
-            wparam.0,
-            lparam.0,
-            key_up,
-            test,
-            unsafe { bindings::GetMessageTime() }
-        );
+        let sensitive_input = self.secure_field_visible(&state);
+        if sensitive_input {
+            weasel_common::input_trace!(
+                "key.identity context={} up={} test={} sensitive=true",
+                state.id,
+                key_up,
+                test
+            );
+        } else {
+            weasel_common::input_trace!(
+                "key.identity context={} vk={} lp={} up={} test={} message_time={}",
+                state.id,
+                wparam.0,
+                lparam.0,
+                key_up,
+                test,
+                unsafe { bindings::GetMessageTime() }
+            );
+        }
         {
             let mut cached = self.lock(&self.tested_key)?;
             if TestedKey::reuse(&mut cached, &token, key_up, test) {
@@ -198,6 +219,7 @@ impl TextService {
             return Ok(BOOL(0));
         }
         event.token = Some(token);
+        event.sensitive_input = sensitive_input;
         let response = self.lock(&state.rpc)?.process_key_event(event);
         let Some(response) = response else {
             weasel_common::input_trace!(

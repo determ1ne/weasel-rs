@@ -35,6 +35,12 @@
       "title": "共享中英文状态",
       "default": false
     },
+    "allow_rime_in_secure_fields": {
+      "description": "关闭时，密码等安全输入区域将绕过 Rime 并直接交给应用。仅当密码包含必须通过输入法转换的内容（例如中文）时才建议开启。",
+      "type": "boolean",
+      "title": "允许 Rime 处理安全输入区域",
+      "default": false
+    },
     "inline_preedit": {
       "description": "是否在宿主编辑框内联显示预编辑文本",
       "type": "boolean",
@@ -190,6 +196,7 @@
     "preedit_type": "composition",
     "ascii_mode": false,
     "global_ascii_status": false,
+    "allow_rime_in_secure_fields": false,
     "themeSettings": {
       "abc": {},
       "eleven": {},

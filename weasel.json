@@ -5,6 +5,7 @@
   "preedit_type": "composition",
   "ascii_mode": false,
   "global_ascii_status": false,
+  "allow_rime_in_secure_fields": false,
   "themeSettings": {
     "abc": {},
     "eleven": {},
