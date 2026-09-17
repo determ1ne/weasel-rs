@@ -3,7 +3,7 @@ import { AppOptions, AppEntry, IconAction } from "app-options.slint";
 import { ColorEditor } from "color-editor.slint";
 import { WasmModules, WasmEntry } from "wasm-modules.slint";
 export { ColorCodec } from "color-editor.slint";
-export struct SettingField { source-index: int, section: string, shown: bool, title: string, key: string, description: string, choices: [string], selected: int, checked: bool, text: string, text-input: bool, boolean: bool, overridden: bool, font-size: bool, color-input: bool, single-color: bool, multiline: bool }
+export struct SettingField { source-index: int, section: string, shown: bool, title: string, key: string, description: string, choices: [string], selected: int, checked: bool, text: string, text-input: bool, boolean: bool, overridden: bool, font-size: bool, color-input: bool, allow-system-color: bool, multiline: bool }
 export component SettingsWindow inherits Window {
     title: "小狼毫RS：设置";
     default-font-family: "Segoe UI";
@@ -119,7 +119,7 @@ export component SettingsWindow inherits Window {
                         if field.description != "": Text { text: field.description; font-size: 12px; opacity: 0.75; wrap: word-wrap; }
                       }
                       if field.color-input: ColorEditor {
-                        single-color: field.single-color;
+                        allow-system: field.allow-system-color;
                         min-height: 32px;
                         enabled: root.editable;
                         value: field.text;

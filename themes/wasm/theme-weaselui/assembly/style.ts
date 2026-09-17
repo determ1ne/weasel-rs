@@ -1,5 +1,5 @@
 import * as defaults from "./defaults";
-import { options, settings, BOOLEAN, STRING, NUMBER, log, set_font, line_height, set_panel } from "@weasel-rs/sdk-as/assembly";
+import { options, settings, BOOLEAN, STRING, NUMBER, OBJECT, log, set_font, line_height, set_panel } from "@weasel-rs/sdk-as/assembly";
 
 function warn(path: string): void {
   const bytes = String.UTF8.encode("invalid weaselui config " + path + "; using default");
@@ -17,9 +17,12 @@ function dimension(key: string, fallback: f32, minimum: f64 = 0, maximum: f64 = 
   return <f32>value;
 }
 // 接受 RGB / ARGB 十六进制（可带 #），统一转换为宿主使用的 ARGB。
+let darkMode: bool = false;
 function color(key: string, fallback: u32): u32 {
-  const path = "/color/" + key;
+  let path = "/color/" + key;
   if (options.kind(path) == 0) return fallback;
+  // 单色兼容旧配置；对象按宿主传入的外观选择分支，缺失或无效分支记录日志。
+  if (options.kind(path) == OBJECT) path += darkMode ? "/dark" : "/light";
   let text = options.string(path);
   if (text.startsWith("#")) text = text.substring(1);
   if (options.kind(path) != STRING || (text.length != 6 && text.length != 8)) {
@@ -101,7 +104,7 @@ export function label(index: i32): string {
   return LABEL_FORMAT.replace("%s", (index + 1).toString());
 }
 // 初始化时读取一次配置、设置字体并测量行高，绘制路径只消费已校验的值。
-export function loadConfig(): void {
+export function loadConfig(dark: bool): void {
   HORIZONTAL = options.kind("/horizontal") == 0 ? defaults.HORIZONTAL : options.boolean("/horizontal");
   if (options.kind("/horizontal") != 0 && options.kind("/horizontal") != BOOLEAN) {
     warn("/horizontal"); HORIZONTAL = defaults.HORIZONTAL;
@@ -110,9 +113,6 @@ export function loadConfig(): void {
   PREVIEW = preeditType == "preview";
   if ((settings.kind("/preedit_type") != 0 && settings.kind("/preedit_type") != STRING) ||
       (preeditType != "composition" && preeditType != "preview")) warn("global preedit_type");
-  colors.text = color("text", defaults.COLOR_TEXT);
-  colors.hilited_text = color("hilited_text", defaults.COLOR_HILITED_TEXT);
-  colors.hilited_back = color("hilited_back", defaults.COLOR_HILITED_BACK);
   font(0, "font_face", defaults.FONT_FACE); font(1, "label_font_face", defaults.LABEL_FONT_FACE); font(2, "comment_font_face", defaults.COMMENT_FONT_FACE);
   TEXT_SIZE = point("font_point", defaults.FONT_POINT); LABEL_SIZE = point("label_font_point", defaults.LABEL_FONT_POINT); COMMENT_SIZE = point("comment_font_point", defaults.COMMENT_FONT_POINT);
   TEXT_HEIGHT = line_height(0, TEXT_SIZE);
@@ -123,15 +123,6 @@ export function loadConfig(): void {
       LABEL_FORMAT.length > 64 || LABEL_FORMAT.indexOf("%s") < 0) {
     warn("/label_format"); LABEL_FORMAT = defaults.LABEL_FORMAT;
   }
-  colors.back_color = color("back", defaults.COLOR_BACK);
-  colors.border_color = color("border", defaults.COLOR_BORDER);
-  colors.candidate_text_color = color("candidate_text", defaults.COLOR_CANDIDATE_TEXT);
-  colors.label_color = color("label", defaults.COLOR_LABEL);
-  colors.comment_text_color = color("comment_text", defaults.COLOR_COMMENT_TEXT);
-  colors.hilited_candidate_text_color = color("hilited_candidate_text", defaults.COLOR_HILITED_CANDIDATE_TEXT);
-  colors.hilited_candidate_back_color = color("hilited_candidate_back", defaults.COLOR_HILITED_CANDIDATE_BACK);
-  colors.hilited_label_color = color("hilited_label", defaults.COLOR_HILITED_LABEL);
-  colors.hilited_comment_text_color = color("hilited_comment_text", defaults.COLOR_HILITED_COMMENT_TEXT);
   PAD = dimension("margin_x", defaults.LAYOUT_MARGIN_X);
   PAD_Y = dimension("margin_y", defaults.LAYOUT_MARGIN_Y);
   PADDING = dimension("hilite_padding", defaults.LAYOUT_HILITE_PADDING);
@@ -141,9 +132,10 @@ export function loadConfig(): void {
   LABEL_GAP = dimension("hilite_spacing", defaults.LAYOUT_HILITE_SPACING);
   RADIUS = dimension("hilite_corner_radius", defaults.LAYOUT_HILITE_CORNER_RADIUS);
   OUTER_RADIUS = dimension("corner_radius", defaults.LAYOUT_CORNER_RADIUS);
-  set_panel(OUTER_RADIUS, dimension("shadow_radius", defaults.LAYOUT_SHADOW_RADIUS, 0, 250),
-    dimension("shadow_offset_x", defaults.LAYOUT_SHADOW_OFFSET_X, -1024, 1024), dimension("shadow_offset_y", defaults.LAYOUT_SHADOW_OFFSET_Y, -1024, 1024),
-    <i32>color("shadow", defaults.COLOR_SHADOW));
+  shadowRadius = dimension("shadow_radius", defaults.LAYOUT_SHADOW_RADIUS, 0, 250);
+  shadowX = dimension("shadow_offset_x", defaults.LAYOUT_SHADOW_OFFSET_X, -1024, 1024);
+  shadowY = dimension("shadow_offset_y", defaults.LAYOUT_SHADOW_OFFSET_Y, -1024, 1024);
+  loadColors(dark);
   ROW_HEIGHT = Mathf.max(TEXT_HEIGHT, Mathf.max(LABEL_HEIGHT, COMMENT_HEIGHT)) + 2 * PADDING;
   // 最大尺寸为 0 表示不作配置限制，但仍遵守宿主可接受的尺寸上限。
   MIN_WIDTH = dimension("min_width", defaults.LAYOUT_MIN_WIDTH);
@@ -154,4 +146,26 @@ export function loadConfig(): void {
   MAX_HEIGHT = dimension("max_height", defaults.LAYOUT_MAX_HEIGHT);
   if (MAX_HEIGHT == 0) MAX_HEIGHT = 8192;
   MAX_HEIGHT = Mathf.max(MAX_HEIGHT, MIN_HEIGHT);
+}
+
+let shadowRadius: f32 = 0;
+let shadowX: f32 = 0;
+let shadowY: f32 = 0;
+
+// 系统外观变化只重载颜色（包括合成阴影），不重复设置字体或测量布局。
+export function loadColors(dark: bool): void {
+  darkMode = dark;
+  colors.text = color("text", defaults.COLOR_TEXT);
+  colors.hilited_text = color("hilited_text", defaults.COLOR_HILITED_TEXT);
+  colors.hilited_back = color("hilited_back", defaults.COLOR_HILITED_BACK);
+  colors.back_color = color("back", defaults.COLOR_BACK);
+  colors.border_color = color("border", defaults.COLOR_BORDER);
+  colors.candidate_text_color = color("candidate_text", defaults.COLOR_CANDIDATE_TEXT);
+  colors.label_color = color("label", defaults.COLOR_LABEL);
+  colors.comment_text_color = color("comment_text", defaults.COLOR_COMMENT_TEXT);
+  colors.hilited_candidate_text_color = color("hilited_candidate_text", defaults.COLOR_HILITED_CANDIDATE_TEXT);
+  colors.hilited_candidate_back_color = color("hilited_candidate_back", defaults.COLOR_HILITED_CANDIDATE_BACK);
+  colors.hilited_label_color = color("hilited_label", defaults.COLOR_HILITED_LABEL);
+  colors.hilited_comment_text_color = color("hilited_comment_text", defaults.COLOR_HILITED_COMMENT_TEXT);
+  set_panel(OUTER_RADIUS, shadowRadius, shadowX, shadowY, <i32>color("shadow", defaults.COLOR_SHADOW));
 }

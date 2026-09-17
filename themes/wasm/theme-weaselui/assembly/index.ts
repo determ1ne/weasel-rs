@@ -11,7 +11,7 @@ export function probe_preedit(_required: i32): i32 {
   return ERR_OK;
 }
 
-import { loadConfig, colors, PAD, ROW_HEIGHT, GAP, TEXT_SIZE, LABEL_SIZE, COMMENT_SIZE,
+import { loadConfig, loadColors, colors, PAD, ROW_HEIGHT, GAP, TEXT_SIZE, LABEL_SIZE, COMMENT_SIZE,
   RADIUS, OUTER_RADIUS, MIN_WIDTH, MAX_WIDTH, PAD_Y, ROW_GAP, BORDER, LABEL_GAP,
   PADDING, MIN_HEIGHT, MAX_HEIGHT, TEXT_HEIGHT, LABEL_HEIGHT, COMMENT_HEIGHT, HORIZONTAL, PREVIEW, label } from "./style";
 
@@ -152,7 +152,7 @@ function paint(): void {
 }
 
 export function abi_version(): i32 { return 1; }
-export function init(_mode: i32, _dark: i32): i32 { loadConfig(); return ERR_OK; }
+export function init(_mode: i32, dark: i32): i32 { loadConfig(dark != 0); return ERR_OK; }
 export function render(): i32 {
   const next = readView();
   if (next == null) return ERR_BAD_VIEW;
@@ -197,4 +197,4 @@ export function hide(): void {
   pressed = -1;
 }
 // 固定配置配色，不随系统深浅色覆盖；刷新仅重绘当前快照。
-export function refresh(_dark: i32): void { paint(); }
+export function refresh(dark: i32): void { loadColors(dark != 0); paint(); }

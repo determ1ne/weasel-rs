@@ -159,7 +159,7 @@
       }
     },
     "color": {
-      "description": "颜色：RGB / ARGB",
+      "description": "RGB / ARGB 颜色：可指定单个颜色，或用 light、dark 分别设置浅色和深色外观，随系统切换。",
       "type": "object",
       "properties": {
         "shadow": {
@@ -314,10 +314,34 @@
   },
   "additionalProperties": false,
   "$defs": {
-    "color": {
+    "value": {
       "description": "十六进制颜色，可选 # 前缀，6 位 RRGGBB 或 8 位 AARRGGBB",
       "type": "string",
       "pattern": "^#?(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"
+    },
+    "color": {
+      "description": "单个颜色用于所有外观；也可分别指定 light（浅色）和 dark（深色）。",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/value"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "light": {
+              "$ref": "#/$defs/value"
+            },
+            "dark": {
+              "$ref": "#/$defs/value"
+            }
+          },
+          "required": [
+            "light",
+            "dark"
+          ],
+          "additionalProperties": false
+        }
+      ]
     }
   },
   "examples": [

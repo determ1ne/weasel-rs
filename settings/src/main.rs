@@ -136,7 +136,7 @@ impl State {
                     text_input: field.kind != "choice" && field.kind != "font_size",
                     font_size: field.kind == "font_size",
                     color_input: field.kind == "color" || field.kind == "rgb_color",
-                    single_color: field.kind == "rgb_color",
+                    allow_system_color: field.kind == "color",
                     multiline: field.multiline,
                 });
                 self.fields.push(field);

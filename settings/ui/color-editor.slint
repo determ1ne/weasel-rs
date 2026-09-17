@@ -12,14 +12,14 @@ export global ColorCodec {
 export component ColorEditor inherits Rectangle {
     in property <string> value;
     in property <bool> enabled;
-    in property <bool> single-color: false;
+    in property <bool> allow-system: true;
     callback edited(string);
     private property <ColorValue> data: ColorCodec.decode(root.value);
     width: root.data.mode == 0 ? 120px : root.data.mode == 1 ? 194px : 268px;
-    private property <int> selection: root.single-color ? 0 : root.data.mode;
+    private property <int> selection: root.allow-system ? root.data.mode : max(0, root.data.mode - 1);
     changed value => {
         root.data = ColorCodec.decode(root.value);
-        root.selection = root.single-color ? 0 : root.data.mode;
+        root.selection = root.allow-system ? root.data.mode : max(0, root.data.mode - 1);
     }
     private property <bool> editing-dark;
     private property <bool> use-system;
@@ -36,7 +36,7 @@ export component ColorEditor inherits Rectangle {
     private property <color> draft: rgba(root.red, root.green, root.blue, root.alpha / 255);
     public function open-picker(dark: bool) {
         root.editing-dark = dark;
-        root.use-system = dark ? root.data.dark-system : root.data.light-system;
+        root.use-system = root.allow-system && (dark ? root.data.dark-system : root.data.light-system);
         let channels = ColorCodec.channels(dark ? root.data.dark : root.data.light);
         root.red = channels.red; root.green = channels.green;
         root.blue = channels.blue; root.alpha = channels.alpha;
@@ -48,13 +48,13 @@ export component ColorEditor inherits Rectangle {
         spacing: 8px;
         ComboBox {
             width: 120px; height: 32px; enabled: root.enabled;
-            model: root.single-color ? ["自定义"] : ["系统", "自定义", "浅色 / 深色"];
+            model: root.allow-system ? ["系统", "自定义", "浅色 / 深色"] : ["自定义", "浅色 / 深色"];
             current-index <=> root.selection;
             selected(value) => {
                 root.edited(ColorCodec.encode({
-                    mode: root.single-color ? 1 : self.current-index, light: root.data.light, dark: root.data.dark,
-                    light-system: self.current-index == 1 ? false : root.data.light-system,
-                    dark-system: root.data.dark-system
+                    mode: root.allow-system ? self.current-index : self.current-index + 1, light: root.data.light, dark: root.data.dark,
+                    light-system: root.allow-system && self.current-index != 1 && root.data.light-system,
+                    dark-system: root.allow-system && root.data.dark-system
                 }));
             }
         }
@@ -78,7 +78,7 @@ export component ColorEditor inherits Rectangle {
             VerticalBox {
                 padding: 18px; spacing: 10px;
                 Text { text: "选择颜色"; font-size: 18px; font-weight: 600; }
-                if root.data.mode == 2: CheckBox { text: "使用系统颜色"; checked <=> root.use-system; }
+                if root.allow-system && root.data.mode == 2: CheckBox { text: "使用系统颜色"; checked <=> root.use-system; }
                 Rectangle {
                     height: 34px; background: Palette.alternate-background;
                     Rectangle { background: root.draft; }
@@ -113,8 +113,8 @@ export component ColorEditor inherits Rectangle {
                                 mode: root.data.mode,
                                 light: root.editing-dark ? root.data.light : root.draft,
                                 dark: root.editing-dark ? root.draft : root.data.dark,
-                                light-system: root.editing-dark ? root.data.light-system : root.data.mode == 2 && root.use-system,
-                                dark-system: root.editing-dark ? root.use-system : root.data.dark-system
+                                light-system: root.allow-system && (root.editing-dark ? root.data.light-system : root.data.mode == 2 && root.use-system),
+                                dark-system: root.allow-system && (root.editing-dark ? root.use-system : root.data.dark-system)
                             })); picker.close();
                         }
                     }

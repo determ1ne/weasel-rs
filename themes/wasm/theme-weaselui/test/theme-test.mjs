@@ -65,4 +65,26 @@ for (const horizontal of [false, true]) for (const preedit_type of ["composition
   h.render({...snapshot, preedit: null});
   assert.equal(h.calls.texts[0].text, "1.");
 }
-console.log("WeaselUI: colors, horizontal/vertical preedit and click cancellation passed");
+// 深浅色切换更新绘制与阴影；单色配置不受影响，无效分支回退默认值。
+const adaptive = await createHost(readFileSync(new URL("../build/weaselui.wasm", import.meta.url)), {
+  color: {
+    back: {light: "#123456", dark: "80445566"},
+    shadow: {light: "#20112233", dark: "#60445566"},
+    candidate_text: {light: "#112233", dark: "invalid"},
+    hilited_candidate_back: "#abcdef",
+  },
+});
+adaptive.exports.init(0, 0);
+adaptive.render({content_id: 3, visible: true, items: [
+  {primary_text: "选中", enabled: true}, {primary_text: "普通", enabled: true},
+], selected_index: 0});
+for (const dark of [0, 1, 0]) {
+  adaptive.calls.rounded.length = 0;
+  adaptive.calls.texts.length = 0;
+  adaptive.exports.refresh(dark);
+  assert.equal(adaptive.calls.rounded[1].color, dark ? 0x80445566 : 0xff123456);
+  assert.equal(adaptive.calls.rounded[2].color, 0xffabcdef);
+  assert.equal(adaptive.calls.panels.at(-1).color, dark ? 0x60445566 : 0x20112233);
+  assert.equal(adaptive.calls.texts.find(t => t.text === "普通").color, dark ? 0xff000000 : 0xff112233);
+}
+console.log("WeaselUI: adaptive colors, horizontal/vertical preedit and click cancellation passed");
