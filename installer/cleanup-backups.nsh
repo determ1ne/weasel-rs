@@ -13,20 +13,21 @@ Var CleanupName
 
 Function CleanupDllBackupFamily
   ; Reject redirected directories and entries, including directory junctions.
-  System::Call 'kernel32::GetFileAttributesW(w "$INSTDIR") i.r0'
-  IntOp $0 $0 & 0x400
-  StrCmp $0 0 0 cleanup_family_done
-  System::Call 'kernel32::GetFileAttributesW(w "$CleanupDirectory") i.r0'
-  StrCmp $0 -1 cleanup_family_done
-  IntOp $0 $0 & 0x400
-  StrCmp $0 0 0 cleanup_family_done
+  IfFileExists "$CleanupDirectory\*.*" 0 cleanup_family_done
+  StrCpy $PathCheckCandidate "$CleanupDirectory"
+  Call CheckManagedPath
+  StrCmp $PathCheckResult 1 0 cleanup_family_done
   FindFirst $CleanupFind $CleanupName "$CleanupDirectory\$CleanupPattern"
   StrCmp $CleanupName "" cleanup_family_close
   cleanup_family_next:
-    System::Call 'kernel32::GetFileAttributesW(w "$CleanupDirectory\$CleanupName") i.r0'
-    ; FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT
-    IntOp $0 $0 & 0x410
-    ${If} $0 == 0
+    StrCpy $PathCheckCandidate "$CleanupDirectory\$CleanupName"
+    Call CheckManagedPath
+    ${If} $PathCheckResult == 1
+      ClearErrors
+      ${GetFileAttributes} "$CleanupDirectory\$CleanupName" "DIRECTORY" $0
+    ${EndIf}
+    ${If} $PathCheckResult == 1
+    ${AndIf} $0 == 0
       ClearErrors
       Delete /REBOOTOK "$CleanupDirectory\$CleanupName"
       ${If} ${Errors}

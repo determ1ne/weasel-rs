@@ -45,7 +45,7 @@ try {
         'THIRD-PARTY-LICENSES.txt',
         'THIRD-PARTY-GPL-3.0.txt',
         'settings\LICENSE-NOTICE.txt',
-        'installer\weasel-rs.nsi'
+        'installer\weasel-rs.nsi',
         'scripts\launch-broker.ps1'
     )
     foreach ($theme in @('ten', 'eleven', 'abc', 'void')) {
@@ -69,12 +69,18 @@ try {
     $outputDirectory = Join-Path $projectRoot 'artifacts\installer'
     $null = New-Item -ItemType Directory -Path $outputDirectory -Force
     # Expand recursive payloads at build time, never scan the installed directory.
+    # Install and removal macros are generated from the same file set so nested
+    # payloads cannot silently outlive an uninstall or a failed fresh install.
     $payloadInclude = Join-Path $outputDirectory 'payload-files.nsh'
     $payloadLines = [Collections.Generic.List[string]]::new()
+    $payloadInstallPaths = [Collections.Generic.List[string]]::new()
+    $payloadRemovalPaths = [Collections.Generic.List[string]]::new()
+    $payloadDestinations = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($payload in @(
-        @{ Macro = 'RimePayload'; Source = 'assets\rime-data'; Target = 'rime-data' },
-        @{ Macro = 'WasmPayload'; Source = 'artifacts\theme-wasm'; Target = 'theme-wasm' }
+        @{ Macro = 'RimePayload'; RemoveMacro = 'RemoveRimePayload'; ValidateMacro = 'ValidateRimePayloadRemoval'; Source = 'assets\rime-data'; Target = 'rime-data' },
+        @{ Macro = 'WasmPayload'; RemoveMacro = 'RemoveWasmPayload'; ValidateMacro = 'ValidateWasmPayloadRemoval'; Source = 'artifacts\theme-wasm'; Target = 'theme-wasm' }
     )) {
+        $files = @()
         $payloadLines.Add('!macro ' + $payload.Macro)
         $sourceDirectory = Join-Path $projectRoot $payload.Source
         if (Test-Path -LiteralPath $sourceDirectory) {
@@ -82,18 +88,54 @@ try {
             if ($entries | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }) {
                 throw "Payload contains a reparse point: $sourceDirectory"
             }
-            foreach ($file in Get-ChildItem -LiteralPath $sourceDirectory -Recurse -File | Sort-Object FullName) {
+            $files = @(Get-ChildItem -LiteralPath $sourceDirectory -Recurse -File | Sort-Object FullName)
+            foreach ($file in $files) {
                 if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Payload contains a reparse point: $($file.FullName)" }
                 $relative = $file.FullName.Substring($sourceDirectory.Length + 1)
                 if ($relative -match '[\$"\r\n]' -or $file.FullName -match '[\$"\r\n]') { throw "Unsupported payload filename: $relative" }
                 $parent = Split-Path -Parent $relative
                 $destination = $payload.Target
                 if ($parent) { $destination += '\' + $parent }
+                $installedPath = $payload.Target + '\' + $relative
+                if (-not $payloadDestinations.Add($installedPath)) {
+                    throw "Duplicate payload destination: $installedPath"
+                }
+                $payloadInstallPaths.Add($installedPath)
                 $payloadLines.Add('SetOutPath "$INSTDIR\' + $destination + '"')
                 $payloadLines.Add('!insertmacro ManagedFile "' + $file.FullName + '" "' + $file.Name + '"')
             }
         }
         $payloadLines.Add('!macroend')
+
+        $payloadLines.Add('!macro ' + $payload.RemoveMacro)
+        $directories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $null = $directories.Add($payload.Target)
+        foreach ($file in $files) {
+            $relative = $file.FullName.Substring($sourceDirectory.Length + 1)
+            $installedPath = $payload.Target + '\' + $relative
+            $payloadRemovalPaths.Add($installedPath)
+            $payloadLines.Add('Delete /REBOOTOK "$INSTDIR\' + $installedPath + '"')
+            $parent = Split-Path -Parent $installedPath
+            while ($parent) {
+                $null = $directories.Add($parent)
+                if ($parent -eq $payload.Target) { break }
+                $parent = Split-Path -Parent $parent
+            }
+        }
+        foreach ($directory in $directories | Sort-Object @{ Expression = { ($_ -split '[\\/]').Count }; Descending = $true }, @{ Expression = { $_ }; Descending = $true }) {
+            $payloadLines.Add('RMDir /REBOOTOK "$INSTDIR\' + $directory + '"')
+        }
+        $payloadLines.Add('!macroend')
+
+        $payloadLines.Add('!macro ' + $payload.ValidateMacro)
+        foreach ($directory in $directories | Sort-Object @{ Expression = { ($_ -split '[\\/]').Count }; Descending = $false }, @{ Expression = { $_ }; Descending = $false }) {
+            $payloadLines.Add('!insertmacro AssertSafeUninstallDirectory "$INSTDIR\' + $directory + '"')
+        }
+        $payloadLines.Add('!macroend')
+    }
+    $payloadDifference = @(Compare-Object -ReferenceObject $payloadInstallPaths -DifferenceObject $payloadRemovalPaths)
+    if ($payloadDifference.Count -ne 0) {
+        throw "Generated payload install/removal sets differ: $($payloadDifference | Out-String)"
     }
     [IO.File]::WriteAllLines($payloadInclude, $payloadLines, [Text.UTF8Encoding]::new($false))
     $buildSuffix = if ($Dev) { '-dev' } else { '' }
@@ -133,6 +175,9 @@ try {
     )
     $buildDefinitions = @()
     if ($Mini) { $buildDefinitions += '/DMINI_INSTALLER' }
+    if (Test-Path -LiteralPath (Join-Path $projectRoot 'target\x86_64-pc-windows-msvc\release\weasel_theme_wasm.dll') -PathType Leaf) {
+        $buildDefinitions += '/DHAVE_WASM_THEME'
+    }
     if ($Dev) {
         $buildDefinitions += '/DDEV_INSTALLER'
         Write-Host 'Dev installer: compression disabled; component selection skipped (all components selected).'

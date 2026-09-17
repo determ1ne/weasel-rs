@@ -2,6 +2,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$InstallDirectory,
+    [ValidateSet('Launch', 'PostInstall', 'PostUninstall')]
+    [string]$Mode = 'Launch',
     [switch]$ValidateOnly
 )
 
@@ -30,6 +32,8 @@ public static class Unelevated
     const uint TOKEN_QUERY            = 0x0008;
     const uint TOKEN_ADJUST_DEFAULT   = 0x0080;
     const uint TOKEN_ADJUST_SESSIONID = 0x0100;
+    const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+    const uint INFINITE = 0xffffffff;
 
     [StructLayout(LayoutKind.Sequential)]
     struct STARTUPINFO {
@@ -84,6 +88,19 @@ public static class Unelevated
         ref STARTUPINFO startupInfo,
         out PROCESS_INFORMATION processInfo);
 
+    [DllImport("userenv.dll", SetLastError=true)]
+    static extern bool CreateEnvironmentBlock(
+        out IntPtr environment, IntPtr token, bool inherit);
+
+    [DllImport("userenv.dll")]
+    static extern bool DestroyEnvironmentBlock(IntPtr environment);
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
     [DllImport("kernel32.dll")]
     static extern bool CloseHandle(IntPtr h);
 
@@ -93,11 +110,12 @@ public static class Unelevated
             Marshal.GetLastWin32Error(), where);
     }
 
-    public static uint Start(string exe, string args)
+    public static uint Start(string exe, string args, bool wait)
     {
         IntPtr hp = IntPtr.Zero;
         IntPtr ht = IntPtr.Zero;
         IntPtr hd = IntPtr.Zero;
+        IntPtr environment = IntPtr.Zero;
 
         try
         {
@@ -146,6 +164,9 @@ public static class Unelevated
                     out hd))
                 Error("DuplicateTokenEx(explorer)");
 
+            if (!CreateEnvironmentBlock(out environment, hd, false))
+                Error("CreateEnvironmentBlock");
+
             string cmdline = "\"" + exe + "\"";
 
             if (!String.IsNullOrWhiteSpace(args))
@@ -163,22 +184,35 @@ public static class Unelevated
                     0,
                     exe,
                     cmd,
-                    0,
-                    IntPtr.Zero,
-                    null,
+                    CREATE_UNICODE_ENVIRONMENT,
+                    environment,
+                    System.IO.Path.GetDirectoryName(exe),
                     ref si,
                     out pi))
                 Error("CreateProcessWithTokenW");
 
-            uint childPid = pi.dwProcessId;
-
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-
-            return childPid;
+            try
+            {
+                if (wait)
+                {
+                    if (WaitForSingleObject(pi.hProcess, INFINITE) != 0)
+                        Error("WaitForSingleObject");
+                    uint exitCode;
+                    if (!GetExitCodeProcess(pi.hProcess, out exitCode))
+                        Error("GetExitCodeProcess");
+                    return exitCode;
+                }
+                return 0;
+            }
+            finally
+            {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+            }
         }
         finally
         {
+            if (environment != IntPtr.Zero) DestroyEnvironmentBlock(environment);
             if (hd != IntPtr.Zero) CloseHandle(hd);
             if (ht != IntPtr.Zero) CloseHandle(ht);
             if (hp != IntPtr.Zero) CloseHandle(hp);
@@ -192,9 +226,15 @@ public static class Unelevated
     if (-not (Test-Path -LiteralPath $broker -PathType Leaf)) { throw "Missing $broker" }
     # Launch with a token duplicated from Explorer so the broker runs in the
     # user's unelevated session even when the installer itself is elevated.
-    $stage = 'Launch unelevated broker'
-    [void][Unelevated]::Start($broker, $null)
-    exit 0
+    $arguments = switch ($Mode) {
+        'PostInstall' { '--post-install' }
+        'PostUninstall' { '--post-uninstall' }
+        default { $null }
+    }
+    $wait = $Mode -ne 'Launch'
+    $stage = "$Mode unelevated broker command"
+    $exitCode = [Unelevated]::Start($broker, $arguments, $wait)
+    exit ([int]$exitCode)
 } catch {
     [Console]::Error.WriteLine(('{0}: {1}' -f $stage, $_.Exception.ToString()))
     exit 1

@@ -1,6 +1,7 @@
 //! The per-user broker: owns the tray icon and the server/renderer children.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod installer;
 mod lifecycle;
 mod managed_children;
 mod notifications;
@@ -42,6 +43,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("unexpected shortcut arguments".into());
         }
         return shortcut::install(std::path::Path::new(&path));
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("--post-install")) {
+        if args.next().is_some() {
+            return Err("unexpected post-install arguments".into());
+        }
+        return installer::post_install();
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("--post-uninstall")) {
+        if args.next().is_some() {
+            return Err("unexpected post-uninstall arguments".into());
+        }
+        return installer::post_uninstall();
     }
     if command.is_some() {
         return Err("unknown broker option".into());

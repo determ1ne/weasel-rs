@@ -6300,6 +6300,7 @@ dependencies = [
  "windows-bindgen",
  "windows-collections 0.100.0",
  "windows-core 0.100.0",
+ "windows-registry",
  "windows-strings 0.100.0",
 ]
 

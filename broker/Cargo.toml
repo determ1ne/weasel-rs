@@ -12,6 +12,7 @@ windows-core = "0.100.0"
 
 windows-strings = "0.100.0"
 windows-collections = "0.100.0"
+windows-registry = "0.100.0"
 
 [build-dependencies]
 embed-resource = "3"

@@ -14,6 +14,9 @@ RequestExecutionLevel admin
 !include TextFunc.nsh
 !include Sections.nsh
 !include WordFunc.nsh
+!include WinVer.nsh
+
+ManifestSupportedOS all
 
 !ifndef PROJECT_ROOT
   !error "Use scripts\build-installer.ps1 to supply PROJECT_ROOT."
@@ -70,6 +73,11 @@ Var InstalledVersion
 Var OldDll
 Var BackupDll
 Var BackupList
+Var RetireResult
+Var TransactionStarted
+Var TransactionCommitted
+Var PreviousTip32
+Var PreviousTip64
 
 !include "${PROJECT_ROOT}\installer\records.nsh"
 !include "${PROJECT_ROOT}\installer\cleanup-backups.nsh"
@@ -103,9 +111,7 @@ FunctionEnd
     SetErrorLevel 1
     Quit
   ${EndIf}
-  SetRegView 64
-  ReadRegStr $0 HKLM "SOFTWARE\Microsoft\Windows NT\CurrentVersion" "CurrentBuildNumber"
-  ${If} $0 < 17763
+  ${IfNot} ${AtLeastBuild} 17763
     MessageBox MB_OK|MB_ICONSTOP "需要 Windows 10 1809 或更新版本。" /SD IDOK
     SetErrorLevel 1
     Quit
@@ -130,8 +136,15 @@ Function .onInit
 !endif
   StrCpy $CopiedFiles 0
   StrCpy $TriedRegistration 0
+  StrCpy $TransactionStarted 0
+  StrCpy $TransactionCommitted 0
+  StrCpy $PreviousTip32 ""
+  StrCpy $PreviousTip64 ""
   StrCpy $IsUpgrade 0
   StrCpy $INSTDIR "$PROGRAMFILES64\Weasel-RS"
+  ; makensis emits an x86 installer, while product metadata is intentionally
+  ; machine-wide in the 64-bit registry view.
+  SetRegView 64
   ReadRegStr $0 HKLM "${PRODUCT_KEY}" "InstallDir"
   ${If} $0 != ""
     ${If} $0 != $INSTDIR
@@ -159,11 +172,15 @@ Function .onInit
       version_ready:
     ${EndIf}
   ${EndIf}
-  ; Also reject manual registrations, so rollback cannot remove someone else's TIP.
+  ; Remember both views before registration so a failed replacement can restore
+  ; the previously active TIP. A non-owned registration requires explicit user
+  ; approval but is no longer an unconditional installation blocker.
   SetRegView 32
   ReadRegStr $0 HKCR "CLSID\{16A7AEA9-9EE6-4540-8020-E384C0489BB1}\InprocServer32" ""
+  StrCpy $PreviousTip32 "$0"
   SetRegView 64
   ReadRegStr $1 HKCR "CLSID\{16A7AEA9-9EE6-4540-8020-E384C0489BB1}\InprocServer32" ""
+  StrCpy $PreviousTip64 "$1"
   ${If} $0 != ""
   ${AndIf} $0 != "$INSTDIR\x86\weasel_tip.dll"
     Goto foreign_registration
@@ -181,7 +198,7 @@ Function .onInit
   ${EndIf}
   Goto registration_checked
   foreign_registration:
-    MessageBox MB_OK|MB_ICONSTOP "检测到手动注册的 TIP，请先注销旧 TIP，再运行安装程序。" /SD IDOK
+    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "检测到不属于当前安装记录的 TIP 注册：$\r$\n$\r$\nx86：$PreviousTip32$\r$\nx64：$PreviousTip64$\r$\n$\r$\n继续安装将用当前版本替换这些注册。是否继续？" /SD IDNO IDYES registration_checked
     SetErrorLevel 1
     Quit
   registration_checked:
@@ -241,7 +258,10 @@ FunctionEnd
 
 ; Rename before extraction: a loaded TIP must never be overwritten in place.
 ; GetTempFileName reserves a unique sibling, not a shared .old filename.
+; The caller decides whether failure is fatal; rollback uses this as a
+; best-effort primitive and must continue restoring unrelated files.
 Function RetireDll
+  StrCpy $RetireResult 1
   IfFileExists "$OldDll" 0 retire_done
   ${GetParent} "$OldDll" $0
   GetTempFileName $BackupDll "$0"
@@ -251,13 +271,24 @@ Function RetireDll
   ClearErrors
   Rename "$OldDll" "$BackupDll"
   ${If} ${Errors}
-    MessageBox MB_OK|MB_ICONSTOP "无法重命名旧 DLL：$OldDll。请关闭相关应用后重试。" /SD IDOK
-    SetErrorLevel 1
-    Abort
+    StrCpy $RetireResult 0
+    Return
   ${EndIf}
   ; Retain backups until all installation steps succeed.
+  ClearErrors
   FileOpen $0 "$PLUGINSDIR\retired-dlls.txt" a
+  ${If} ${Errors}
+    Rename "$BackupDll" "$OldDll"
+    StrCpy $RetireResult 0
+    Return
+  ${EndIf}
   FileWrite $0 "$BackupDll$\r$\n"
+  ${If} ${Errors}
+    FileClose $0
+    Rename "$BackupDll" "$OldDll"
+    StrCpy $RetireResult 0
+    Return
+  ${EndIf}
   FileClose $0
   retire_done:
 FunctionEnd
@@ -280,8 +311,55 @@ Function DeleteRetiredDlls
   cleanup_done:
 FunctionEnd
 
+; Best-effort recovery for an installation that failed after replacing COM/TSF
+; registration. The paths were captured before the transaction began.
+Function RestorePreviousTipRegistration
+  ${If} $PreviousTip32 != ""
+    IfFileExists "$PreviousTip32" 0 restore_previous_x86_missing
+    ClearErrors
+    ExecWait '"$SYSDIR\regsvr32.exe" /s "$PreviousTip32"' $0
+    ${If} ${Errors}
+    ${OrIf} $0 != 0
+      !insertmacro InstallLog "ERROR: 无法恢复先前的 x86 TIP 注册：$PreviousTip32"
+    ${EndIf}
+    Goto restore_previous_x64
+    restore_previous_x86_missing:
+      !insertmacro InstallLog "ERROR: 先前的 x86 TIP 文件不存在：$PreviousTip32"
+  ${EndIf}
+  restore_previous_x64:
+  ${If} $PreviousTip64 != ""
+    IfFileExists "$PreviousTip64" 0 restore_previous_x64_missing
+    ${DisableX64FSRedirection}
+    ClearErrors
+    ExecWait '"$SYSDIR\regsvr32.exe" /s "$PreviousTip64"' $0
+    ${EnableX64FSRedirection}
+    ${If} ${Errors}
+    ${OrIf} $0 != 0
+      !insertmacro InstallLog "ERROR: 无法恢复先前的 x64 TIP 注册：$PreviousTip64"
+    ${EndIf}
+    Goto restore_previous_done
+    restore_previous_x64_missing:
+      !insertmacro InstallLog "ERROR: 先前的 x64 TIP 文件不存在：$PreviousTip64"
+  ${EndIf}
+  restore_previous_done:
+FunctionEnd
+
 ; Explicit file list: never recursively remove the install root or user data.
+!macro AssertSafeUninstallDirectory DIRECTORY
+  ClearErrors
+  ${un.GetFileAttributes} "${DIRECTORY}" "REPARSE_POINT" $0
+  ${IfNot} ${Errors}
+  ${AndIf} $0 == 1
+    MessageBox MB_OK|MB_ICONSTOP "安装目录包含重定向目录，拒绝删除：${DIRECTORY}" /SD IDOK
+    SetErrorLevel 1
+    Quit
+  ${EndIf}
+  ClearErrors
+!macroend
+
 !macro RemoveProgramFiles
+  !insertmacro RemoveRimePayload
+  !insertmacro RemoveWasmPayload
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_abc.settings.json"
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_eleven.settings.json"
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_ten.dll"
@@ -294,7 +372,7 @@ FunctionEnd
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_void.pdb"
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_wasm.dll"
   Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_wasm.pdb"
-  RMDir "$INSTDIR\themes"
+  RMDir /REBOOTOK "$INSTDIR\themes"
   Delete /REBOOTOK "$INSTDIR\weasel-broker.exe"
   Delete /REBOOTOK "$INSTDIR\weasel-server.exe"
   Delete /REBOOTOK "$INSTDIR\weasel-renderer.exe"
@@ -324,62 +402,19 @@ FunctionEnd
   Delete "$INSTDIR\files.lst"
   Delete "$INSTDIR\files.pending.lst"
   Delete /REBOOTOK "$INSTDIR\weasel-installer-helper.exe"
-  RMDir "$INSTDIR\x86"
-  RMDir "$INSTDIR\x64"
-  RMDir "$INSTDIR\rime-data"
-  RMDir "$INSTDIR"
+  RMDir /REBOOTOK "$INSTDIR\x86"
+  RMDir /REBOOTOK "$INSTDIR\x64"
+  RMDir /REBOOTOK "$INSTDIR\rime-data"
+  RMDir /REBOOTOK "$INSTDIR\theme-wasm"
+  RMDir /REBOOTOK "$INSTDIR"
 !macroend
 
 Section "Weasel-RS" SEC_MAIN
   SectionIn RO
   Call BeginInstallLog
-  ; Shared prerequisites remain installed even if our own install later fails.
-  Call InstallRuntime_x86
-  Call InstallRuntime_x64
   InitPluginsDir
-  Call StopApplicationProcesses
-  Call RemoveOldPayload
   Call BeginRecords
-  !insertmacro InstallLog "INFO: 开始替换旧文件"
-  StrCpy $OldDll "$INSTDIR\x64\weasel_tip.dll"
-  Call RetireDll
-  ; Retire both the current layout and DLLs left by older installers.
-  StrCpy $OldDll "$INSTDIR\weasel_tip.dll"
-  Call RetireDll
-  StrCpy $OldDll "$INSTDIR\x86\weasel_tip.dll"
-  Call RetireDll
-  StrCpy $OldDll "$INSTDIR\x64\rime.dll"
-  Call RetireDll
-  StrCpy $OldDll "$INSTDIR\rime.dll"
-  Call RetireDll
-  ; Retire every known theme, even deselected ones during an upgrade.
-  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_abc.settings.json"
-  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_eleven.settings.json"
-  StrCpy $OldDll "$INSTDIR\themes\weasel_theme_ten.dll"
-  Call RetireDll
-  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_ten.pdb"
-  StrCpy $OldDll "$INSTDIR\themes\weasel_theme_eleven.dll"
-  Call RetireDll
-  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_eleven.pdb"
-  StrCpy $OldDll "$INSTDIR\themes\weasel_theme_abc.dll"
-  Call RetireDll
-  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_abc.pdb"
-  StrCpy $OldDll "$INSTDIR\themes\weasel_theme_void.dll"
-  Call RetireDll
-  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_void.pdb"
-  StrCpy $OldDll "$INSTDIR\themes\weasel_theme_wasm.dll"
-  Call RetireDll
-  Delete /REBOOTOK "$INSTDIR\themes\weasel_theme_wasm.pdb"
   SetOverwrite on
-  ; Remove stale symbols even when upgrading with a Mini installer.
-  Delete /REBOOTOK "$INSTDIR\weasel_broker.pdb"
-  Delete /REBOOTOK "$INSTDIR\weasel_server.pdb"
-  Delete /REBOOTOK "$INSTDIR\weasel_renderer.pdb"
-  Delete /REBOOTOK "$INSTDIR\weasel_tip.pdb"
-  Delete /REBOOTOK "$INSTDIR\x64\weasel_tip.pdb"
-  Delete /REBOOTOK "$INSTDIR\x86\weasel_tip.pdb"
-  Delete /REBOOTOK "$INSTDIR\rime.pdb"
-  Delete /REBOOTOK "$INSTDIR\x64\rime.pdb"
   SetOutPath "$INSTDIR"
   StrCpy $CopiedFiles 1
   ClearErrors
@@ -405,7 +440,6 @@ SectionEnd
 
 Section "librime" SEC_LIBRIME
   SectionIn RO
-  Call StopApplicationProcesses
   ClearErrors
   SetOutPath "$INSTDIR"
   !insertmacro ManagedFile "${PROJECT_ROOT}\artifacts\librime\dist\lib\rime.dll" "rime.dll"
@@ -428,16 +462,6 @@ Section "设置应用" SEC_SETTINGS
     SetErrorLevel 1
     Abort
   ${EndIf}
-SectionEnd
-
-Section "-清理未选中的设置应用"
-  ; An upgrade must also honor deselection of a previously installed app.
-  ${IfNot} ${SectionIsSelected} ${SEC_SETTINGS}
-    Delete /REBOOTOK "$INSTDIR\weasel-settings.exe"
-    Delete /REBOOTOK "$INSTDIR\SETTINGS-LICENSE.txt"
-  ${EndIf}
-  ; Symbols are installed again below only when both components are selected.
-  Delete /REBOOTOK "$INSTDIR\weasel_settings.pdb"
 SectionEnd
 
 SectionGroup /e "候选主题" SEC_THEMES
@@ -488,12 +512,11 @@ Section "void" SEC_THEME_VOID
   ${EndIf}
 SectionEnd
 
+!ifdef HAVE_WASM_THEME
 Section "wasm" SEC_THEME_WASM
   ClearErrors
   SetOutPath "$INSTDIR\themes"
-!if /FileExists "${X64_RELEASE}\weasel_theme_wasm.dll"
   !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_wasm.dll" "weasel_theme_wasm.dll"
-!endif
   SetOutPath "$INSTDIR\theme-wasm"
   ; Optional artifacts: preserve offline/skipped-build packaging.
   !insertmacro WasmPayload
@@ -503,6 +526,7 @@ Section "wasm" SEC_THEME_WASM
     Abort
   ${EndIf}
 SectionEnd
+!endif
 
 SectionGroupEnd
 
@@ -534,11 +558,13 @@ Section /o "调试符号" SEC_SYMBOLS
   ${If} ${SectionIsSelected} ${SEC_THEME_VOID}
     !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_void.pdb" "weasel_theme_void.pdb"
   ${EndIf}
+!ifdef HAVE_WASM_THEME
   ${If} ${SectionIsSelected} ${SEC_THEME_WASM}
 !if /FileExists "${X64_RELEASE}\weasel_theme_wasm.pdb"
     !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_wasm.pdb" "weasel_theme_wasm.pdb"
 !endif
   ${EndIf}
+!endif
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装调试符号，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -547,27 +573,56 @@ Section /o "调试符号" SEC_SYMBOLS
 SectionEnd
 
 !endif
-; Register only after every selected component has been copied successfully.
+; Commit only after every selected component has been staged successfully.
 Section "-注册与安装信息" SEC_REGISTER
-  !insertmacro InstallLog "INFO: 开始注册 TIP"
+  SetOutPath "$StageRoot"
+  ClearErrors
+  WriteUninstaller "$StageRoot\Uninstall.exe"
+  ${If} ${Errors}
+    Goto install_failed
+  ${EndIf}
+  FileWriteUTF16LE $ManifestHandle "Uninstall.exe$\r$\n"
+  IfErrors install_failed
+  Call CloseRecords
+
+  ; Prerequisite failure must leave the existing application untouched.
+  Call InstallRuntime_x86
+  Call InstallRuntime_x64
   Call StopApplicationProcesses
+  ${If} $IsUpgrade == 1
+    Call BackupOldPayload
+  ${EndIf}
+  StrCpy $TransactionStarted 1
+  Call RemoveOldPayload
+  Delete "$INSTDIR\files.lst"
+  Delete "$INSTDIR\files.pending.lst"
+  !insertmacro InstallLog "INFO: 开始提交新文件"
+  Call CommitStagedPayload
+
+  !insertmacro InstallLog "INFO: 开始注册 TIP"
   ; RegDLL is 32-bit in this installer; use native regsvr32 for the x64 DLL.
   SetOutPath "$INSTDIR"
   StrCpy $TriedRegistration 1
   ClearErrors
   ExecWait '"$SYSDIR\regsvr32.exe" /s "$INSTDIR\x86\weasel_tip.dll"' $0
-  IfErrors install_failed
+  ${If} ${Errors}
+    !insertmacro InstallLog "ERROR: 无法启动 x86 TIP 注册程序"
+    Goto install_failed
+  ${EndIf}
+  !insertmacro InstallLog "INFO: x86 TIP 注册退出码=$0"
   StrCmp $0 0 0 install_failed
   ${DisableX64FSRedirection}
   ClearErrors
   ExecWait '"$SYSDIR\regsvr32.exe" /s "$INSTDIR\x64\weasel_tip.dll"' $0
   ${EnableX64FSRedirection}
-  IfErrors install_failed
+  ${If} ${Errors}
+    !insertmacro InstallLog "ERROR: 无法启动 x64 TIP 注册程序"
+    Goto install_failed
+  ${EndIf}
+  !insertmacro InstallLog "INFO: x64 TIP 注册退出码=$0"
   StrCmp $0 0 0 install_failed
 
   ClearErrors
-  WriteUninstaller "$INSTDIR\Uninstall.exe"
-  FileWriteUTF16LE $ManifestHandle "Uninstall.exe$\r$\n"
   WriteRegStr HKLM "${PRODUCT_KEY}" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "${PRODUCT_NAME}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
@@ -576,44 +631,28 @@ Section "-注册与安装信息" SEC_REGISTER
   WriteRegStr HKLM "${UNINSTALL_KEY}" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'
   WriteRegDWORD HKLM "${UNINSTALL_KEY}" "NoModify" 1
   WriteRegDWORD HKLM "${UNINSTALL_KEY}" "NoRepair" 1
+  IfErrors install_failed
+  Call FinishRecords
+  StrCpy $TransactionCommitted 1
+
   CreateDirectory "$SMPROGRAMS\小狼毫RS"
   Delete "$SMPROGRAMS\小狼毫RS\小狼毫RS.lnk"
   CreateShortcut "$SMPROGRAMS\小狼毫RS\卸载.lnk" "$INSTDIR\Uninstall.exe"
-  IfErrors install_failed
+  ${If} ${Errors}
+    !insertmacro InstallLog "WARN: 无法创建卸载快捷方式"
+  ${EndIf}
   nsExec::ExecToLog '"$INSTDIR\weasel-broker.exe" --install-shortcut "$SMPROGRAMS\小狼毫RS\小狼毫RS算法服务.lnk"'
   Pop $0
   ${If} $0 != 0
-    DetailPrint "创建算法服务快捷方式失败：$0"
-    Goto install_failed
-  ${EndIf}
-  IfErrors install_failed
-  !insertmacro InstallLog "INFO: 正在为当前账户部署 Rime 数据……"
-  nsExec::ExecToLog '"$INSTDIR\weasel-server.exe" --deploy --silent'
-  Pop $0
-  !insertmacro InstallLog "INFO: 部署退出码=$0"
-  ${If} $0 != 0
-    ; Registration and uninstall metadata already exist. Preserve this usable
-    ; recovery point rather than unregistering/deleting an installed program.
-    StrCpy $IsUpgrade 1
-    MessageBox MB_OK|MB_ICONSTOP "Rime 部署失败（$0），程序文件已保留，可重新运行安装程序。请检查当前账户的 Rime 数据及日志文件。" /SD IDOK
-    SetErrorLevel 1
-    Abort
-  ${EndIf}
-  ClearErrors
-  ${If} $IsUpgrade == 0
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "小狼毫RS算法服务" '$\"$INSTDIR\weasel-broker.exe$\"'
-  ${EndIf}
-  ${If} ${Errors}
-    StrCpy $IsUpgrade 1
-    MessageBox MB_OK|MB_ICONSTOP "无法设置当前账户的登录启动项。程序文件已保留，请检查注册表权限后重试。" /SD IDOK
-    SetErrorLevel 1
-    Abort
+    !insertmacro InstallLog "WARN: 创建算法服务快捷方式失败：$0"
   ${EndIf}
   Call DeleteRetiredDlls
   Call CleanupOldDllBackups
+  !insertmacro InstallLog "INFO: 正在初始化当前桌面用户……"
+  Call ProvisionCurrentUser
   !insertmacro InstallLog "INFO: 正在启动算法服务……"
   Call LaunchBrokerUnelevated
-  Call FinishRecords
+  Call FinishInstallLog
   Goto install_done
   install_failed:
     MessageBox MB_OK|MB_ICONSTOP "安装或 TIP 注册失败。请检查文件权限和 x86/x64 VC++ 运行库。" /SD IDOK
@@ -650,49 +689,44 @@ FunctionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_ELEVEN} "XAML 候选栏，适用于 Windows 10 1903 及以上。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_ABC} "复古候选窗口，支持外部预编辑。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_VOID} "不显示窗口的主题及接口示例。"
+!ifdef HAVE_WASM_THEME
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_WASM} "WebAssembly 候选主题后端及随附主题，支持加载自定义 .wasm 主题文件。"
+!endif
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 !endif
 
 Function .onInstFailed
-  !insertmacro InstallLog "ERROR: 安装未完成；pending 清单及旧 DLL 备份保留；日志：$InstallLog"
-  ${If} $ManifestHandle != ""
-    FileClose $ManifestHandle
-    StrCpy $ManifestHandle ""
-  ${EndIf}
-  ${If} $InstallLogHandle != ""
-    FileClose $InstallLogHandle
-    StrCpy $InstallLogHandle ""
-    MessageBox MB_OK|MB_ICONEXCLAMATION "安装未完成。安装日志：$InstallLog" /SD IDOK
-  ${EndIf}
-  ${If} $IsUpgrade == 1
-    ; Never remove the previous installation's registration or user data.
-    MessageBox MB_OK|MB_ICONEXCLAMATION "安装未完成，现有文件及注册信息已保留。请重新运行安装程序完成更新。" /SD IDOK
-    Return
-  ${EndIf}
-  ${If} $TriedRegistration == 1
-    ; Best effort rollback, but keep files if either unregister operation fails.
-    StrCpy $0 1
-    StrCpy $1 1
-    ClearErrors
-    ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\x86\weasel_tip.dll"' $0
-    ${If} ${Errors}
-      StrCpy $0 1
+  !insertmacro InstallLog "ERROR: 安装未完成；正在恢复安装前状态；日志：$InstallLog"
+  Call CloseRecords
+  ${If} $TransactionStarted == 1
+  ${AndIf} $TransactionCommitted == 0
+    ; Remove any newly registered classes before replacing the DLLs again.
+    ${If} $TriedRegistration == 1
+      ClearErrors
+      ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\x86\weasel_tip.dll"' $0
+      ${DisableX64FSRedirection}
+      ClearErrors
+      ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\x64\weasel_tip.dll"' $1
+      ${EnableX64FSRedirection}
     ${EndIf}
-    ${DisableX64FSRedirection}
-    ClearErrors
-    ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\x64\weasel_tip.dll"' $1
-    ${EnableX64FSRedirection}
-    ${If} ${Errors}
-      StrCpy $1 1
+    Call RemoveCommittedPayload
+    ${If} $IsUpgrade == 1
+      Call RestoreOldPayload
+      WriteRegStr HKLM "${PRODUCT_KEY}" "InstallDir" "$INSTDIR"
+      ${If} $InstalledVersion != ""
+        WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "$InstalledVersion"
+      ${EndIf}
+    ${Else}
+      DeleteRegKey HKLM "${UNINSTALL_KEY}"
+      DeleteRegKey HKLM "${PRODUCT_KEY}"
+      !insertmacro RemoveProgramFiles
     ${EndIf}
-    ${If} $0 != 0
-    ${OrIf} $1 != 0
-      MessageBox MB_OK|MB_ICONEXCLAMATION "无法完成输入法注销，安装文件已保留。请手动注销 x86 和 x64 TIP 后重试。" /SD IDOK
-      Return
+    ${If} $TriedRegistration == 1
+      Call RestorePreviousTipRegistration
     ${EndIf}
-  ${EndIf}
-  ${If} $CopiedFiles == 1
+    Call DeleteRetiredDlls
+  ${ElseIf} $IsUpgrade == 0
+  ${AndIf} $CopiedFiles == 1
     Delete "$SMPROGRAMS\小狼毫RS\小狼毫RS.lnk"
     Delete "$SMPROGRAMS\小狼毫RS\小狼毫RS算法服务.lnk"
     Delete "$SMPROGRAMS\小狼毫RS\卸载.lnk"
@@ -701,12 +735,18 @@ Function .onInstFailed
     DeleteRegKey HKLM "${PRODUCT_KEY}"
     !insertmacro RemoveProgramFiles
   ${EndIf}
+  ${If} $InstallLogHandle != ""
+    FileClose $InstallLogHandle
+    StrCpy $InstallLogHandle ""
+  ${EndIf}
+  MessageBox MB_OK|MB_ICONEXCLAMATION "安装未完成。已尝试恢复安装前状态。$\r$\n安装日志：$InstallLog" /SD IDOK
 FunctionEnd
 
 Function un.onInit
   !insertmacro CheckPlatform
   !insertmacro LockInstaller
   !insertmacro CheckBroker
+  SetRegView 64
   ReadRegStr $0 HKLM "${PRODUCT_KEY}" "InstallDir"
   ${If} $0 != $INSTDIR
   ${OrIf} $INSTDIR != "$PROGRAMFILES64\Weasel-RS"
@@ -714,6 +754,12 @@ Function un.onInit
     SetErrorLevel 1
     Quit
   ${EndIf}
+  !insertmacro AssertSafeUninstallDirectory "$INSTDIR"
+  !insertmacro AssertSafeUninstallDirectory "$INSTDIR\x86"
+  !insertmacro AssertSafeUninstallDirectory "$INSTDIR\x64"
+  !insertmacro AssertSafeUninstallDirectory "$INSTDIR\themes"
+  !insertmacro ValidateRimePayloadRemoval
+  !insertmacro ValidateWasmPayloadRemoval
 FunctionEnd
 
 Section "Uninstall"
@@ -722,11 +768,9 @@ Section "Uninstall"
   ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\x86\weasel_tip.dll"' $0
   IfErrors uninstall_failed
   StrCmp $0 0 0 uninstall_failed
-  ; Remove only our own startup command, leaving any user replacement intact.
-  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "小狼毫RS算法服务"
-  ${If} $0 == '$\"$INSTDIR\weasel-broker.exe$\"'
-    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "小狼毫RS算法服务"
-  ${EndIf}
+  ; Run in the interactive shell's context; the elevated HKCU may belong to
+  ; credentials supplied only for UAC.
+  Call un.RemoveCurrentUserProvisioning
   ${DisableX64FSRedirection}
   ClearErrors
   ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\x64\weasel_tip.dll"' $0
