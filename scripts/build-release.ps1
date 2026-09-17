@@ -1,6 +1,8 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
+    # Keep release outputs/optimizations, but enable Rust incremental compilation.
+    [switch]$Dev,
     # Skip the native WASM backend and guest modules; retain existing artifacts.
     [switch]$SkipThemeWasm
 )
@@ -27,9 +29,18 @@ function Resolve-Application {
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $targetDirectory = Join-Path $projectRoot 'target'
 $buildTargets = @('x86_64-pc-windows-msvc', 'i686-pc-windows-msvc')
+$previousCargoIncremental = [Environment]::GetEnvironmentVariable('CARGO_INCREMENTAL', 'Process')
 
 Push-Location -LiteralPath $projectRoot
 try {
+    if ($Dev) {
+        # Cargo already caches unchanged crates in target. Release builds normally
+        # disable incremental compilation; opt in for repeated local edits. Keep
+        # the same output paths so build-installer can consume these binaries.
+        # This also applies to the separate Rust WASM guest builds below.
+        $env:CARGO_INCREMENTAL = '1'
+        Write-Host 'Development release build: Rust incremental compilation enabled; reusing target cache.'
+    }
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         throw 'This build script requires Windows and the MSVC build tools.'
     }
@@ -141,5 +152,8 @@ try {
     Write-Error -ErrorRecord $_ -ErrorAction Continue
     exit 1
 } finally {
+    if ($Dev) {
+        [Environment]::SetEnvironmentVariable('CARGO_INCREMENTAL', $previousCargoIncremental, 'Process')
+    }
     Pop-Location
 }
