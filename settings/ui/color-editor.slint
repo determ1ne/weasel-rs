@@ -13,6 +13,7 @@ export component ColorEditor inherits Rectangle {
     in property <string> value;
     in property <bool> enabled;
     in property <bool> allow-system: true;
+    in property <bool> adaptive: true;
     callback edited(string);
     private property <ColorValue> data: ColorCodec.decode(root.value);
     width: root.data.mode == 0 ? 120px : root.data.mode == 1 ? 194px : 268px;
@@ -48,7 +49,9 @@ export component ColorEditor inherits Rectangle {
         spacing: 8px;
         ComboBox {
             width: 120px; height: 32px; enabled: root.enabled;
-            model: root.allow-system ? ["系统", "自定义", "浅色 / 深色"] : ["自定义", "浅色 / 深色"];
+            model: root.allow-system
+                ? (root.adaptive ? ["系统", "自定义", "浅色 / 深色"] : ["系统", "自定义"])
+                : (root.adaptive ? ["自定义", "浅色 / 深色"] : ["自定义"]);
             current-index <=> root.selection;
             selected(value) => {
                 root.edited(ColorCodec.encode({

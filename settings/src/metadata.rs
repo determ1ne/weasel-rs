@@ -93,6 +93,15 @@ impl Metadata {
         self.engine()?.validate(value)
     }
 
+    /// 表单能力探测复用相同的校验器，不自行猜测正则或 union 的语义。
+    pub fn accepts(&self, schema: &Value, value: &Value) -> Result<bool, String> {
+        let mut work = MAX_WORK;
+        Ok(self
+            .engine()?
+            .check(schema, value, "$", 0, &mut work)?
+            .is_none())
+    }
+
     fn engine(&self) -> Result<Engine<'_>, String> {
         let mut nodes = 2; // package object and formatVersion
         let mut bytes = 64; // conservative package wrapper allowance
@@ -132,7 +141,7 @@ impl Metadata {
             let annotations = field.as_object().ok_or("UI field must be an object")?;
             for (key, value) in annotations {
                 let safe = match key.as_str() {
-                    "order" => value.is_number(),
+                    "order" | "customDefault" => value.is_number(),
                     "title" | "label" | "description" | "group" | "placeholder" | "widget" => {
                         value.is_string()
                     }

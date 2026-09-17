@@ -133,10 +133,11 @@ impl State {
                     overridden: field.selected != 0,
                     boolean: field.boolean,
                     text: field.text.clone().into(),
-                    text_input: field.kind != "choice" && field.kind != "font_size",
-                    font_size: field.kind == "font_size",
-                    color_input: field.kind == "color" || field.kind == "rgb_color",
-                    allow_system_color: field.kind == "color",
+                    text_input: field.kind != "choice" && field.kind != "enum_number",
+                    enum_number: field.kind == "enum_number",
+                    color_input: field.kind == "color",
+                    allow_system_color: field.allow_system_color,
+                    adaptive_color: field.adaptive_color,
                     multiline: field.multiline,
                 });
                 self.fields.push(field);

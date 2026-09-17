@@ -79,16 +79,20 @@
         "order": 0
       },
       "/fontSize": {
-        "order": 10
+        "order": 10,
+        "customDefault": 14
       },
       "/accentColor": {
-        "order": 20
+        "order": 20,
+        "widget": "color"
       },
       "/backgroundColor": {
-        "order": 30
+        "order": 30,
+        "widget": "color"
       },
       "/textColor": {
-        "order": 40
+        "order": 40,
+        "widget": "color"
       }
     }
   }

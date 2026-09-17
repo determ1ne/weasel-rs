@@ -3,7 +3,7 @@ import { AppOptions, AppEntry, IconAction } from "app-options.slint";
 import { ColorEditor } from "color-editor.slint";
 import { WasmModules, WasmEntry } from "wasm-modules.slint";
 export { ColorCodec } from "color-editor.slint";
-export struct SettingField { source-index: int, section: string, shown: bool, title: string, key: string, description: string, choices: [string], selected: int, checked: bool, text: string, text-input: bool, boolean: bool, overridden: bool, font-size: bool, color-input: bool, allow-system-color: bool, multiline: bool }
+export struct SettingField { source-index: int, section: string, shown: bool, title: string, key: string, description: string, choices: [string], selected: int, checked: bool, text: string, text-input: bool, boolean: bool, overridden: bool, enum-number: bool, color-input: bool, allow-system-color: bool, adaptive-color: bool, multiline: bool }
 export component SettingsWindow inherits Window {
     title: "小狼毫RS：设置";
     default-font-family: "Segoe UI";
@@ -120,13 +120,14 @@ export component SettingsWindow inherits Window {
                       }
                       if field.color-input: ColorEditor {
                         allow-system: field.allow-system-color;
+                        adaptive: field.adaptive-color;
                         min-height: 32px;
                         enabled: root.editable;
                         value: field.text;
                         edited(value) => { root.changed(field.source-index, 1, value); }
                       }
                       if !field.color-input: Rectangle {
-                        width: field.font-size && field.selected == 4 ? 250px : field.boolean ? 44px : field.text-input ? 210px : 160px;
+                        width: field.enum-number && field.selected == field.choices.length - 1 ? 250px : field.boolean ? 44px : field.text-input ? 210px : 160px;
                         min-height: 32px;
                         horizontal-stretch: 0;
                     HorizontalLayout {
@@ -163,13 +164,13 @@ export component SettingsWindow inherits Window {
                         text <=> field.text;
                         edited => { root.changed(field.source-index, 1, self.text); }
                     }
-                    if field.font-size && field.selected == 4: LineEdit {
+                    if field.enum-number && field.selected == field.choices.length - 1: LineEdit {
                         width: 80px;
                         height: 32px;
                         enabled: root.editable;
                         input-type: decimal;
                         text <=> field.text;
-                        edited => { root.changed(field.source-index, 5, self.text); }
+                        edited => { root.changed(field.source-index, field.choices.length, self.text); }
                     }
                     }
                       }

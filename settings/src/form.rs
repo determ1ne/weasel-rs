@@ -17,6 +17,8 @@ pub struct Field {
     pub multiline: bool,
     pub inherited_text: String,
     pub inherited_selected: i32,
+    pub allow_system_color: bool,
+    pub adaptive_color: bool,
 }
 pub fn at<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
     path.iter()
@@ -74,11 +76,12 @@ pub fn fields(section: &Section, doc: &Document) -> Result<Vec<Field>, String> {
     let mut out = Vec::new();
     collect(
         &section.metadata.richschema["schema"],
+        &section.metadata,
         &section.metadata.richschema["ui"],
         &section.mount,
         &[],
         &base,
-        doc,
+        &doc.patch,
         &mut out,
         0,
     )?;
@@ -86,18 +89,29 @@ pub fn fields(section: &Section, doc: &Document) -> Result<Vec<Field>, String> {
 }
 fn collect(
     schema: &Value,
+    metadata: &crate::metadata::Metadata,
     ui: &Value,
     mount: &[String],
     local: &[String],
     base: &Value,
-    doc: &Document,
+    patch: &Value,
     out: &mut Vec<Field>,
     depth: usize,
 ) -> Result<(), String> {
     if depth > 16 || out.len() >= 256 {
         return Err("表单深度或字段数量超限".into());
     }
-    if let Some(properties) = schema["properties"].as_object() {
+    let original_schema = schema;
+    let resolved = resolve(schema, &metadata.richschema["schema"], 0)?;
+    let schema = &resolved;
+    let annotation = &ui["fields"][pointer(local)];
+    if annotation["hidden"] == true {
+        return Ok(());
+    }
+    if let Some(properties) = schema["properties"]
+        .as_object()
+        .filter(|_| annotation["widget"] != "color")
+    {
         let mut entries: Vec<_> = properties.iter().collect();
         entries.sort_by_key(|(key, _)| {
             let mut path = local.to_vec();
@@ -105,43 +119,79 @@ fn collect(
             ui["fields"][pointer(&path)]["order"].as_i64().unwrap_or(0)
         });
         for (key, child) in entries {
-            if key == "$schema" || (mount.is_empty() && local.is_empty() && key == "themeSettings")
-            {
+            if key == "$schema" {
                 continue;
             }
             let mut next = local.to_vec();
             next.push(key.clone());
-            collect(child, ui, mount, &next, base, doc, out, depth + 1)?;
+            collect(
+                child,
+                metadata,
+                ui,
+                mount,
+                &next,
+                base,
+                patch,
+                out,
+                depth + 1,
+            )?;
         }
         return Ok(());
     }
     let mut path = mount.to_vec();
     path.extend_from_slice(local);
     let inherited = at(base, local).cloned().unwrap_or(Value::Null);
-    let current = at(&doc.patch, &path);
-    let font_size = mount == ["themeSettings", "eleven"] && local == ["fontSize"];
-    let color_input = mount == ["themeSettings", "eleven"]
-        && local.len() == 1
-        && ["accentColor", "backgroundColor", "textColor"].contains(&local[0].as_str());
-    let rgb_color = mount == ["themeSettings", "wasm", "modules", "weaselui", "config"]
-        && local.len() == 2
-        && local[0] == "color";
-    let values = if font_size {
-        vec!["small", "medium", "large", "extraLarge"]
-            .into_iter()
-            .map(|v| Value::String(v.into()))
-            .collect()
+    let current = at(patch, &path);
+    let color_input = annotation["widget"] == "color";
+    let branches = schema["oneOf"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| resolve(item, &metadata.richschema["schema"], 0))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let presets = branches.iter().find_map(|branch| branch["enum"].as_array());
+    let enum_number = !color_input
+        && branches.len() == 2
+        && presets.is_some()
+        && branches
+            .iter()
+            .any(|branch| branch["type"] == "number" || branch["type"] == "integer");
+    let custom_default = annotation["customDefault"]
+        .as_f64()
+        .or_else(|| {
+            branches
+                .iter()
+                .find_map(|branch| branch["default"].as_f64())
+        })
+        .or_else(|| {
+            branches
+                .iter()
+                .find_map(|branch| branch["minimum"].as_f64())
+        })
+        .unwrap_or(0.0)
+        .to_string();
+    let allow_system_color =
+        color_input && metadata.accepts(original_schema, &Value::String("system".into()))?;
+    let adaptive_color = color_input
+        && metadata.accepts(
+            original_schema,
+            &serde_json::json!({"light":"#112233", "dark":"#445566"}),
+        )?;
+    let values = if enum_number {
+        presets.cloned().unwrap_or_default()
     } else if schema["type"] == "boolean" {
         vec![Value::Bool(false), Value::Bool(true)]
     } else {
         schema["enum"].as_array().cloned().unwrap_or_default()
     };
-    let kind = if rgb_color {
-        "rgb_color"
-    } else if color_input {
+    let kind = if color_input {
         "color"
-    } else if font_size {
-        "font_size"
+    } else if enum_number {
+        "enum_number"
     } else if !values.is_empty() {
         "choice"
     } else if schema["type"] == "string" {
@@ -154,9 +204,9 @@ fn collect(
         display(&inherited).chars().take(100).collect::<String>()
     )];
     let mut values = values;
-    if kind == "choice" || font_size {
+    if kind == "choice" || enum_number {
         choices.extend(values.iter().map(display));
-        if font_size {
+        if enum_number {
             choices.push("自定义".into());
         }
     } else {
@@ -164,11 +214,11 @@ fn collect(
     }
     let selected = match current {
         None => 0,
-        Some(value) if font_size => values
+        Some(value) if enum_number => values
             .iter()
             .position(|v| v == value)
             .map(|i| i as i32 + 1)
-            .unwrap_or(5),
+            .unwrap_or(values.len() as i32 + 1),
         Some(value) if kind == "choice" => match values.iter().position(|v| v == value) {
             Some(i) => (i + 1) as i32,
             None => {
@@ -180,7 +230,18 @@ fn collect(
         Some(_) => 1,
     };
     let value = current.unwrap_or(&inherited);
+    let inherited_selected = if enum_number {
+        values
+            .iter()
+            .position(|v| v == &inherited)
+            .map(|i| i as i32)
+            .unwrap_or(values.len() as i32)
+    } else {
+        values_for_index(schema, &inherited)
+    };
     out.push(Field {
+        allow_system_color,
+        adaptive_color,
         key: if local.is_empty() {
             "config".into()
         } else {
@@ -208,11 +269,11 @@ fn collect(
         selected,
         text: if kind == "json" && schema["type"] == "object" {
             serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        } else if font_size {
+        } else if enum_number {
             if value.is_number() {
                 value.to_string()
             } else {
-                "14".into()
+                custom_default.clone()
             }
         } else if kind == "string" {
             display(value)
@@ -224,26 +285,18 @@ fn collect(
         multiline: kind == "json" && schema["type"] == "object",
         inherited_text: if kind == "json" && schema["type"] == "object" {
             serde_json::to_string_pretty(&inherited).unwrap_or_else(|_| inherited.to_string())
-        } else if font_size {
+        } else if enum_number {
             if inherited.is_number() {
                 inherited.to_string()
             } else {
-                "14".into()
+                custom_default
             }
         } else if kind == "string" {
             display(&inherited)
         } else {
             inherited.to_string()
         },
-        inherited_selected: if font_size {
-            ["small", "medium", "large", "extraLarge"]
-                .iter()
-                .position(|s| inherited.as_str() == Some(s))
-                .map(|i| i as i32)
-                .unwrap_or(4)
-        } else {
-            values_for_index(schema, &inherited)
-        },
+        inherited_selected,
     });
     Ok(())
 }
@@ -264,14 +317,14 @@ impl Field {
         if selected == 0 {
             return Ok(None);
         }
-        if self.kind == "font_size" && selected == 5 {
-            let size: f64 = text.trim().parse().map_err(|_| "请输入有效字号（1–256）")?;
-            if !size.is_finite() || !(1.0..=256.0).contains(&size) {
-                return Err("字号必须在 1–256 之间".into());
+        if self.kind == "enum_number" && selected == self.values.len() as i32 + 1 {
+            let size: f64 = text.trim().parse().map_err(|_| "请输入有效数值")?;
+            if !size.is_finite() {
+                return Err("请输入有限数值".into());
             }
             return Ok(Some(serde_json::json!(size)));
         }
-        if self.kind == "choice" || self.kind == "font_size" {
+        if self.kind == "choice" || self.kind == "enum_number" {
             return self
                 .values
                 .get((selected - 1) as usize)
@@ -292,6 +345,29 @@ impl Field {
     }
 }
 
+// 仅解析包内引用，限制引用链长度；循环和外部引用不能拖住表单生成。
+fn resolve(schema: &Value, root: &Value, depth: usize) -> Result<Value, String> {
+    if depth > 16 {
+        return Err("表单 schema 引用深度超限".into());
+    }
+    let Some(reference) = schema.get("$ref").and_then(Value::as_str) else {
+        return Ok(schema.clone());
+    };
+    let target = reference
+        .strip_prefix('#')
+        .and_then(|path| root.pointer(path))
+        .ok_or("无效的本地 schema 引用")?;
+    let mut result = resolve(target, root, depth + 1)?;
+    if let (Some(output), Some(siblings)) = (result.as_object_mut(), schema.as_object()) {
+        for (key, value) in siblings {
+            if key != "$ref" {
+                output.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(result)
+}
+
 fn values_for_index(schema: &Value, value: &Value) -> i32 {
     if schema["type"] == "boolean" {
         return i32::from(value == true);
@@ -301,4 +377,96 @@ fn values_for_index(schema: &Value, value: &Value) -> i32 {
         .and_then(|a| a.iter().position(|v| v == value))
         .map(|i| i as i32)
         .unwrap_or(-1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::Metadata;
+    use serde_json::json;
+
+    #[test]
+    fn controls_follow_metadata_not_theme_paths() {
+        // 任意挂载路径、字段名和预设数量；覆盖引用、单色/双色以及重置索引。
+        let metadata = Metadata::from_parts(json!({"ink":"#123456", "scale":"tiny"}), json!({
+            "formatVersion":1,
+            "schema":{"type":"object", "$defs":{
+                "hex":{"type":"string", "pattern":"^#[0-9a-fA-F]{6}$"},
+                "paint":{"oneOf":[{"$ref":"#/$defs/hex"},{"type":"object",
+                    "properties":{"light":{"$ref":"#/$defs/hex"},"dark":{"$ref":"#/$defs/hex"}},
+                    "required":["light","dark"],"additionalProperties":false}]}
+            }, "properties":{
+                "ink":{"$ref":"#/$defs/paint", "title":"墨色"},
+                "scale":{"oneOf":[{"enum":["tiny","huge"]},{"type":"number","minimum":2,"maximum":40}]}
+            }},
+            "ui":{"fields":{"/ink":{"widget":"color"},"/scale":{"customDefault":12}}}
+        })).unwrap();
+        let mount = vec!["arbitrary".into()];
+        let mut fields = Vec::new();
+        collect(
+            &metadata.richschema["schema"],
+            &metadata,
+            &metadata.richschema["ui"],
+            &mount,
+            &[],
+            &metadata.defaults,
+            &json!({}),
+            &mut fields,
+            0,
+        )
+        .unwrap();
+        let color = fields.iter().find(|f| f.key == "ink").unwrap();
+        assert_eq!(color.kind, "color");
+        assert_eq!(color.title, "墨色");
+        assert!(color.adaptive_color);
+        assert!(!color.allow_system_color);
+        let scale = fields.iter().find(|f| f.key == "scale").unwrap();
+        assert_eq!(scale.kind, "enum_number");
+        assert_eq!(scale.text, "12");
+        assert_eq!(scale.display_selected(), 0);
+        assert_eq!(scale.value(3, "17").unwrap(), Some(json!(17.0)));
+        assert_eq!(scale.value(0, "17").unwrap(), None);
+        assert!(resolve(&json!({"$ref":"#"}), &json!({"$ref":"#"}), 0).is_err());
+        // 内置描述与后加载的 WASM 描述走同一路径。
+        for (defaults, rich, expected_system, expected_count) in [
+            (
+                include_str!("../../themes/eleven/src/config.json"),
+                include_str!("../../themes/eleven/src/config.richschema.json"),
+                true,
+                3,
+            ),
+            (
+                include_str!("../../themes/wasm/theme-weaselui/config.json"),
+                include_str!("../../themes/wasm/theme-weaselui/config.richschema.json"),
+                false,
+                13,
+            ),
+        ] {
+            let metadata = Metadata::from_parts(
+                serde_json::from_str(defaults).unwrap(),
+                serde_json::from_str(rich).unwrap(),
+            )
+            .unwrap();
+            let mut fields = Vec::new();
+            collect(
+                &metadata.richschema["schema"],
+                &metadata,
+                &metadata.richschema["ui"],
+                &mount,
+                &[],
+                &metadata.defaults,
+                &json!({}),
+                &mut fields,
+                0,
+            )
+            .unwrap();
+            let colors: Vec<_> = fields.iter().filter(|f| f.kind == "color").collect();
+            assert_eq!(colors.len(), expected_count);
+            assert!(
+                colors
+                    .iter()
+                    .all(|f| f.adaptive_color && f.allow_system_color == expected_system)
+            );
+        }
+    }
 }

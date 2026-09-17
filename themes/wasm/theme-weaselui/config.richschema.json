@@ -307,6 +307,19 @@
   },
   "ui": {
     "fields": {
+      "/color/shadow": { "widget": "color" },
+      "/color/text": { "widget": "color" },
+      "/color/back": { "widget": "color" },
+      "/color/border": { "widget": "color" },
+      "/color/candidate_text": { "widget": "color" },
+      "/color/comment_text": { "widget": "color" },
+      "/color/label": { "widget": "color" },
+      "/color/hilited_text": { "widget": "color" },
+      "/color/hilited_back": { "widget": "color" },
+      "/color/hilited_candidate_text": { "widget": "color" },
+      "/color/hilited_candidate_back": { "widget": "color" },
+      "/color/hilited_comment_text": { "widget": "color" },
+      "/color/hilited_label": { "widget": "color" },
       "/name": {
         "order": 0
       },

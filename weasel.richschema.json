@@ -163,7 +163,8 @@
         "order": 50
       },
       "/themeSettings": {
-        "order": 60
+        "order": 60,
+        "hidden": true
       }
     }
   }
