@@ -84,6 +84,7 @@ Var PreviousTip64
 !include "${PROJECT_ROOT}\installer\vcredist.nsh"
 !include "${PROJECT_ROOT}\installer\processes.nsh"
 !include "${PROJECT_ROOT}\installer\launch-broker.nsh"
+!include "${PROJECT_ROOT}\installer\uiaccess.nsh"
 !include "${PAYLOAD_INCLUDE}"
 
 Function .onInstSuccess
@@ -421,6 +422,7 @@ Section "Weasel-RS" SEC_MAIN
   !insertmacro ManagedFile "${X64_RELEASE}\weasel-broker.exe" "weasel-broker.exe"
   !insertmacro ManagedFile "${X64_RELEASE}\weasel-server.exe" "weasel-server.exe"
   !insertmacro ManagedFile "${X64_RELEASE}\weasel-renderer.exe" "weasel-renderer.exe"
+  Call PrepareUiAccessRenderer
   !insertmacro ManagedFile "${PROJECT_ROOT}\server\src\styles-LICENSE.txt" "styles-LICENSE.txt"
   !insertmacro ManagedFile "${PROJECT_ROOT}\LICENSE" "LICENSE"
   !insertmacro ManagedFile "${PROJECT_ROOT}\weasel.json" "weasel.json"
@@ -536,7 +538,11 @@ Section /o "调试符号" SEC_SYMBOLS
   SetOutPath "$INSTDIR"
   !insertmacro ManagedFile "${X64_RELEASE}\weasel_broker.pdb" "weasel_broker.pdb"
   !insertmacro ManagedFile "${X64_RELEASE}\weasel_server.pdb" "weasel_server.pdb"
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel_renderer.pdb" "weasel_renderer.pdb"
+  ${If} $UseUiAccess == 1
+    !insertmacro ManagedFile "${X64_RELEASE}\uiaccess\weasel_renderer.pdb" "weasel_renderer.pdb"
+  ${Else}
+    !insertmacro ManagedFile "${X64_RELEASE}\weasel_renderer.pdb" "weasel_renderer.pdb"
+  ${EndIf}
   ${If} ${SectionIsSelected} ${SEC_SETTINGS}
     !insertmacro ManagedFile "${X64_RELEASE}\weasel_settings.pdb" "weasel_settings.pdb"
   ${EndIf}
@@ -696,6 +702,11 @@ FunctionEnd
 !endif
 
 Function .onInstFailed
+  ${If} $TransactionCommitted != 1
+    ${If} ${FileExists} "$PLUGINSDIR\new-uiaccess.cer"
+      !insertmacro CleanupUiAccessCertificate "$PLUGINSDIR\new-uiaccess.cer"
+    ${EndIf}
+  ${EndIf}
   !insertmacro InstallLog "ERROR: 安装未完成；正在恢复安装前状态；日志：$InstallLog"
   Call CloseRecords
   ${If} $TransactionStarted == 1

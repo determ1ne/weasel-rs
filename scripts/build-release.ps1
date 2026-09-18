@@ -30,9 +30,11 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $targetDirectory = Join-Path $projectRoot 'target'
 $buildTargets = @('x86_64-pc-windows-msvc', 'i686-pc-windows-msvc')
 $previousCargoIncremental = [Environment]::GetEnvironmentVariable('CARGO_INCREMENTAL', 'Process')
+$previousUiAccess = [Environment]::GetEnvironmentVariable('WEASEL_RENDERER_UIACCESS', 'Process')
 
 Push-Location -LiteralPath $projectRoot
 try {
+    $env:WEASEL_RENDERER_UIACCESS = '0'
     if ($Dev) {
         # Cargo already caches unchanged crates in target. Release builds normally
         # disable incremental compilation; opt in for repeated local edits. Keep
@@ -83,6 +85,22 @@ try {
     Copy-Item -LiteralPath (Join-Path $projectRoot 'weasel.json') -Destination (Join-Path $targetDirectory 'x86_64-pc-windows-msvc\release\weasel.json')
     # Match the installed/portable DLL layout next to the renderer.
     $releaseDirectory = Join-Path $targetDirectory 'x86_64-pc-windows-msvc\release'
+    # Keep Cargo's primary output ordinary. Build the opt-in variant first, copy
+    # its matching symbols, then rebuild ordinary so Cargo's cache stays honest.
+    $uiAccessDirectory = Join-Path $releaseDirectory 'uiaccess'
+    $null = New-Item -ItemType Directory -Path $uiAccessDirectory -Force
+    try {
+        $env:WEASEL_RENDERER_UIACCESS = '1'
+        & $cargoCommand build --release --locked -p weasel-renderer --target x86_64-pc-windows-msvc --target-dir $targetDirectory
+        if ($LASTEXITCODE -ne 0) { throw 'UIAccess renderer build failed.' }
+        foreach ($file in @('weasel-renderer.exe', 'weasel_renderer.pdb')) {
+            Copy-Item -LiteralPath (Join-Path $releaseDirectory $file) -Destination $uiAccessDirectory -Force
+        }
+    } finally {
+        $env:WEASEL_RENDERER_UIACCESS = '0'
+        & $cargoCommand build --release --locked -p weasel-renderer --target x86_64-pc-windows-msvc --target-dir $targetDirectory
+        if ($LASTEXITCODE -ne 0) { throw 'Ordinary renderer rebuild failed; do not package these outputs.' }
+    }
     $themeDirectory = Join-Path $releaseDirectory 'themes'
     $null = New-Item -ItemType Directory -Path $themeDirectory -Force
     $nodeCommand = Resolve-Application 'node'
@@ -152,6 +170,7 @@ try {
     Write-Error -ErrorRecord $_ -ErrorAction Continue
     exit 1
 } finally {
+    [Environment]::SetEnvironmentVariable('WEASEL_RENDERER_UIACCESS', $previousUiAccess, 'Process')
     if ($Dev) {
         [Environment]::SetEnvironmentVariable('CARGO_INCREMENTAL', $previousCargoIncremental, 'Process')
     }
