@@ -11,6 +11,39 @@ pub const PID_ENV: &str = "WEASEL_BROKER_PID";
 pub const BIRTH_ENV: &str = "WEASEL_BROKER_BIRTH";
 pub const STOP_ENV: &str = "WEASEL_BROKER_STOP_EVENT";
 static INSTANCE: OnceLock<String> = OnceLock::new();
+static LAUNCH_OWNER: OnceLock<[String; 4]> = OnceLock::new();
+
+/// Shell launches cannot carry Command::env overrides. Consume the private
+/// ownership prefix without mutating the process-wide environment.
+pub fn take_launch_args(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> io::Result<Vec<std::ffi::OsString>> {
+    let mut args = args.into_iter().peekable();
+    if args.peek().is_some_and(|arg| arg == "--broker-owner") {
+        args.next();
+        let mut values = std::array::from_fn::<_, 4, _>(|_| String::new());
+        for value in &mut values {
+            *value = args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .filter(|arg| !arg.is_empty())
+                .ok_or_else(|| io::Error::other("incomplete broker ownership arguments"))?;
+        }
+        values[1].parse::<u32>().map_err(io::Error::other)?;
+        values[2].parse::<u64>().map_err(io::Error::other)?;
+        LAUNCH_OWNER
+            .set(values)
+            .map_err(|_| io::Error::other("broker ownership already initialized"))?;
+    }
+    Ok(args.collect())
+}
+
+fn owner_value(index: usize, env: &str) -> Option<String> {
+    LAUNCH_OWNER
+        .get()
+        .map(|values| values[index].clone())
+        .or_else(|| std::env::var(env).ok())
+}
 
 pub fn new_token() -> io::Result<String> {
     unsafe {
@@ -25,7 +58,7 @@ pub fn identity(component: &str, ready: bool) -> crate::message::ServiceIdentity
         pid: std::process::id(),
         component: component.into(),
         ready,
-        owner_token: std::env::var(TOKEN_ENV).unwrap_or_default(),
+        owner_token: owner_value(0, TOKEN_ENV).unwrap_or_default(),
         instance: INSTANCE.get().cloned().unwrap_or_default(),
     }
 }
@@ -142,9 +175,9 @@ impl ParentWatch {
         if INSTANCE.get().is_none() {
             let _ = INSTANCE.set(new_token()?);
         }
-        let token = std::env::var_os(TOKEN_ENV);
-        let pid = std::env::var_os(PID_ENV);
-        let expected = std::env::var_os(BIRTH_ENV);
+        let token = owner_value(0, TOKEN_ENV);
+        let pid = owner_value(1, PID_ENV);
+        let expected = owner_value(2, BIRTH_ENV);
         if token.is_none() && pid.is_none() && expected.is_none() {
             return Ok(None);
         }
@@ -152,12 +185,13 @@ impl ParentWatch {
             return Err(io::Error::other("missing broker token"));
         }
         let pid: u32 = pid
-            .and_then(|v| v.to_str().and_then(|v| v.parse().ok()))
+            .and_then(|v| v.parse().ok())
             .ok_or_else(|| io::Error::other("invalid broker PID"))?;
         let expected: u64 = expected
-            .and_then(|v| v.to_str().and_then(|v| v.parse().ok()))
+            .and_then(|v| v.parse().ok())
             .ok_or_else(|| io::Error::other("invalid broker creation time"))?;
-        let stop_name = std::env::var(STOP_ENV).map_err(io::Error::other)?;
+        let stop_name = owner_value(3, STOP_ENV)
+            .ok_or_else(|| io::Error::other("missing broker stop event"))?;
         let wide = windows_strings::HSTRING::from(stop_name);
         let remote_stop = unsafe {
             OpenEventW(

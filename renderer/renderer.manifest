@@ -5,6 +5,13 @@
       name="weasel-rs.renderer"
       version="1.0.0.0"
       processorArchitecture="amd64" />
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
       <maxversiontested Id="10.0.18362.0" />

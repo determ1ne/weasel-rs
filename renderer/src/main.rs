@@ -35,7 +35,10 @@ fn main() {
             let _ = bindings::Windows::Win32::AllocConsole();
         }
     }
-    let preview = match preview::parse_args(std::env::args_os().skip(1)) {
+    let preview = match weasel_common::service_owner::take_launch_args(std::env::args_os().skip(1))
+        .map_err(|error| error.to_string())
+        .and_then(preview::parse_args)
+    {
         Ok(preview) => preview,
         Err(error) => {
             eprintln!("weasel-renderer: {error}");

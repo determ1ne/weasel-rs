@@ -49,7 +49,7 @@ fn runtime() -> io::Result<tokio::runtime::Runtime> {
 }
 
 pub struct Child {
-    process: std::process::Child,
+    process: crate::child_process::ChildProcess,
     stop: StopSignal,
     component: &'static str,
     instance: String,
@@ -127,8 +127,25 @@ pub fn start(directory: &Path, executable: &str, arguments: &[&str]) -> io::Resu
     if !weasel_common::runtime_paths::is_development_directory(directory) {
         command.stdout(Stdio::null()).stderr(Stdio::null());
     }
+    let process = if component == "renderer" {
+        let mut args = vec![
+            "--broker-owner".to_owned(),
+            owner.token.clone(),
+            std::process::id().to_string(),
+            owner.birth.to_string(),
+            stop.name.clone(),
+        ];
+        args.extend(arguments.iter().map(|arg| (*arg).to_owned()));
+        crate::child_process::ChildProcess::shell(
+            directory.join(executable),
+            directory.to_owned(),
+            args,
+        )?
+    } else {
+        crate::child_process::ChildProcess::Direct(command.spawn()?)
+    };
     let mut child = Child {
-        process: command.spawn()?,
+        process,
         stop,
         component,
         instance: String::new(),

@@ -4,6 +4,7 @@
 mod installer;
 mod lifecycle;
 mod managed_children;
+mod child_process;
 mod notifications;
 mod settings;
 mod settings_rpc;
