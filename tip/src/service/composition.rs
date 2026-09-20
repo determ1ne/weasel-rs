@@ -76,6 +76,9 @@ impl TextService {
             if matches {
                 break pending;
             }
+            if matches!(pending.step, EditStep::FinishRawComposition) {
+                pending.state.finishing_raw.store(false, Ordering::Release);
+            }
         };
         let Some(tid) = *self.lock(&self.keystroke_client_id)? else {
             let discarded = std::mem::take(&mut *self.lock(&self.pending_edit)?);
@@ -343,6 +346,11 @@ impl TextService {
             session,
         } = pending;
         match step {
+            EditStep::FinishRawComposition => {
+                let result = self.finish_raw_composition(&state, ec, false);
+                state.finishing_raw.store(false, Ordering::Release);
+                result
+            }
             EditStep::ApplyResponse => {
                 if !response::has_edit_payload(&response) {
                     return Ok(());

@@ -65,6 +65,7 @@ enum EditStep {
     CommitComposition,
     InsertCommit,
     DisconnectComposition,
+    FinishRawComposition,
     EndComposition { clear: bool, restart: bool },
 }
 
@@ -77,6 +78,7 @@ impl EditStep {
             Self::CommitComposition => "CommitComposition",
             Self::InsertCommit => "InsertCommit",
             Self::DisconnectComposition => "DisconnectComposition",
+            Self::FinishRawComposition => "FinishRawComposition",
             Self::EndComposition { .. } => "EndComposition",
         }
     }

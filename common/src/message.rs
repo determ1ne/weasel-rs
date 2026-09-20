@@ -32,6 +32,7 @@ pub struct KeyEventResponse {
     pub eaten: bool,
     pub commit_text: String,
     pub composition: String,
+    pub raw_input: Option<String>,
     pub candidates: Vec<Candidate>,
     pub selected_candidate: u32,
     pub composition_cursor: u32,

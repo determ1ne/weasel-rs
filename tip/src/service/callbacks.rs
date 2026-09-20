@@ -90,7 +90,7 @@ impl ITfTextEditSink_Impl for TextService_Impl {
         peditrecord: Ref<'_, ITfEditRecord>,
     ) -> Result<()> {
         boundary::guard(Some(&self.faulted), || {
-            self.on_host_edit(pic, ecreadonly, peditrecord)
+            self.on_host_edit(pic, ecreadonly, peditrecord, self.to_interface())
         })
     }
 }
@@ -201,7 +201,7 @@ impl ITfThreadFocusSink_Impl for TextService_Impl {
 impl ITfCompositionSink_Impl for TextService_Impl {
     fn OnCompositionTerminated(
         &self,
-        _ecwrite: TfEditCookie,
+        ecwrite: TfEditCookie,
         pcomposition: Ref<'_, ITfComposition>,
     ) -> Result<()> {
         boundary::guard(Some(&self.faulted), || {
@@ -210,18 +210,10 @@ impl ITfCompositionSink_Impl for TextService_Impl {
             };
             let states = self.lock(&self.contexts)?.clone();
             for state in states {
-                let removed = {
-                    let mut current = self.lock(&state.composition)?;
-                    if current.as_ref() != Some(&terminated) {
-                        continue;
-                    }
-                    current.take()
-                };
-                drop(removed);
-                let saved = self.lock(&state.host_selection)?.take();
-                drop(saved);
-                self.lock(&state.composition_text)?.clear();
-                *self.lock(&state.composition_cursor)? = 0;
+                if self.lock(&state.composition)?.as_ref() != Some(&terminated) {
+                    continue;
+                }
+                let finished = self.finish_raw_composition(&state, ecwrite, true);
                 // A locally initiated EndComposition takes the reference first,
                 // so only host-initiated termination reaches this branch.
                 self.send_context_action(
@@ -229,6 +221,7 @@ impl ITfCompositionSink_Impl for TextService_Impl {
                     weasel_common::message::ContextAction::HostTerminated,
                     true,
                 )?;
+                finished?;
                 break;
             }
             Ok(())

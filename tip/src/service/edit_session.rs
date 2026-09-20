@@ -56,6 +56,9 @@ impl Drop for ResponseEdit {
                     .disconnect_requested
                     .store(false, Ordering::Release);
             }
+            if matches!(pending.step, EditStep::FinishRawComposition) {
+                pending.state.finishing_raw.store(false, Ordering::Release);
+            }
             service.faulted.request_maintenance();
         }
     }
@@ -109,6 +112,10 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
                 matches!(pending.step, EditStep::DisconnectComposition)
                     .then_some(&state.disconnect_requested),
             );
+            let _finish_flag = CleanupFlag(
+                matches!(pending.step, EditStep::FinishRawComposition)
+                    .then_some(&state.finishing_raw),
+            );
             let valid = match pending.matches() {
                 Ok(valid) => valid,
                 Err(error) => {
@@ -130,7 +137,21 @@ impl ITfEditSession_Impl for ResponseEdit_Impl {
                     }
                 }
                 let _editing = Editing(&state.editing);
-                service.apply_edit(pending, ec)
+                let reconcile = if matches!(
+                    pending.step,
+                    EditStep::ApplyResponse
+                        | EditStep::UpdateComposition
+                        | EditStep::CommitComposition
+                ) {
+                    service.reconcile_before_edit(&state, ec)
+                } else {
+                    Ok(false)
+                };
+                match reconcile {
+                    Ok(true) => Ok(()),
+                    Ok(false) => service.apply_edit(pending, ec),
+                    Err(error) => Err(error),
+                }
             } else {
                 Ok(())
             };

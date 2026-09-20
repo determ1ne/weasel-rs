@@ -391,6 +391,11 @@ impl RimeSession {
                     response.ascii_mode = Some(status.is_ascii_mode != 0);
                 }
             }
+            if response.state_updated {
+                if let Some(get_input) = self.api.api.get_input {
+                    response.raw_input = Some(c_string(get_input(self.id)));
+                }
+            }
             response
         }
     }

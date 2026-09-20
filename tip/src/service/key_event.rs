@@ -167,6 +167,10 @@ impl TextService {
             return Ok(BOOL(0));
         }
         self.focus_context(Some(state.clone()))?;
+        if state.finishing_raw.load(Ordering::Acquire) {
+            self.lock(&self.tested_key)?.take();
+            return Ok(BOOL(0));
+        }
         if state.secure_field.load(Ordering::Acquire) == secure_input::UNKNOWN {
             // Resolve the first key synchronously. If the host refuses a read
             // session, fail closed for this key and retry on the next callback.

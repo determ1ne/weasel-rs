@@ -306,6 +306,12 @@ fn validate_interaction(v: &m::RendererEvent) -> Result<(), RpcError> {
     Ok(())
 }
 fn validate_state(v: &m::InputState) -> Result<(), RpcError> {
+    if v.raw_input
+        .as_ref()
+        .is_some_and(|text| text.len() > 64 * 1024)
+    {
+        return Err(invalid("raw input too long"));
+    }
     if v.cursor_utf16 as usize > v.preedit.encode_utf16().count()
         || v.candidates.len() > 256
         || (v.candidates.is_empty() && v.selected != 0)
@@ -335,6 +341,7 @@ fn pack_input(v: m::KeyEventResponse) -> Result<m::InputResult, RpcError> {
         page_start: v.page_start,
         has_previous: v.can_page_previous,
         has_next: v.can_page_next,
+        raw_input: v.raw_input,
     });
     if let Some(state) = &state {
         validate_state(state)?;
@@ -365,6 +372,7 @@ fn unpack_input(v: m::InputResult) -> Result<m::KeyEventResponse, RpcError> {
         validate_state(&s)?;
         result.state_updated = true;
         result.composition = s.preedit;
+        result.raw_input = s.raw_input;
         result.composition_cursor = s.cursor_utf16;
         result.composing = s.composing;
         result.candidates = s.candidates;
@@ -446,6 +454,7 @@ mod tests {
             state_updated: true,
             composing: true,
             composition: "a😀".into(),
+            raw_input: Some("a😀".into()),
             composition_cursor: 3,
             candidates: vec![m::Candidate {
                 text: "字".into(),

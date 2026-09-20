@@ -33,6 +33,7 @@ impl Drop for EditReservation<'_> {
 
 impl TextService {
     pub(super) fn reject_readonly_edit(&self, state: &ContextState) -> Result<()> {
+        state.finishing_raw.store(false, Ordering::Release);
         self.lock(&self.tested_key)?.take();
         self.discard_context_edits(state.id)?;
         state.generation.fetch_add(1, Ordering::AcqRel);
@@ -54,6 +55,7 @@ impl TextService {
     }
 
     pub(super) fn quarantine(&self, state: &ContextState, reason: &'static str, code: u64) {
+        state.finishing_raw.store(false, Ordering::Release);
         if state.suspended.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -74,6 +76,14 @@ impl TextService {
             *queue = keep;
             discard
         };
+        if discarded
+            .iter()
+            .any(|task| matches!(task.step, EditStep::FinishRawComposition))
+        {
+            if let Some(state) = discarded.front().map(|task| &task.state) {
+                state.finishing_raw.store(false, Ordering::Release);
+            }
+        }
         drop(discarded);
         Ok(())
     }

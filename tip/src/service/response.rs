@@ -10,7 +10,13 @@ pub(super) fn has_edit_payload(response: &KeyEventResponse) -> bool {
 }
 
 pub(super) fn validate(response: &KeyEventResponse) -> Result<()> {
-    if response.composition.len() > MAX_TEXT_BYTES || response.commit_text.len() > MAX_TEXT_BYTES {
+    if response.composition.len() > MAX_TEXT_BYTES
+        || response.commit_text.len() > MAX_TEXT_BYTES
+        || response
+            .raw_input
+            .as_ref()
+            .is_some_and(|text| text.len() > MAX_TEXT_BYTES)
+    {
         return Err(Error::from_hresult(boundary::E_FAIL));
     }
     let cursor = response.composition_cursor as usize;

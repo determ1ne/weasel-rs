@@ -17,6 +17,8 @@ pub(super) struct ContextState {
     pub composition_epoch: AtomicU64,
     pub disconnect_requested: AtomicBool,
     pub composition_text: Mutex<String>,
+    pub composition_raw: Mutex<Option<String>>,
+    pub finishing_raw: AtomicBool,
     pub composition_cursor: Mutex<usize>,
     pub layout: Mutex<layout::LayoutSchedule>,
     pub editing: AtomicBool,
@@ -147,6 +149,8 @@ impl TextService {
             composition_epoch: AtomicU64::new(0),
             disconnect_requested: AtomicBool::new(false),
             composition_text: Mutex::new(String::new()),
+            composition_raw: Mutex::new(None),
+            finishing_raw: AtomicBool::new(false),
             composition_cursor: Mutex::new(0),
             layout: Mutex::default(),
             editing: AtomicBool::new(false),
@@ -329,6 +333,10 @@ impl TextService {
                     self.refresh_language_bar()?;
                 }
                 if response::has_edit_payload(&response) {
+                    response::validate(&response)?;
+                    if response.state_updated && response.composing {
+                        *self.lock(&state.composition_raw)? = response.raw_input.clone();
+                    }
                     let needs_edit = !response.commit_text.is_empty()
                         || response.composing != self.lock(&state.composition)?.is_some()
                         || response.composition != *self.lock(&state.composition_text)?

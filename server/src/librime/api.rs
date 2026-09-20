@@ -41,6 +41,7 @@ impl RimeLibraryApi {
         field!(get_commit);
         field!(free_commit);
         field!(get_context);
+        field!(get_input);
         field!(free_context);
         field!(get_status);
         field!(free_status);

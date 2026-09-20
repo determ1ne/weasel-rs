@@ -98,6 +98,8 @@ message InputState {
   uint32 page_start = 6;
   bool has_previous = 7;
   bool has_next = 8;
+  // Unformatted engine input, independent of inline/external/preview display.
+  optional string raw_input = 9;
 }
 // Commit finalizes the active preedit (or inserts when none exists); a provided
 // state may then start the next preedit. Emoji invocation cancels preedit first.
