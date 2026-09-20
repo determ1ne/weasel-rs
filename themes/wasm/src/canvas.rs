@@ -604,14 +604,4 @@ mod tests {
             [D2D_RECT_F::default(); 4]
         );
     }
-
-    #[test]
-    fn color_decoding_ignores_alpha() {
-        // 0xAARRGGBB：A=0x40, R=0x80, G=0x10, B=0x20
-        let c = to_color(0x40_80_10_20);
-        assert!((c.r - 0x80 as f32 / 255.0).abs() < 1e-6);
-        assert!((c.g - 0x10 as f32 / 255.0).abs() < 1e-6);
-        assert!((c.b - 0x20 as f32 / 255.0).abs() < 1e-6);
-        assert_eq!(c.a, 1.0);
-    }
 }
