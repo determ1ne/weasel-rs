@@ -157,6 +157,13 @@ try {
                     if ($LASTEXITCODE -ne 0) { throw "Metadata packaging failed for $($guest.Name)." }
                 }
                 Copy-Item -LiteralPath $output -Destination $wasmArtifacts -Force
+                # 模块只能读取自己的同名 .assets 目录，安装包整体携带该目录。
+                $guestAssets = Join-Path $guest.FullName 'assets'
+                if (Test-Path -LiteralPath $guestAssets -PathType Container) {
+                    $assetDestination = Join-Path $wasmArtifacts ([IO.Path]::GetFileNameWithoutExtension($output) + '.assets')
+                    $null = New-Item -ItemType Directory -Path $assetDestination -Force
+                    Get-ChildItem -LiteralPath $guestAssets | Copy-Item -Destination $assetDestination -Recurse -Force
+                }
             } finally {
                 Pop-Location
             }

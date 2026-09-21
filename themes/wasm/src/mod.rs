@@ -28,7 +28,7 @@ fn module_paths(
     }
 }
 
-fn load_theme(paths: &[PathBuf]) -> Result<Vec<u8>, String> {
+fn load_theme(paths: &[PathBuf]) -> Result<(Vec<u8>, PathBuf), String> {
     use std::io::Read;
     let mut selected = None;
     for path in paths {
@@ -58,7 +58,7 @@ fn load_theme(paths: &[PathBuf]) -> Result<Vec<u8>, String> {
     if bytes.len() > 16 * 1024 * 1024 {
         return Err("WASM module exceeds 16 MiB".into());
     }
-    Ok(bytes)
+    Ok((bytes, path.with_extension("assets")))
 }
 
 impl ThemeFactory for Factory {
@@ -70,7 +70,7 @@ impl ThemeFactory for Factory {
         // The guest probes the actual requirement during creation.
         ThemeCapabilities {
             preedit: true,
-            // Individual guests opt in with `probe_resident`; declaring the
+            // Individual guests opt in with `theme_capabilities`; declaring the
             // superset here lets renderer deliver mode-only snapshots.
             resident: true,
         }
@@ -130,11 +130,10 @@ impl ThemeFactory for Factory {
                 &paths.executable_directory,
                 &paths.user_data,
             );
-            let bytes = load_theme(&candidates)?;
-            // canvas 先于 runtime：measure_text 导入委托给 canvas 的 DirectWrite 实测。
+            let (bytes, asset_root) = load_theme(&candidates)?;
+            // canvas负责回放，runtime持有独立字体和布局资源。
             let canvas = crate::canvas::Canvas::new().map_err(|e| e.to_string())?;
             let canvas = Rc::new(RefCell::new(canvas));
-            let measurer = Rc::clone(&canvas);
             let options = entry
                 .get("config")
                 .cloned()
@@ -145,27 +144,12 @@ impl ThemeFactory for Factory {
                 ));
             }
             let mut state = HostState::default();
+            state.resources.asset_root = Some(asset_root);
             state.options = options;
             // Expose only supported presentation settings, separate from guest config.
             state.settings = serde_json::json!({
                 "preedit_type": settings.query(".preedit_type")?.cloned()
                     .unwrap_or_else(|| serde_json::json!("composition")),
-            });
-            let font_canvas = measurer.clone();
-            state.set_font =
-                Box::new(move |slot, family| font_canvas.borrow_mut().set_font(slot, family));
-            let metric_canvas = measurer.clone();
-            state.line_height = Box::new(move |slot, size| {
-                metric_canvas
-                    .borrow_mut()
-                    .line_height(slot, size)
-                    .unwrap_or(size * 1.4)
-            });
-            state.measure = Box::new(move |text, font, size| {
-                measurer
-                    .borrow_mut()
-                    .measure(font, size, text)
-                    .unwrap_or(0.0)
             });
             let mut runtime = WasmRuntime::with_state(&bytes, state)
                 .map_err(|e| format!("failed to instantiate WASM theme: {e}"))?;

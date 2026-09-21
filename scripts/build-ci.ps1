@@ -10,6 +10,8 @@ Push-Location -LiteralPath $projectRoot
 try {
     & node (Join-Path $PSScriptRoot 'generate-schemas.mjs') --check
     if ($LASTEXITCODE -ne 0) { throw 'Generated schemas are stale or invalid.' }
+    & node (Join-Path $PSScriptRoot 'generate-wasm-abi.mjs') --check
+    if ($LASTEXITCODE -ne 0) { throw 'Generated WASM ABI declarations are stale.' }
     $metadata = & cargo metadata --no-deps --format-version 1 --locked
     if ($LASTEXITCODE -ne 0) { throw 'Unable to read Cargo metadata.' }
     $metadata = $metadata | ConvertFrom-Json

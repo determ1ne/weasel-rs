@@ -3,12 +3,19 @@
   "version": "0.1.0",
   "description": "AssemblyScript SDK and sample theme for weasel-rs WASM themes",
   "type": "module",
-  "files": ["assembly", "README.md"],
+  "files": [
+    "assembly",
+    "README.md"
+  ],
   "scripts": {
     "asbuild:debug": "asc examples/minimal.ts --target debug",
     "asbuild:release": "asc examples/minimal.ts --target release",
-    "asbuild": "npm run asbuild:debug && npm run asbuild:release",
-    "test": "node test/host-test.mjs"
+    "asbuild": "npm run asbuild:debug && npm run asbuild:release && npm run asbuild:quickstart && npm run asbuild:animated && npm run asbuild:layer-pulse",
+    "test": "node test/host-test.mjs",
+    "asbuild:quickstart": "asc examples/quickstart.ts --target release --outFile build/quickstart.wasm",
+    "asbuild:animated": "asc examples/animated.ts --target release --outFile build/animated.wasm --textFile build/animated.wat",
+    "asbuild:layer-pulse": "asc examples/layer-pulse.ts --target release --outFile build/layer-pulse.wasm --textFile build/layer-pulse.wat",
+    "test:animation": "asc test/animation.ts --target release --outFile build/animation-test.wasm --textFile build/animation-test.wat && node test/animation-test.mjs"
   },
   "license": "MIT",
   "devDependencies": {

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "config.schema.json",
+  "title": "Orbit · 月轨",
+  "description": "带透明月球装饰与轻缓动画的横向候选窗，支持候选窗内预编辑。",
+  "type": "object",
+  "properties": {
+    "fontSize": {
+      "type": "number",
+      "minimum": 12,
+      "maximum": 24,
+      "title": "字号",
+      "description": "候选文字大小，单位 DIP。",
+      "default": 16
+    },
+    "animations": {
+      "type": "boolean",
+      "title": "动画",
+      "description": "月球浮动、星点闪烁及选中标记过渡；关闭后使用静态画面。",
+      "default": true
+    },
+    "accentLight": {
+      "type": "string",
+      "pattern": "^#?[0-9a-fA-F]{6}$",
+      "title": "浅色强调色",
+      "default": "#527DA6"
+    },
+    "accentDark": {
+      "type": "string",
+      "pattern": "^#?[0-9a-fA-F]{6}$",
+      "title": "深色强调色",
+      "default": "#9BC3E8"
+    }
+  },
+  "additionalProperties": false,
+  "default": {
+    "fontSize": 16,
+    "animations": true,
+    "accentLight": "#527DA6",
+    "accentDark": "#9BC3E8"
+  },
+  "$comment": "Generated from the matching .richschema.json and .json; do not edit."
+}

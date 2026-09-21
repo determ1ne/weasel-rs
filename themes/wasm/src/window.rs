@@ -153,8 +153,11 @@ pub struct Window {
     manual_position: Cell<Option<(i32, i32)>>,
     panel: Cell<crate::protocol::PanelStyle>,
     backdrop: Cell<crate::protocol::BackdropStyle>,
+    anchor_rect: Cell<crate::protocol::Rect>,
+    placement: Cell<PlacementStyle>,
     preview: bool,
     dark: Cell<bool>,
+    wake_deadline: Cell<Option<f64>>,
 }
 
 impl Window {
@@ -183,12 +186,16 @@ impl Window {
             manual_position: Cell::new(None),
             panel: Cell::new(Default::default()),
             backdrop: Cell::new(Default::default()),
+            anchor_rect: Cell::new(Default::default()),
+            placement: Cell::new(Default::default()),
             preview,
             dark: Cell::new(appearance::is_dark()),
+            wake_deadline: Cell::new(None),
         }
     }
 
     fn fail(&self, error: impl ToString) {
+        self.cancel_wakeup();
         let mut slot = self.error.borrow_mut();
         if slot.is_none() {
             *slot = Some(error.to_string());
@@ -308,20 +315,27 @@ impl Window {
                                 .as_ref()
                                 .filter(|anchor| anchor.valid)
                                 .map(|anchor| {
+                                    let anchor_rect = app.runtime.anchor_rect();
                                     let (x, y) = popup_position(
                                         anchor,
-                                        pixels(dip_w, dpi),
-                                        pixels(dip_h, dpi),
+                                        pixels(anchor_rect.w, dpi),
+                                        pixels(anchor_rect.h, dpi),
                                     );
                                     // Anchor belongs to the content, not the shadow-expanded surface.
                                     (
-                                        x - (edge.left * dpi as f32 / 96.0).round() as i32,
-                                        y - (edge.top * dpi as f32 / 96.0).round() as i32,
+                                        x - ((edge.left + anchor_rect.x) * dpi as f32 / 96.0)
+                                            .round()
+                                            as i32,
+                                        y - ((edge.top + anchor_rect.y) * dpi as f32 / 96.0).round()
+                                            as i32,
                                     )
                                 }),
                         }
                     };
-                    position.map(|(x, y)| (x, y, width, height))
+                    position.map(|(x, y)| {
+                        let (x, y) = clamp_to_nearest_work_area(x, y, width, height);
+                        (x, y, width, height)
+                    })
                 }
             };
             let Some((x, y, width, height)) = bounds else {
@@ -356,6 +370,11 @@ impl Window {
         canvas.set_panel(app.runtime.panel_style(), app.size, self.dpi.get())?;
         canvas.set_backdrop(app.runtime.backdrop_style())?;
         canvas.replay(&app.frame)?;
+        if app.runtime.visible() && app.content.is_some() {
+            canvas.set_layers(app.runtime.layers())?;
+        } else {
+            canvas.clear_layers()?;
+        }
         self.recovery.borrow_mut().succeeded();
         Ok(())
     }
@@ -386,7 +405,7 @@ impl Window {
     fn apply_side_effects(
         &self,
         actions: &[(i32, i32)],
-        frame_requested: bool,
+        frame_requested: crate::animation::WakeRequest,
         notes: Vec<String>,
     ) -> Result<(), String> {
         for &(action, index) in actions {
@@ -427,7 +446,13 @@ impl Window {
         if self.backdrop.replace(backdrop) != backdrop {
             self.invalidate();
         }
-        if size_changed || panel_changed {
+        let (anchor_rect, placement) = {
+            let app = self.app.borrow();
+            (app.runtime.anchor_rect(), app.runtime.placement())
+        };
+        let anchor_changed = self.anchor_rect.replace(anchor_rect) != anchor_rect;
+        let placement_changed = self.placement.replace(placement) != placement;
+        if size_changed || panel_changed || anchor_changed || placement_changed {
             self.position().map_err(|e| e.to_string())?;
             let (w, h) = {
                 let app = self.app.borrow();
@@ -444,13 +469,7 @@ impl Window {
                 .resize(w as u32, h as u32, self.dpi.get())
                 .map_err(|e| e.to_string())?;
         }
-        if frame_requested {
-            unsafe {
-                if SetTimer(Some(self.hwnd.get()), FRAME_TIMER, FRAME_INTERVAL_MS, None) == 0 {
-                    return Err(windows_core::Error::from_thread().to_string());
-                }
-            }
-        }
+        self.schedule_wakeup(frame_requested)?;
         if !notes.is_empty() {
             let mut app = self.app.borrow_mut();
             for note in notes {
@@ -468,8 +487,46 @@ impl Window {
         Ok(())
     }
 
+    fn cancel_wakeup(&self) {
+        self.wake_deadline.set(None);
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd.get()), FRAME_TIMER);
+        }
+    }
+
+    fn schedule_wakeup(&self, request: crate::animation::WakeRequest) -> Result<(), String> {
+        let old = self.wake_deadline.get();
+        let next = if self.app.borrow().runtime.visible() && self.app.borrow().content.is_some() {
+            request.merge(old)
+        } else {
+            None
+        };
+        if next == old {
+            return Ok(());
+        }
+        self.cancel_wakeup();
+        if let Some(deadline) = next {
+            let delay = (deadline - now_ms())
+                .ceil()
+                .clamp(FRAME_INTERVAL_MS as f64, 86_400_000.0) as u32;
+            unsafe {
+                if SetTimer(Some(self.hwnd.get()), FRAME_TIMER, delay, None) == 0 {
+                    return Err(windows_core::Error::from_thread().to_string());
+                }
+            }
+            self.wake_deadline.set(Some(deadline));
+        }
+        Ok(())
+    }
+
     fn sync_visibility(&self) {
         let visible = self.app.borrow().runtime.visible();
+        if !visible {
+            self.cancel_wakeup();
+            if let Err(e) = self.app.borrow().canvas.borrow_mut().clear_layers() {
+                self.fail(e);
+            }
+        }
         unsafe {
             let _ = ShowWindow(
                 self.hwnd.get(),
@@ -520,45 +577,64 @@ impl Window {
             self.hide();
             return Ok(());
         }
-        let (actions, frame_requested, notes) = {
+        let (actions, frame_requested, notes, changed) = {
             let mut app = self.app.borrow_mut();
             // Appearance notifications may arrive while hidden. Init is only
             // called once, so synchronize the palette before the next render.
             let dark = appearance::is_dark();
+            let mut appearance_changed = false;
+            let mut wake = crate::animation::WakeRequest::default();
             if self.dark.get() != dark {
                 app.runtime.refresh(dark)?;
+                if let Some(frame) = app.runtime.take_frame() {
+                    app.frame = frame;
+                    app.size = app.runtime.size();
+                    appearance_changed = true;
+                }
+                wake = app.runtime.take_frame_request();
                 self.dark.set(dark);
             }
             app.runtime.render(snapshot)?;
-            let commands = app.runtime.take_commands();
-            // render replaces content; unlike optional event redraws, never
-            // retain a previous candidate's frame for a new snapshot.
-            app.frame = commands;
-            app.size = app.runtime.size();
-            if app.content.is_none() {
-                app.content = Some(Content {
-                    events: events.clone(),
-                    last: snapshot.clone(),
-                });
-            } else {
-                let content = app.content.as_mut().expect("checked above");
-                content.events = events.clone();
-                content.last = snapshot.clone();
+            let commands = app.runtime.take_frame();
+            let changed = commands.is_some() || appearance_changed;
+            // No submission preserves the presented snapshot, including its action identity.
+            if let Some(commands) = commands {
+                app.frame = commands;
+                app.size = app.runtime.size();
+                if app.runtime.main_updated() {
+                    if app.content.is_none() {
+                        app.content = Some(Content {
+                            events: events.clone(),
+                            last: snapshot.clone(),
+                        });
+                    } else {
+                        let content = app.content.as_mut().expect("checked above");
+                        content.events = events.clone();
+                        content.last = snapshot.clone();
+                    }
+                    app.anchor = snapshot.anchor.clone();
+                }
             }
-            app.anchor = snapshot.anchor.clone();
             (
                 app.runtime.take_actions(),
-                app.runtime.take_frame_request(),
+                wake.then(app.runtime.take_frame_request()),
                 app.runtime.take_notes(),
+                changed,
             )
         };
         self.apply_side_effects(&actions, frame_requested, notes)?;
         self.sync_visibility();
-        self.invalidate();
+        if changed {
+            self.invalidate();
+        }
         self.health()
     }
 
     pub(crate) fn hide(&self) {
+        self.cancel_wakeup();
+        if let Err(e) = self.app.borrow().canvas.borrow_mut().clear_layers() {
+            self.fail(e);
+        }
         let had_content = self.app.borrow_mut().content.take().is_some();
         self.drag.set(None);
         self.cancel();
@@ -572,7 +648,7 @@ impl Window {
                     details: String::new(),
                 });
             }
-            let _ = app.runtime.take_commands();
+            let _ = app.runtime.take_frame();
             let _ = app.runtime.take_frame_request();
         }
         app.content = None;
@@ -592,17 +668,18 @@ impl Window {
     /// 外观变化：通知主题（wasm 内部重排），随后回放最新命令。
     pub(crate) fn refresh_appearance(&self) -> Result<(), String> {
         self.health()?;
-        let (actions, frame_requested, notes) = {
+        let (actions, frame_requested, notes, changed) = {
             let mut app = self.app.borrow_mut();
             if app.content.is_none() {
-                (Vec::new(), false, Vec::new())
+                (Vec::new(), Default::default(), Vec::new(), false)
             } else {
                 let dark = appearance::is_dark();
                 app.runtime.refresh(dark)?;
                 self.dark.set(dark);
-                let commands = app.runtime.take_commands();
-                // No commands means no repaint, not an empty frame.
-                if !commands.is_empty() {
+                let commands = app.runtime.take_frame();
+                let changed = commands.is_some();
+                // An explicit empty submission clears; no submission retains.
+                if let Some(commands) = commands {
                     app.frame = commands;
                 }
                 app.size = app.runtime.size();
@@ -610,12 +687,15 @@ impl Window {
                     app.runtime.take_actions(),
                     app.runtime.take_frame_request(),
                     app.runtime.take_notes(),
+                    changed,
                 )
             }
         };
         self.apply_side_effects(&actions, frame_requested, notes)?;
         self.sync_visibility();
-        self.invalidate();
+        if changed {
+            self.invalidate();
+        }
         self.health()
     }
 
@@ -630,10 +710,10 @@ impl Window {
         let (actions, frame_requested, notes, changed, drag_requested) = {
             let mut app = self.app.borrow_mut();
             app.runtime.mouse(kind, x, y)?;
-            let commands = app.runtime.take_commands();
-            // No commands means no repaint, not an empty frame.
-            let changed = !commands.is_empty() && commands != app.frame;
-            if changed {
+            let commands = app.runtime.take_frame();
+            // Presentation-only submissions also require an invalidation.
+            let changed = commands.is_some();
+            if let Some(commands) = commands {
                 app.frame = commands;
             }
             app.size = app.runtime.size();
@@ -664,15 +744,15 @@ impl Window {
     }
 
     fn tick_frame(&self) -> Result<(), String> {
-        if !self.app.borrow().content.is_some() {
+        if self.app.borrow().content.is_none() || !self.app.borrow().runtime.visible() {
             return Ok(());
         }
-        let (actions, frame_requested, notes) = {
+        let (actions, frame_requested, notes, changed) = {
             let mut app = self.app.borrow_mut();
             app.runtime.frame(now_ms())?;
-            let commands = app.runtime.take_commands();
-            // No commands means no repaint, not an empty frame.
-            if !commands.is_empty() {
+            let commands = app.runtime.take_frame();
+            let changed = commands.is_some();
+            if let Some(commands) = commands {
                 app.frame = commands;
             }
             app.size = app.runtime.size();
@@ -680,11 +760,14 @@ impl Window {
                 app.runtime.take_actions(),
                 app.runtime.take_frame_request(),
                 app.runtime.take_notes(),
+                changed,
             )
         };
         self.apply_side_effects(&actions, frame_requested, notes)?;
         self.sync_visibility();
-        self.invalidate();
+        if changed {
+            self.invalidate();
+        }
         Ok(())
     }
 
@@ -871,13 +954,10 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     let style = app.runtime.panel_style();
                     let edge = crate::geometry::insets(&style);
                     let scale = window.dpi.get() as f32 / 96.0;
-                    let hit = crate::geometry::hit_content(
+                    let hit = app.runtime.hit_test(
                         point.x as f32 / scale - edge.left,
                         point.y as f32 / scale - edge.top,
-                        app.size.0,
-                        app.size.1,
-                        style.corner_radius,
-                    );
+                    ) >= 0;
                     // HTTRANSPARENT only delegates within this UI thread; do not
                     // synthesize input into arbitrary applications underneath.
                     return LRESULT(if hit { HTCLIENT } else { HTTRANSPARENT } as isize);
@@ -915,7 +995,21 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     return LRESULT(0);
                 }
                 WM_TIMER if wp.0 == FRAME_TIMER as usize => {
-                    let _ = KillTimer(Some(hwnd), FRAME_TIMER);
+                    let deadline = window.wake_deadline.get();
+                    window.cancel_wakeup();
+                    // KillTimer不能撤回已投递消息；忽略取消后残留消息，过早的旧消息重新排队。
+                    let Some(deadline) = deadline else {
+                        return LRESULT(0);
+                    };
+                    if now_ms() < deadline {
+                        if let Err(e) = window.schedule_wakeup(crate::animation::WakeRequest {
+                            cancel: false,
+                            deadline: Some(deadline),
+                        }) {
+                            window.fail(e);
+                        }
+                        return LRESULT(0);
+                    }
                     if let Err(e) = window.tick_frame() {
                         window.fail(e);
                     }
@@ -972,7 +1066,12 @@ unsafe fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 WM_MOUSELEAVE | WM_CAPTURECHANGED | WM_CANCELMODE => {
                     window.drag.set(None);
                     window.cancel();
-                    if let Err(e) = window.mouse(MOUSE_LEAVE, lp) {
+                    let kind = if msg == WM_MOUSELEAVE as u32 {
+                        MOUSE_LEAVE
+                    } else {
+                        crate::protocol::MOUSE_CANCEL
+                    };
+                    if let Err(e) = window.mouse(kind, lp) {
                         window.fail(e);
                     }
                     window.invalidate();

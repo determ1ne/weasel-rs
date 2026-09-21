@@ -2,6 +2,7 @@
 //! The returned render target is valid only until `end_draw`; do not call its
 //! BeginDraw/EndDraw or replace its atlas-offset transform.
 use crate::d2d_bindings::{Windows, *};
+use crate::layers::{LayerMotion, LayerOperation, LayerProperty, LayerScene};
 use Windows::Foundation::Size;
 use Windows::Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat};
 use Windows::System::{DispatcherQueue, DispatcherQueueController};
@@ -10,8 +11,52 @@ use Windows::UI::Composition::{
     Desktop::DesktopWindowTarget, DropShadow, SpriteVisual,
 };
 use std::{cell::RefCell, marker::PhantomData, rc::Rc};
+use std::{collections::HashMap, time::Instant};
 use windows_core::{Interface, Result};
 use windows_numerics::{Matrix3x2, Vector2, Vector3};
+
+#[derive(Clone)]
+struct Decoration {
+    generation: u64,
+    visual: SpriteVisual,
+    container: ContainerVisual,
+    clip: Option<crate::protocol::Rect>,
+    surface: CompositionDrawingSurface,
+    commands: Vec<crate::protocol::DrawCommand>,
+    size: (f32, f32),
+    dpi: u32,
+    motions: HashMap<LayerProperty, LayerMotion>,
+}
+
+fn property_name(property: LayerProperty) -> windows_core::HSTRING {
+    match property {
+        LayerProperty::Opacity => "Opacity",
+        LayerProperty::OffsetX => "Offset.X",
+        LayerProperty::OffsetY => "Offset.Y",
+        LayerProperty::ScaleX => "Scale.X",
+        LayerProperty::ScaleY => "Scale.Y",
+    }
+    .into()
+}
+
+fn set_value(visual: &SpriteVisual, property: LayerProperty, value: f32) -> Result<()> {
+    visual.StopAnimation(&property_name(property))?;
+    match property {
+        LayerProperty::Opacity => visual.SetOpacity(value),
+        LayerProperty::OffsetX | LayerProperty::OffsetY => set_axis(visual, property, value),
+        LayerProperty::ScaleX | LayerProperty::ScaleY => set_axis(visual, property, value),
+    }
+}
+
+// 写回整个 Offset/Scale 会同时触碰其他轴，且 getter 不是动画的实时采样值。
+// 用常量表达式只设置指定子属性，保留另一轴的动画；没有逐帧 WASM 回调。
+fn set_axis(visual: &SpriteVisual, property: LayerProperty, value: f32) -> Result<()> {
+    let expression = visual
+        .Compositor()?
+        .CreateExpressionAnimationWithExpression(&"value".into())?;
+    expression.SetScalarParameter(&"value".into(), value)?;
+    visual.StartAnimation(&property_name(property), &expression)
+}
 
 struct Apartment(PhantomData<Rc<()>>);
 impl Apartment {
@@ -119,6 +164,9 @@ impl Drop for SurfaceDraw {
 
 pub struct Presenter {
     drawing: Option<SurfaceDraw>,
+    decorations: HashMap<u32, Decoration>,
+    decoration_root: ContainerVisual,
+    decoration_order: Vec<u32>,
     target: DesktopWindowTarget,
     root: ContainerVisual,
     content: SpriteVisual,
@@ -177,6 +225,8 @@ impl Presenter {
             unsafe { desktop.CreateDesktopWindowTarget(hwnd, false)?.cast()? };
         let root = compositor.CreateContainerVisual()?;
         let content = compositor.CreateSpriteVisual()?;
+        let decoration_root = compositor.CreateContainerVisual()?;
+        decoration_root.SetClip(&compositor.CreateInsetClip()?)?;
         let backdrop = compositor.CreateSpriteVisual()?;
         let shadow_visual = compositor.CreateSpriteVisual()?;
         let shadow = compositor.CreateDropShadow()?;
@@ -198,9 +248,13 @@ impl Presenter {
         root.Children()?.InsertAtBottom(&shadow_visual)?;
         root.Children()?.InsertAtTop(&backdrop)?;
         root.Children()?.InsertAtTop(&content)?;
+        root.Children()?.InsertAtTop(&decoration_root)?;
         target.SetRoot(&root)?;
         let mut presenter = Self {
             drawing: None,
+            decorations: HashMap::new(),
+            decoration_root,
+            decoration_order: Vec::new(),
             target,
             root,
             content,
@@ -305,7 +359,9 @@ impl Presenter {
             y: pixels.1 as f32,
         };
         self.content.SetSize(size)?;
+        self.decoration_root.SetSize(size)?;
         self.content.SetOffset(offset)?;
+        self.decoration_root.SetOffset(offset)?;
         self.backdrop.SetSize(size)?;
         self.backdrop.SetOffset(offset)?;
         self.shadow_visual.SetSize(size)?;
@@ -339,18 +395,24 @@ impl Presenter {
                 },
                 None,
             )?;
+            let rect = style.bounds.unwrap_or(crate::protocol::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: width,
+                h: height,
+            });
             let radius = style
                 .corner_radius
                 .max(0.0)
-                .min(width / 2.0)
-                .min(height / 2.0);
+                .min(rect.w / 2.0)
+                .min(rect.h / 2.0);
             target.FillRoundedRectangle(
                 &D2D1_ROUNDED_RECT {
                     rect: D2D_RECT_F {
-                        left: 0.0,
-                        top: 0.0,
-                        right: width,
-                        bottom: height,
+                        left: rect.x,
+                        top: rect.y,
+                        right: rect.x + rect.w,
+                        bottom: rect.y + rect.h,
                     },
                     radiusX: radius,
                     radiusY: radius,
@@ -429,11 +491,238 @@ impl Presenter {
         Ok(target)
     }
 
+    pub fn clear_layers(&mut self) -> Result<()> {
+        self.idle()?;
+        for layer in self.decorations.values() {
+            for property in layer.motions.keys() {
+                layer.visual.StopAnimation(&property_name(*property))?;
+            }
+        }
+        self.decoration_root.Children()?.RemoveAll()?;
+        self.decorations.clear();
+        self.decoration_order.clear();
+        Ok(())
+    }
+
+    pub fn set_layers(
+        &mut self,
+        scene: &LayerScene,
+        mut draw: impl FnMut(&ID2D1RenderTarget, &[crate::protocol::DrawCommand]) -> Result<()>,
+    ) -> Result<()> {
+        self.idle()?;
+        if !scene.validate(self.dpi) {
+            return Err(windows_core::Error::from_hresult(E_INVALIDARG));
+        }
+        let scale = self.dpi as f32 / 96.0;
+        // Prepare detached surfaces before touching the visible tree. Unchanged
+        // layers retain both surface and visual, including running animations.
+        let mut prepared = HashMap::new();
+        for state in &scene.layers {
+            let old = self
+                .decorations
+                .get(&state.id)
+                .filter(|old| old.generation == state.generation);
+            let redraw = old.is_none_or(|l| {
+                l.commands != state.commands || l.size != state.size || l.dpi != self.dpi
+            });
+            let surface = if redraw {
+                let surface = self._graphics.CreateDrawingSurface(
+                    Size {
+                        Width: (state.size.0 * scale).ceil(),
+                        Height: (state.size.1 * scale).ceil(),
+                    },
+                    DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                    DirectXAlphaMode::Premultiplied,
+                )?;
+                let (guard, target) = SurfaceDraw::begin(&surface, self.dpi)?;
+                let result = draw(&target, &state.commands);
+                let finish = guard.finish();
+                result?;
+                finish?;
+                surface
+            } else {
+                old.unwrap().surface.clone()
+            };
+            prepared.insert(
+                state.id,
+                Decoration {
+                    generation: state.generation,
+                    clip: state.clip,
+                    container: match old {
+                        Some(l) => l.container.clone(),
+                        None => self._compositor.CreateContainerVisual()?,
+                    },
+                    visual: match old {
+                        Some(l) => l.visual.clone(),
+                        None => self._compositor.CreateSpriteVisual()?,
+                    },
+                    surface,
+                    commands: state.commands.clone(),
+                    size: state.size,
+                    dpi: self.dpi,
+                    motions: old.map(|l| l.motions.clone()).unwrap_or_default(),
+                },
+            );
+        }
+        let now = Instant::now();
+        let commit = (|| -> Result<()> {
+            for state in &scene.layers {
+                let layer = prepared.get_mut(&state.id).unwrap();
+                let old = self.decorations.get(&state.id);
+                // 裁剪放在不参与变换的父容器；子 SpriteVisual 独立移动/缩放。
+                let container_size = self.decoration_root.Size()?;
+                let clip_changed = old.is_none_or(|l| {
+                    l.generation != state.generation || l.clip != state.clip || l.dpi != self.dpi
+                }) || layer.container.Size()? != container_size;
+                if clip_changed {
+                    layer.container.SetSize(container_size)?;
+                    if let Some(rect) = state.clip {
+                        let clip = self._compositor.CreateInsetClip()?;
+                        clip.SetLeftInset(rect.x * scale)?;
+                        clip.SetTopInset(rect.y * scale)?;
+                        clip.SetRightInset(container_size.x - (rect.x + rect.w) * scale)?;
+                        clip.SetBottomInset(container_size.y - (rect.y + rect.h) * scale)?;
+                        layer.container.SetClip(&clip)?;
+                    } else {
+                        layer
+                            .container
+                            .SetClip(None::<&Windows::UI::Composition::CompositionClip>)?;
+                    }
+                }
+                if old.is_none_or(|l| l.generation != state.generation) {
+                    layer.container.Children()?.InsertAtTop(&layer.visual)?;
+                }
+                if old.is_none_or(|l| l.surface != layer.surface) {
+                    layer.visual.SetBrush(
+                        &self
+                            ._compositor
+                            .CreateSurfaceBrushWithSurface(&layer.surface)?,
+                    )?;
+                    layer.visual.SetSize(Vector2 {
+                        x: (state.size.0 * scale).ceil(),
+                        y: (state.size.1 * scale).ceil(),
+                    })?;
+                }
+                for motion in &state.motions {
+                    let previous = layer.motions.get(&motion.property);
+                    let repeated = previous.is_some_and(|p| {
+                        p.revision == motion.revision && p.operation == motion.operation
+                    });
+                    let dpi_changed = old.is_some_and(|l| l.dpi != self.dpi);
+                    if repeated && !dpi_changed {
+                        continue;
+                    }
+                    let factor = match motion.property {
+                        LayerProperty::OffsetX | LayerProperty::OffsetY => scale,
+                        _ => 1.0,
+                    };
+                    let live = previous.is_some() && !dpi_changed && !motion.snap_from;
+                    let name = property_name(motion.property);
+                    match motion.operation {
+                        LayerOperation::StopCurrent if live => layer.visual.StopAnimation(&name)?,
+                        LayerOperation::Animate if motion.deadline > now => {
+                            let animation = self._compositor.CreateScalarKeyFrameAnimation()?;
+                            if live {
+                                animation
+                                    .InsertExpressionKeyFrame(0.0, &"this.StartingValue".into())?;
+                            } else {
+                                // 新建/恢复或显式 set 后的动画必须使用已知起点。
+                                // 常量表达式和新动画在同批提交时，StartingValue 可能
+                                // 仍是默认值，造成月球从零位置滑入，而非接续恢复高度。
+                                animation.InsertKeyFrameWithEasingFunction(
+                                    0.0,
+                                    motion.value_at(now) * factor,
+                                    &self._compositor.CreateLinearEasingFunction()?,
+                                )?;
+                            }
+                            let easing: Windows::UI::Composition::CompositionEasingFunction =
+                                match motion.easing {
+                                    crate::abi::Easing::Linear => {
+                                        self._compositor.CreateLinearEasingFunction()?.cast()?
+                                    }
+                                    other => {
+                                        let (a, b) = match other {
+                                            crate::abi::Easing::SmoothStep => (0.0, 1.0),
+                                            crate::abi::Easing::EaseIn => (0.0, 1.0 / 3.0),
+                                            _ => (2.0 / 3.0, 1.0),
+                                        };
+                                        self._compositor
+                                            .CreateCubicBezierEasingFunction(
+                                                Vector2 { x: 1.0 / 3.0, y: a },
+                                                Vector2 { x: 2.0 / 3.0, y: b },
+                                            )?
+                                            .cast()?
+                                    }
+                                };
+                            animation.InsertKeyFrameWithEasingFunction(
+                                1.0,
+                                motion.to * factor,
+                                &easing,
+                            )?;
+                            let mut duration = animation.Duration()?;
+                            duration.duration = (motion.deadline.duration_since(now).as_nanos()
+                                / 100)
+                                .max(10000) as i64;
+                            animation.SetDuration(duration)?;
+                            animation.SetStopBehavior(
+                                Windows::UI::Composition::AnimationStopBehavior::LeaveCurrentValue,
+                            )?;
+                            layer.visual.StartAnimation(&name, &animation)?;
+                        }
+                        _ => set_value(&layer.visual, motion.property, motion.to * factor)?,
+                    }
+                    layer.motions.insert(motion.property, *motion);
+                }
+            }
+            let order: Vec<_> = scene.ordered().iter().map(|l| l.id).collect();
+            if order != self.decoration_order
+                || prepared.iter().any(|(id, layer)| {
+                    self.decorations
+                        .get(id)
+                        .is_none_or(|old| old.generation != layer.generation)
+                })
+            {
+                let children = self.decoration_root.Children()?;
+                children.RemoveAll()?;
+                for id in &order {
+                    children.InsertAtTop(&prepared[id].container)?;
+                }
+            }
+            self.decoration_order = order;
+            Ok(())
+        })();
+        if let Err(error) = commit {
+            // A COM commit failure invalidates the cache; never claim the old
+            // scene was successfully applied after a partial property update.
+            let _ = self.clear_layers();
+            return Err(error);
+        }
+        // Explicitly stop removed visuals, even if another COM reference exists.
+        for (id, layer) in &self.decorations {
+            if prepared
+                .get(id)
+                .is_none_or(|next| next.generation != layer.generation)
+            {
+                for property in layer.motions.keys() {
+                    let _ = layer.visual.StopAnimation(&property_name(*property));
+                }
+            }
+        }
+        self.decorations = prepared;
+        Ok(())
+    }
+
     pub fn end_draw(&mut self) -> Result<()> {
         self.drawing
             .take()
             .ok_or_else(|| windows_core::Error::from_hresult(E_UNEXPECTED))?
             .finish()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn layer_objects(&self, id: u32) -> (SpriteVisual, CompositionDrawingSurface) {
+        let layer = &self.decorations[&id];
+        (layer.visual.clone(), layer.surface.clone())
     }
 
     fn idle(&self) -> Result<()> {

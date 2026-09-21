@@ -1,9 +1,9 @@
 import * as defaults from "./defaults";
-import { options, settings, BOOLEAN, STRING, NUMBER, OBJECT, log, set_font, line_height, set_panel } from "@weasel-rs/sdk-as/assembly";
+import { options, settings, BOOLEAN, STRING, NUMBER, OBJECT, report_notice, set_font, line_height, set_panel } from "@weasel-rs/sdk-as/assembly";
 
 function warn(path: string): void {
   const bytes = String.UTF8.encode("invalid weaselui config " + path + "; using default");
-  log(changetype<i32>(bytes), bytes.byteLength);
+  report_notice(changetype<i32>(bytes), bytes.byteLength);
 }
 // options 已由宿主合并默认值与用户覆盖；这里只校验字段，不自行解析 JSON。
 // 缺失字段静默回退，类型或范围错误记录日志后回退。

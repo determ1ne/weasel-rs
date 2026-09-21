@@ -1,15 +1,13 @@
+import { FrameResult, EventKind, Capability, ABI_VERSION, ErrorCode } from "@weasel-rs/sdk-as/assembly";
 // 主题生成绘制命令；窗口、DPI、配置合并与 JSON 解析由宿主负责。
 import {
   View, readView, draw, measure, roundedRect, set_size,
   send_action, ACTION_ITEM, FONT_TEXT, FONT_NUMBER, FONT_COMMENT,
-  MOUSE_DOWN, MOUSE_UP, MOUSE_LEAVE, ERR_OK, ERR_BAD_VIEW,
+  MOUSE_DOWN, MOUSE_UP, MOUSE_CANCEL, MOUSE_LEAVE, ERR_OK, ERR_BAD_VIEW,
 } from "@weasel-rs/sdk-as/assembly";
-export { default_config } from "./defaults";
 
 // 配置合并后、init 前探测能力；支持编码和候选预览两种 preedit。
-export function probe_preedit(_required: i32): i32 {
-  return ERR_OK;
-}
+
 
 import { loadConfig, loadColors, colors, PAD, ROW_HEIGHT, GAP, TEXT_SIZE, LABEL_SIZE, COMMENT_SIZE,
   RADIUS, OUTER_RADIUS, MIN_WIDTH, MAX_WIDTH, PAD_Y, ROW_GAP, BORDER, LABEL_GAP,
@@ -151,9 +149,10 @@ function paint(): void {
   }
 }
 
-export function abi_version(): i32 { return 1; }
-export function init(_mode: i32, dark: i32): i32 { loadConfig(dark != 0); return ERR_OK; }
-export function render(): i32 {
+export function theme_abi_version(): i32 { return ABI_VERSION; }
+export function theme_capabilities(): i32 { return Capability.Preedit; }
+export function theme_create(_mode: i32, dark: i32): i32 { loadConfig(dark != 0); return ERR_OK; }
+function render(): i32 {
   const next = readView();
   if (next == null) return ERR_BAD_VIEW;
   view = next;
@@ -161,15 +160,16 @@ export function render(): i32 {
   pressed = -1;
   layout(next);
   paint();
-  return ERR_OK;
+  return FrameResult.Present;
 }
 
-export function mouse(kind: i32, x: f32, y: f32): void {
+function mouse(kind: i32, x: f32, y: f32): i32 {
+  let result = FrameResult.Keep;
   // 悬停仅改变视觉；同一有效候选上按下、抬起才向引擎提交动作。
   const v = view;
-  if (v == null) return;
+  if (v == null) return FrameResult.Keep;
   let row: i32 = -1;
-  if (kind != MOUSE_LEAVE) {
+  if (kind != MOUSE_LEAVE && kind != MOUSE_CANCEL) {
     for (let i = 0; i < rects.length; i++) {
       const r = rects[i];
       if (visibleRect(r) &&
@@ -177,17 +177,18 @@ export function mouse(kind: i32, x: f32, y: f32): void {
           v.items[i].enabled) { row = i; break; }
     }
   }
-  if (hover != row) { hover = row; paint(); }
+  if (hover != row) { hover = row; paint(); result = FrameResult.Present; }
   if (kind == MOUSE_DOWN) pressed = row;
-  if (kind == MOUSE_LEAVE) pressed = -1;
+  if (kind == MOUSE_LEAVE || kind == MOUSE_CANCEL) pressed = -1;
   if (kind == MOUSE_UP) {
     const target = pressed;
     pressed = -1;
     if (row >= 0 && row == target) send_action(ACTION_ITEM, row);
   }
+  return result;
 }
-export function frame(_now: f64): void {}
-export function hide(): void {
+function frame(_now: f64): void {}
+function hide(): i32 {
   view = null;
   primaryWidths = [];
   labels = [];
@@ -195,6 +196,20 @@ export function hide(): void {
   rects = [];
   hover = -1;
   pressed = -1;
+  return FrameResult.Keep;
 }
 // 固定配置配色，不随系统深浅色覆盖；刷新仅重绘当前快照。
-export function refresh(dark: i32): void { loadColors(dark != 0); paint(); }
+function refresh(dark: i32): i32 { loadColors(dark != 0); paint();   return view == null ? FrameResult.Keep : FrameResult.Present;
+}
+
+// host负责事务；只有完整绘制才返回Present，动作或无变化返回Keep。
+export function theme_event(kind: i32, detail: i32, x: f32, y: f32, now: f64): i32 {
+  switch (kind) {
+    case EventKind.View: return render();
+    case EventKind.Appearance: return refresh(detail);
+    case EventKind.Hide: return hide();
+    case EventKind.Pointer: return mouse(detail, x, y);
+    case EventKind.Animation: frame(now); return FrameResult.Keep;
+    default: return ErrorCode.InvalidArgument;
+  }
+}

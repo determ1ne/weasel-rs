@@ -7,10 +7,14 @@ license.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+wasm-metadata = ["dep:wasmparser"]
+
 [dependencies]
 prost = "0.14"
 serde = "1"
 serde_json = "1"
+wasmparser = { version = "0.258", optional = true }
 time = { version = "0.3", default-features = false, features = ["std"] }
 tracing = "0.1"
 tracing-appender = "0.2"

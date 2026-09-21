@@ -6318,6 +6318,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "wasmparser 0.258.0",
  "windows-bindgen",
  "windows-core 0.100.0",
  "windows-strings 0.100.0",
@@ -6369,7 +6370,6 @@ dependencies = [
  "slint",
  "slint-build",
  "tempfile",
- "wasmparser 0.258.0",
  "weasel-common",
  "windows-bindgen",
  "windows-core 0.100.0",
@@ -6459,6 +6459,7 @@ name = "weasel-theme-wasm"
 version = "0.1.5"
 dependencies = [
  "embed-resource",
+ "png",
  "serde_json",
  "wasmtime",
  "wat",

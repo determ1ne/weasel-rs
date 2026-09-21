@@ -14,3 +14,11 @@ crate-type = ["cdylib"]
 [profile.release]
 panic = "abort"
 lto = true
+
+[[example]]
+name = "animated"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "layer-pulse"
+crate-type = ["cdylib"]

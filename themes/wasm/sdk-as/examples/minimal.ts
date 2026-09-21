@@ -1,11 +1,12 @@
+import { FrameResult, EventKind, Capability, ABI_VERSION, ErrorCode } from "../assembly";
 // weasel WASM 主题示例：候选列表。
 //
 // 布局：每行 = 序号 + 正文 + 拼音注释；选中行高亮、鼠标悬停行淡色高亮；
 // 点击有效候选项发送 ACTION_ITEM（页内索引）。演示了 ABI 的全部主要路径：
-// init / abi_version / render / mouse / frame / hide / refresh。
+// theme_abi_version / theme_capabilities / theme_create / theme_event。
 //
-// 每次事件（render/mouse/frame/refresh）后宿主都读取最新命令流与 set_size，
-// 因此每帧都完整重发全部绘制命令。
+// 事件返回 FrameResult.Present 时，宿主才替换命令流与尺寸；
+// 每帧完整重发绘制命令，返回 Keep 则保留上一帧。
 
 import {
   ACTION_ITEM,
@@ -18,14 +19,16 @@ import {
   MOUSE_DOWN,
   MOUSE_UP,
   MOUSE_LEAVE,
-  draw_text,
+  MOUSE_CANCEL,
+
   fill_rect,
   log,
-  measure_text,
+
   set_size,
   send_action,
   stroke_rect,
 } from "../assembly/host";
+import {measure as sdkMeasure,draw as sdkDraw} from "../assembly/graphics";
 import { View, readView } from "../assembly/view";
 import { options } from "../assembly/data";
 
@@ -88,19 +91,15 @@ function applyPalette(): void {
 // 转码到线性内存；返回的 ArrayBuffer 指针即 UTF-8 数据首址。
 function logf(s: string): void {
   const bytes = String.UTF8.encode(s);
-  log(changetype<i32>(bytes), bytes.byteLength);
+  log(2, changetype<i32>(bytes), bytes.byteLength);
 }
 
 function measure(s: string, font: i32, size: f32): f32 {
-  const bytes = String.UTF8.encode(s);
-  return measure_text(changetype<i32>(bytes), bytes.byteLength, font, size);
+  return sdkMeasure(s, font, size);
 }
 
 function draw(s: string, x: f32, y: f32, font: i32, size: f32, color: u32): void {
-  // Keep the managed buffer alive across the host call. Other arguments have
-  // already been evaluated, so nested measurements cannot collect this buffer.
-  const bytes = String.UTF8.encode(s);
-  draw_text(changetype<i32>(bytes), bytes.byteLength, x, y, font, size, color);
+  sdkDraw(s, x, y, font, size, color);
 }
 
 // ── 绘制 ─────────────────────────────────────────────────────────
@@ -188,7 +187,7 @@ function layoutAndDraw(): void {
 
 // ── 导出（宿主调用入口）──────────────────────────────────────────
 /** 首帧前由宿主调用。mode: MODE_LIVE/MODE_PREVIEW；dark: 0/1。 */
-export function init(mode: i32, darkFlag: i32): i32 {
+export function theme_create(mode: i32, darkFlag: i32): i32 {
   live = mode == MODE_LIVE;
   dark = darkFlag != 0;
   const configuredSize = options.number("/fontSize", 15.0);
@@ -199,59 +198,76 @@ export function init(mode: i32, darkFlag: i32): i32 {
 }
 
 /** Independent theme ABI, not the native DLL or RPC version. */
-export function abi_version(): i32 { return 1; }
+export function theme_abi_version(): i32 { return ABI_VERSION; }
+export function theme_capabilities(): i32 { return Capability.None; }
 
-export function render(): i32 {
+function render(): i32 {
   const parsed = readView();
   if (parsed == null) return ERR_BAD_VIEW;
   view = parsed;
   hoverRow = -1;
   pressedRow = -1;
   layoutAndDraw();
-  return ERR_OK;
+  return FrameResult.Present;
 }
 
 /** 鼠标事件（窗口局部 DIP 坐标）：悬停高亮 + 点击选中。 */
-export function mouse(kind: i32, x: f32, y: f32): void {
+function mouse(kind: i32, x: f32, y: f32): i32 {
+  let result = FrameResult.Keep;
   const v = view;
-  if (v == null || v.items.length == 0) return;
+  if (v == null || v.items.length == 0) return FrameResult.Keep;
   let row = -1;
   const relY = y - <f32>PAD;
   const tableH = <f32>(ITEM_H) * <f32>v.items.length;
-  if (kind != MOUSE_LEAVE && x >= 0.0 && x < layoutWidth && relY >= 0.0 && relY < tableH) {
+  if (kind != MOUSE_LEAVE && kind != MOUSE_CANCEL && x >= 0.0 && x < layoutWidth && relY >= 0.0 && relY < tableH) {
     row = <i32>(relY / <f32>ITEM_H);
   }
   if (row != hoverRow) {
     hoverRow = row;
-    layoutAndDraw();
+    layoutAndDraw(); result = FrameResult.Present;
   }
   if (kind == MOUSE_DOWN) pressedRow = row;
-  if (kind == MOUSE_LEAVE) pressedRow = -1;
+  if (kind == MOUSE_LEAVE || kind == MOUSE_CANCEL) pressedRow = -1;
   if (kind == MOUSE_UP) {
     const pressed = pressedRow;
     pressedRow = -1;
     if (row >= 0 && row == pressed && v.items[row].enabled) send_action(ACTION_ITEM, row);
   }
+  return result;
 }
 
-/** 动画帧（Unix 毫秒）。示例无连续动画：不 request_frame，计时自然停止。 */
-export function frame(now: f64): void {
+/** 动画帧（单调毫秒）。示例无连续动画：不 request_frame，计时自然停止。 */
+function frame(now: f64): void {
   // 预留：此处可做选中动画；保持无操作即可。
 }
 
 /** 候选窗被宿主隐藏（如输入法失去焦点）。 */
-export function hide(): void {
+function hide(): i32 {
   view = null;
   hoverRow = -1;
   pressedRow = -1;
+  return FrameResult.Keep;
 }
 
 /** 系统外观变化（dark: 0/1）；有内容时重发命令流。 */
-export function refresh(darkFlag: i32): void {
+function refresh(darkFlag: i32): i32 {
   dark = darkFlag != 0;
   applyPalette();
   if (view != null) {
     hoverRow = -1;
     layoutAndDraw();
+  }
+  return view == null ? FrameResult.Keep : FrameResult.Present;
+}
+
+// host负责事务；只有完整绘制才返回Present，动作或无变化返回Keep。
+export function theme_event(kind: i32, detail: i32, x: f32, y: f32, now: f64): i32 {
+  switch (kind) {
+    case EventKind.View: return render();
+    case EventKind.Appearance: return refresh(detail);
+    case EventKind.Hide: return hide();
+    case EventKind.Pointer: return mouse(detail, x, y);
+    case EventKind.Animation: frame(now); return FrameResult.Keep;
+    default: return ErrorCode.InvalidArgument;
   }
 }

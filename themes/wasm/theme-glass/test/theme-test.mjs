@@ -1,10 +1,11 @@
+import { EventKind, FrameResult } from "../../sdk-as/test/abi.mjs";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { createHost } from '../../sdk-as/test/host.mjs';
+import { createHost, createResourceHost, createViewHost } from '../../sdk-as/test/host.mjs';
 
 const bytes = readFileSync(process.argv[2] ?? new URL('../target/wasm32-unknown-unknown/release/glass.wasm', import.meta.url));
 const module = new WebAssembly.Module(bytes);
-for (const entry of WebAssembly.Module.imports(module)) assert.equal(entry.module, 'weasel');
+for (const entry of WebAssembly.Module.imports(module)) assert.equal(entry.module, 'weasel_v2');
 let memory;
 let view;
 let calls = [];
@@ -17,6 +18,8 @@ const value = (scope, p, n) => {
   return string(p, n).split('/').slice(1).reduce((v, key) => v?.[key], view);
 };
 const host = {
+  ...createViewHost(() => view, () => new Uint8Array(memory.buffer)),
+  ...createResourceHost(string, t => calls.push(["text",t.text,t.x,t.y,t.font,t.size,t.color,t.glow,t.glow_color])),
   set_text_glow(radius, color) { assert.equal(radius, 3); assert.equal(color >>> 0, 0xffffffff); },
   line_height(slot, size) { return size * 1.4; },
   data_kind(s, p, n) {
@@ -39,13 +42,18 @@ const host = {
   set_size(...args) { calls.push(['size', ...args]); },
   send_action(...args) { actions.push(args); },
 };
-const instance = new WebAssembly.Instance(module, { weasel: host });
-const e = instance.exports;
+const instance = new WebAssembly.Instance(module, { weasel_v2: host });
+const event = (kind, detail=0, x=0, y=0, now=0) => {
+  const result=instance.exports.theme_event(kind,detail,x,y,now);
+  return result===FrameResult.Keep || result===FrameResult.Present ? 0 : result;
+};
+const e = { ...instance.exports, init: instance.exports.theme_create,
+  render: () => event(EventKind.View), mouse: (kind,x,y) => event(EventKind.Pointer,kind,x,y),
+  frame: now => event(EventKind.Animation,0,0,0,now), hide: () => event(EventKind.Hide), refresh: dark => event(EventKind.Appearance,dark) };
 memory = e.memory;
-assert.equal(e.abi_version(), 1);
+assert.equal(e.theme_abi_version(), 2);
 assert.equal(e.init(0, 0), 0);
-assert.equal(e.probe_preedit(0), 0);
-assert.notEqual(e.probe_preedit(1), 0);
+assert.equal(e.theme_capabilities(), 0);
 const snapshot = () => ({ items: [
   { primary_text: '你好😀', secondary_text: 'nǐ hǎo', enabled: true },
   { primary_text: 'disabled', secondary_text: '', enabled: false },

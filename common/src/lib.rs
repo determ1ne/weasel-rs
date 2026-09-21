@@ -16,3 +16,5 @@ pub mod runtime_paths;
 #[cfg(windows)]
 pub mod service_owner;
 pub mod settings;
+#[cfg(feature = "wasm-metadata")]
+pub mod wasm_metadata;

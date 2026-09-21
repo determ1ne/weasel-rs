@@ -13,6 +13,11 @@
 pub use weasel_theme_api as theme_api;
 pub use weasel_theme_support::{appearance, bindings, d2d_bindings, presentation};
 
+#[path = "../sdk-rust/src/types.rs"]
+mod abi;
+mod animation;
+mod layers;
+mod layer_api;
 pub mod backend;
 pub mod canvas;
 mod composition;
@@ -20,6 +25,7 @@ mod data;
 mod geometry;
 mod glass;
 pub mod protocol;
+mod resources;
 pub mod runtime;
 pub mod window;
 

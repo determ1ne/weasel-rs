@@ -51,24 +51,9 @@ fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 pub fn wasm_metadata(bytes: &[u8]) -> Result<Option<Metadata>, String> {
-    if bytes.len() > 32 * 1024 * 1024 || !bytes.starts_with(b"\0asm\x01\0\0\0") {
-        return Err("不是受支持的 WASM 模块，或超过 32 MiB".into());
-    }
-    let mut result = None;
-    for (count, payload) in wasmparser::Parser::new(0).parse_all(bytes).enumerate() {
-        if count > 65536 {
-            return Err("WASM 段数量超限".into());
-        }
-        if let wasmparser::Payload::CustomSection(section) = payload.map_err(|e| e.to_string())? {
-            if section.name() == "weasel.settings" {
-                if result.is_some() {
-                    return Err("重复的 weasel.settings 段".into());
-                }
-                result = Some(Metadata::parse(section.data())?);
-            }
-        }
-    }
-    Ok(result)
+    weasel_common::wasm_metadata::read(bytes)?
+        .map(|mut m| Metadata::from_parts(m["defaults"].take(), m["richschema"].take()))
+        .transpose()
 }
 fn embedded(defaults: &[u8], rich: &[u8]) -> Result<Metadata, String> {
     Metadata::from_parts(

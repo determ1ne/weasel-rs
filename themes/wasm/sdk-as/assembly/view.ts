@@ -1,5 +1,15 @@
+import { ViewField, ViewStringField } from "./types";
 // Host snapshot adapter. No JSON parser or fixed-address transfer arena.
-import { candidate as data, BOOLEAN, OBJECT, NUMBER } from "./data";
+import { view_i64 as integer, view_string as copy } from "./raw";
+
+function text(field:ViewStringField,index:i32 = 0): string {
+  const n = copy(field,index,0,0);
+  if (n < 0) return "";
+  assert(n <= 1024*1024);
+  const bytes = new ArrayBuffer(n);
+  assert(copy(field,index,changetype<i32>(bytes),n) == n);
+  return String.UTF8.decode(bytes);
+}
 
 export class ViewItem {
   primary: string = "";
@@ -34,38 +44,35 @@ export class View {
 
 
 export function readView(): View | null {
-  if (data.kind("") != OBJECT) return null;
+  if (integer(ViewField.HasSnapshot,0) == 0) return null;
   const v = new View();
-  v.contentId = data.integer("/content_id");
-  v.active = data.boolean("/active");
-  v.hasAsciiMode = data.kind("/ascii_mode") == BOOLEAN;
-  if (v.hasAsciiMode) v.asciiMode = data.boolean("/ascii_mode");
-  v.visible = data.boolean("/visible");
-  v.hasPreedit = data.kind("/preedit") == OBJECT;
-  if (v.hasPreedit) {
-    v.preedit = data.string("/preedit/text");
-    v.preeditCursor = <i32>data.integer("/preedit/cursor");
-  }
-  v.anchorValid = data.boolean("/anchor/valid");
-  v.anchorLeft = <i32>data.integer("/anchor/left");
-  v.anchorTop = <i32>data.integer("/anchor/top");
-  v.anchorRight = <i32>data.integer("/anchor/right");
-  v.anchorBottom = <i32>data.integer("/anchor/bottom");
-  const count = data.length("/items");
-  for (let i = 0; i < count; i++) {
-    const path = "/items/" + i.toString();
+  v.contentId = integer(ViewField.ContentId,0);
+  v.active = integer(ViewField.Active,0) != 0;
+  v.visible = integer(ViewField.Visible,0) != 0;
+  const ascii = integer(ViewField.AsciiMode,0);
+  v.hasAsciiMode = ascii >= 0;
+  v.asciiMode = ascii != 0;
+  v.selectedIndex = <i32>integer(ViewField.SelectedIndex,0);
+  v.pageStart = <i32>integer(ViewField.PageStart,0);
+  v.totalItemCount = <i32>integer(ViewField.TotalItemCount,0);
+  v.canPagePrevious = integer(ViewField.CanPagePrevious,0) != 0;
+  v.canPageNext = integer(ViewField.CanPageNext,0) != 0;
+  v.hasPreedit = integer(ViewField.HasPreedit,0) != 0;
+  v.preeditCursor = <i32>integer(ViewField.CursorUtf16,0);
+  if (v.hasPreedit) v.preedit = text(ViewStringField.Preedit);
+  v.anchorValid = integer(ViewField.AnchorValid,0) != 0;
+  v.anchorLeft = <i32>integer(ViewField.AnchorLeft,0);
+  v.anchorTop = <i32>integer(ViewField.AnchorTop,0);
+  v.anchorRight = <i32>integer(ViewField.AnchorRight,0);
+  v.anchorBottom = <i32>integer(ViewField.AnchorBottom,0);
+  const count = <i32>integer(ViewField.ItemCount,0);
+  assert(count >= 0 && count <= 4096);
+  for (let i=0;i<count;i++) {
     const item = new ViewItem();
-    item.primary = data.string(path + "/primary_text");
-    item.secondary = data.string(path + "/secondary_text");
-    item.enabled = data.boolean(path + "/enabled");
+    item.primary = text(ViewStringField.Primary,i);
+    item.secondary = text(ViewStringField.Secondary,i);
+    item.enabled = integer(ViewField.ItemEnabled,i) != 0;
     v.items.push(item);
   }
-  v.selectedIndex = <i32>data.integer("/selected_index");
-  v.pageStart = <i32>data.integer("/page_start");
-  if (data.kind("/total_item_count") == NUMBER) {
-    v.totalItemCount = <i32>data.integer("/total_item_count");
-  }
-  v.canPagePrevious = data.boolean("/can_page_previous");
-  v.canPageNext = data.boolean("/can_page_next");
   return v;
 }

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { createHost } from "./host.mjs";
 const host = await createHost(readFileSync(new URL("../build/release.wasm", import.meta.url)), {fontSize:20});
 const {exports: theme, calls} = host;
-assert.equal(theme.abi_version(), 1);
+assert.equal(theme.abi_version(), 2);
 assert.equal(theme.init(0,1), 0);
 assert.equal(host.render({
   content_id:18446744073709551615n,visible:true,preedit:null,anchor:null,

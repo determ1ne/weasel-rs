@@ -5,7 +5,7 @@ import { createHost } from "../../sdk-as/test/host.mjs";
 // Host overlays a partial patch over the module-embedded defaults.
 const host = await createHost(readFileSync(new URL("../build/weaselui.wasm", import.meta.url)), {color: {hilited_candidate_back: "#123456"}});
 const {exports: theme, calls} = host;
-assert.equal(theme.abi_version(), 1);
+assert.equal(theme.abi_version(), 2);
 assert.equal(theme.probe_preedit(1), 0);
 assert.equal(theme.init(0, 1), 0);
 assert.equal(host.render({content_id:1,visible:true,preedit:null,anchor:null,

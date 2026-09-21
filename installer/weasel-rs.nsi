@@ -655,7 +655,7 @@ FunctionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_ABC} "复古候选窗口，支持外部预编辑。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_VOID} "不显示窗口的主题及接口示例。"
 !ifdef HAVE_WASM_THEME
-  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_WASM} "WebAssembly 候选主题后端及随附主题，支持加载自定义 .wasm 主题文件。"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_THEME_WASM} "WebAssembly 候选主题后端及随附主题（含 Orbit 月轨动画主题），支持加载自定义 .wasm 主题文件。"
 !endif
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 !endif

@@ -1,0 +1,1130 @@
+{
+  "version": 2,
+  "module": "weasel_v2",
+  "doc": [
+    "ABI签名与语义编码的唯一来源；生成SDK声明和枚举，禁止手工修改生成文件。",
+    "仅支持wasm32：内存参数是u32线性内存偏移/长度，仅在同步调用内有效；memory64明确拒绝。坐标DIP，颜色ARGB，字符串UTF-8，preedit光标UTF-16。",
+    "必须独立导出theme_abi_version() -> i32和theme_capabilities() -> i32；前者返回2，后者返回Capability位集合。声明查询不得调用host接口。",
+    "默认配置唯一来源为weasel.settings自定义段的defaults对象；宿主解析后覆盖用户设置。无段使用空对象，损坏/重复/超限报错。",
+    "host自动开始事件展示事务；返回FrameResult.Present发布整帧，Keep保留旧画面，负错误或trap回滚。",
+    "创建返回ErrorCode.Success；可选theme_destroy释放前调用。资源随实例兜底回收。"
+  ],
+  "enums": [
+    {
+      "name": "ViewField",
+      "doc": "只读快照整数属性。ItemEnabled使用候选index，其余index必须为0。AsciiMode/TotalItemCount的-1表示未知。",
+      "values": {
+        "ContentId": 0,
+        "Active": 1,
+        "Visible": 2,
+        "AsciiMode": 3,
+        "ItemCount": 4,
+        "SelectedIndex": 5,
+        "PageStart": 6,
+        "TotalItemCount": 7,
+        "CanPagePrevious": 8,
+        "CanPageNext": 9,
+        "HasPreedit": 10,
+        "CursorUtf16": 11,
+        "HasSnapshot": 12,
+        "ItemEnabled": 13,
+        "AnchorValid": 14,
+        "AnchorLeft": 15,
+        "AnchorTop": 16,
+        "AnchorRight": 17,
+        "AnchorBottom": 18
+      }
+    },
+    {
+      "name": "ViewStringField",
+      "doc": "只读快照字符串属性。Primary/Secondary使用候选index，Preedit的index必须为0。",
+      "values": {
+        "Primary": 0,
+        "Secondary": 1,
+        "Preedit": 2
+      }
+    },
+    {
+      "name": "ConfigScope",
+      "doc": "只暴露模块配置与允许读取的全局展示设置，不包含其他应用配置。",
+      "values": {
+        "Module": 1,
+        "Global": 2
+      }
+    },
+    {
+      "name": "DataKind",
+      "doc": "DataKind",
+      "values": {
+        "Missing": 0,
+        "Null": 1,
+        "Bool": 2,
+        "Number": 3,
+        "String": 4,
+        "Array": 5,
+        "Object": 6
+      }
+    },
+    {
+      "name": "ResourceMetric",
+      "doc": "资源度量，单位DIP；Baseline仅适用于文本布局。",
+      "values": {
+        "Width": 0,
+        "Height": 1,
+        "Baseline": 2
+      }
+    },
+    {
+      "name": "EventKind",
+      "doc": "host到guest的统一事件种类。",
+      "values": {
+        "View": 0,
+        "Appearance": 1,
+        "Hide": 2,
+        "Pointer": 3,
+        "Animation": 4
+      }
+    },
+    {
+      "name": "PointerPhase",
+      "doc": "取消和离开不能提交点击；取消表示捕获丢失或宿主取消。",
+      "values": {
+        "Down": 0,
+        "Move": 1,
+        "Up": 2,
+        "Leave": 3,
+        "Cancel": 4
+      }
+    },
+    {
+      "name": "Action",
+      "doc": "Action",
+      "values": {
+        "Item": 0,
+        "Previous": 1,
+        "Next": 2,
+        "Emoji": 3,
+        "Dismiss": 4
+      }
+    },
+    {
+      "name": "FrameResult",
+      "doc": "事件成功返回值。Keep丢弃本次画面修改，Present替换整帧（可为空）；失败返回负ErrorCode。",
+      "values": {
+        "Keep": 0,
+        "Present": 1
+      }
+    },
+    {
+      "name": "ErrorCode",
+      "doc": "创建/资源操作：0成功或正句柄，负数失败。事件只允许FrameResult或负错误码。",
+      "values": {
+        "Success": 0,
+        "NotFound": -1,
+        "InvalidArgument": -2,
+        "InvalidHandle": -3,
+        "ResourceLimit": -6,
+        "Internal": -7
+      }
+    },
+    {
+      "name": "Mode",
+      "doc": "Mode",
+      "values": {
+        "Live": 0,
+        "Preview": 1
+      }
+    },
+    {
+      "name": "LogLevel",
+      "doc": "LogLevel",
+      "values": {
+        "Trace": 0,
+        "Debug": 1,
+        "Info": 2,
+        "Warn": 3,
+        "Error": 4
+      }
+    },
+    {
+      "name": "Capability",
+      "doc": "能力位，可按位或组合；host拒绝未知位。",
+      "values": {
+        "None": 0,
+        "Preedit": 1,
+        "Resident": 2
+      }
+    },
+    {
+      "name": "LayerProperty",
+      "doc": "装饰层可动画属性；偏移为DIP，缩放以层左上角为原点。",
+      "values": {
+        "Opacity": 0,
+        "OffsetX": 1,
+        "OffsetY": 2,
+        "ScaleX": 3,
+        "ScaleY": 4
+      }
+    },
+    {
+      "name": "Easing",
+      "doc": "SDK和原生动画的时间曲线。",
+      "values": {
+        "Linear": 0,
+        "SmoothStep": 1,
+        "EaseIn": 2,
+        "EaseOut": 3
+      }
+    },
+    {
+      "name": "LayerStop",
+      "doc": "停止在当前显示值或立即到达目标。",
+      "values": {
+        "Current": 0,
+        "End": 1
+      }
+    }
+  ],
+  "functions": [
+    {
+      "name": "push_transform",
+      "doc": "绘制状态栈，最多32层；只影响绘制，不影响panel/anchor/hit_region。\n变换为局部到父坐标的仿射矩阵(m11,m12,m21,m22,dx,dy)，可嵌套。",
+      "params": [
+        {
+          "name": "m11",
+          "type": "f32"
+        },
+        {
+          "name": "m12",
+          "type": "f32"
+        },
+        {
+          "name": "m21",
+          "type": "f32"
+        },
+        {
+          "name": "m22",
+          "type": "f32"
+        },
+        {
+          "name": "dx",
+          "type": "f32"
+        },
+        {
+          "name": "dy",
+          "type": "f32"
+        }
+      ],
+      "result": "void",
+      "group": "draw"
+    },
+    {
+      "name": "push_clip",
+      "doc": "当前坐标系下的矩形裁剪。旋转后的裁剪使用其轴对齐包围框。",
+      "params": [
+        {
+          "name": "x",
+          "type": "f32"
+        },
+        {
+          "name": "y",
+          "type": "f32"
+        },
+        {
+          "name": "width",
+          "type": "f32"
+        },
+        {
+          "name": "height",
+          "type": "f32"
+        }
+      ],
+      "result": "void",
+      "group": "draw"
+    },
+    {
+      "name": "pop_draw_state",
+      "doc": "弹出最近一次clip或transform；提交前必须全部弹出，栈空/未闭合会trap。",
+      "params": [],
+      "result": "void",
+      "group": "draw"
+    },
+    {
+      "name": "view_i64",
+      "doc": "读取ViewField。content_id保留u64位模式；无快照返回0（AsciiMode/TotalItemCount返回-1）。非法字段或索引trap。",
+      "params": [
+        {
+          "name": "field",
+          "type": "i32"
+        },
+        {
+          "name": "index",
+          "type": "i32"
+        }
+      ],
+      "result": "i64",
+      "group": "view"
+    },
+    {
+      "name": "view_string",
+      "doc": "读取ViewStringField。缺失返回-1；UTF-8无终止符；capacity=0查询长度，容量不足不写入。",
+      "params": [
+        {
+          "name": "field",
+          "type": "i32"
+        },
+        {
+          "name": "index",
+          "type": "i32"
+        },
+        {
+          "name": "dst",
+          "type": "mut_ptr"
+        },
+        {
+          "name": "capacity",
+          "type": "i32"
+        }
+      ],
+      "result": "i32",
+      "group": "view"
+    },
+    {
+      "name": "font_create",
+      "doc": "返回正句柄或负错误码：-1缺失/-2参数/-3句柄/-6配额/-7宿主错误。",
+      "params": [
+        {
+          "name": "ptr",
+          "type": "ptr"
+        },
+        {
+          "name": "len",
+          "type": "i32"
+        },
+        {
+          "name": "size",
+          "type": "f32"
+        },
+        {
+          "name": "weight",
+          "type": "i32"
+        }
+      ],
+      "result": "i32",
+      "group": "resources"
+    },
+    {
+      "name": "text_layout_create",
+      "doc": "字体不可变；布局可跨帧复用。width/height为DIP，wrap为0或1。",
+      "params": [
+        {
+          "name": "font",
+          "type": "i32"
+        },
+        {
+          "name": "ptr",
+          "type": "ptr"
+        },
+        {
+          "name": "len",
+          "type": "i32"
+        },
+        {
+          "name": "width",
+          "type": "f32"
+        },
+        {
+          "name": "height",
+          "type": "f32"
+        },
+        {
+          "name": "wrap",
+          "type": "i32"
+        }
+      ],
+      "result": "i32",
+      "group": "resources"
+    },
+    {
+      "name": "image_load",
+      "doc": "加载“模块名.assets”目录内的相对PNG，不支持绝对路径、父目录、ADS和APNG。",
+      "params": [
+        {
+          "name": "ptr",
+          "type": "ptr"
+        },
+        {
+          "name": "len",
+          "type": "i32"
+        }
+      ],
+      "result": "i32",
+      "group": "resources"
+    },
+    {
+      "name": "image_create",
+      "doc": "从内嵌PNG字节创建图片；不保留guest指针。编码最多8MiB，尺寸至多4096。",
+      "params": [
+        {
+          "name": "ptr",
+          "type": "ptr"
+        },
+        {
+          "name": "len",
+          "type": "i32"
+        }
+      ],
+      "result": "i32",
+      "group": "resources"
+    },
+    {
+      "name": "resource_metric",
+      "doc": "读取ResourceMetric。无效句柄、字段或资源类型会trap。",
+      "params": [
+        {
+          "name": "handle",
+          "type": "i32"
+        },
+        {
+          "name": "field",
+          "type": "i32"
+        }
+      ],
+      "result": "f32",
+      "group": "resources"
+    },
+    {
+      "name": "resource_release",
+      "doc": "释放句柄；已提交帧仍持有资源。成功0，重复释放-3；句柄不复用。",
+      "params": [
+        {
+          "name": "handle",
+          "type": "i32"
+        }
+      ],
+      "result": "i32",
+      "group": "resources"
+    },
+    {
+      "name": "draw_layout",
+      "doc": "",
+      "params": [
+        {
+          "name": "handle",
+          "type": "i32"
+        },
+        {
+          "name": "x",
+          "type": "f32"
+        },
+        {
+          "name": "y",
+          "type": "f32"
+        },
+        {
+          "name": "color",
+          "type": "u32"
+        },
+        {
+          "name": "glow",
+          "type": "f32"
+        },
+        {
+          "name": "glow_color",
+          "type": "u32"
+        }
+      ],
+      "result": "void",
+      "group": "draw"
+    },
+    {
+      "name": "draw_image",
+      "doc": "",
+      "params": [
+        {
+          "name": "handle",
+          "type": "i32"
+        },
+        {
+          "name": "x",
+          "type": "f32"
+        },
+        {
+          "name": "y",
+          "type": "f32"
+        },
+        {
+          "name": "width",
+          "type": "f32"
+        },
+        {
+          "name": "height",
+          "type": "f32"
+        },
+        {
+          "name": "opacity",
+          "type": "f32"
+        }
+      ],
+      "result": "void",
+      "group": "draw"
+    },
+    {
+      "name": "frame_geometry",
+      "doc": "内容表面范围(0,0,width,height)；anchor矩形决定与应用光标的对齐，不含装饰。",
+      "params": [
+        {
+          "name": "width",
+          "type": "f32"
+        },
+        {
+          "name": "height",
+          "type": "f32"
+        },
+        {
+          "name": "anchor_x",
+          "type": "f32"
+        },
+        {
+          "name": "anchor_y",
+          "type": "f32"
+        },
+        {
+          "name": "anchor_w",
+          "type": "f32"
+        },
+        {
+          "name": "anchor_h",
+          "type": "f32"
+        }
+      ],
+      "result": "void",
+      "group": "surface"
+    },
+    {
+      "name": "panel_bounds",
+      "doc": "独立面板矩形，仅控制材质、圆角mask和阴影。必须包含在内容表面内。",
+      "params": [
+        {
+          "name": "x",
+          "type": "f32"
+        },
+        {
+          "name": "y",
+          "type": "f32"
+        },
+        {
+          "name": "width",
+          "type": "f32"
+        },
+        {
+          "name": "height",
+          "type": "f32"
+        }
+      ],
+      "result": "void",
+      "group": "surface"
+    },
+    {
+      "name": "hit_region",
+      "doc": "注册当前绘制目标中的局部命中区域；图层重绘清空旧区域。区域ID在目标内唯一，总数最多256；命中按图层顺序、变换和裁剪计算。",
+      "params": [
+        {
+          "name": "id",
+          "type": "i32"
+        },
+        {
+          "name": "x",
+          "type": "f32"
+        },
+        {
+          "name": "y",
+          "type": "f32"
+        },
+        {
+          "name": "w",
+          "type": "f32"
+        },
+        {
+          "name": "h",
+          "type": "f32"
+        },
+        {
+          "name": "radius",
+          "type": "f32"
+        }
+      ],
+      "result": "void",
+      "group": "interaction"
+    },
+    {
+      "name": "pointer_region",
+      "doc": "当前指针事件命中区域；-1未命中，0默认面板。不承诺跨进程穿透。",
+      "params": [],
+      "result": "i32",
+      "group": "interaction"
+    },
+    {
+      "name": "data_kind",
+      "doc": "按ConfigScope读取JSON Pointer，返回DataKind。",
+      "params": [
+        {
+          "name": "scope",
+          "type": "i32"
+        },
+        {
+          "name": "path",
+          "type": "ptr"
+        },
+        {
+          "name": "len",
+          "type": "i32"
+        }
+      ],
+      "result": "i32",
+      "group": "config"
+    },
+    {
+      "name": "data_len",
+      "doc": "字符串UTF-8字节数或容器元素数；类型不符为-1。",
+      "params": [
+        {
+          "name": "scope",
+          "type": "i32"
+        },
+        {
+          "name": "path",
+          "type": "ptr"
+        },
+        {
+          "name": "len",
+          "type": "i32"
+        }
+      ],
+      "result": "i32",
+      "group": "config"
+    },
+    {
+      "name": "data_i64",
+      "doc": "整数/bool读取，u64保留位模式；先查kind区分缺失与合法0。",
+      "params": [
+        {
+          "name": "scope",
+          "type": "i32"
+        },
+        {
+          "name": "path",
+          "type": "ptr"
+        },
+        {
+          "name": "len",
+          "type": "i32"
+        }
+      ],
+      "result": "i64",
+      "group": "config"
+    },
+    {
+      "name": "data_number",
+      "doc": "数值读取；缺失或类型错误返回NaN。",
+      "params": [
+        {
+          "name": "scope",
+          "type": "i32"
+        },
+        {
+          "name": "path",
+          "type": "ptr"
+        },
+        {
+          "name": "len",
+          "type": "i32"
+        }
+      ],
+      "result": "f64",
+      "group": "config"
+    },
+    {
+      "name": "data_string",
+      "doc": "复制UTF-8，无终止符；容量不足不写入，返回所需字节数；类型错误为-1。",
+      "params": [
+        {
+          "name": "scope",
+          "type": "i32"
+        },
+        {
+          "name": "path",
+          "type": "ptr"
+        },
+        {
+          "name": "len",
+          "type": "i32"
+        },
+        {
+          "name": "dst",
+          "type": "mut_ptr"
+        },
+        {
+          "name": "capacity",
+          "type": "i32"
+        }
+      ],
+      "result": "i32",
+      "group": "config"
+    },
+    {
+      "name": "fill_rect",
+      "doc": "绘制坐标为DIP，颜色为非预乘ARGB；宿主负责转换为目标像素格式。",
+      "params": [
+        {
+          "name": "x",
+          "type": "f32"
+        },
+        {
+          "name": "y",
+          "type": "f32"
+        },
+        {
+          "name": "w",
+          "type": "f32"
+        },
+        {
+          "name": "h",
+          "type": "f32"
+        },
+        {
+          "name": "color",
+          "type": "u32"
+        }
+      ],
+      "result": "void",
+      "group": "draw"
+    },
+    {
+      "name": "fill_rounded_rect",
+      "doc": "",
+      "params": [
+        {
+          "name": "x",
+          "type": "f32"
+        },
+        {
+          "name": "y",
+          "type": "f32"
+        },
+        {
+          "name": "w",
+          "type": "f32"
+        },
+        {
+          "name": "h",
+          "type": "f32"
+        },
+        {
+          "name": "radius",
+          "type": "f32"
+        },
+        {
+          "name": "color",
+          "type": "u32"
+        }
+      ],
+      "result": "void",
+      "group": "draw"
+    },
+    {
+      "name": "stroke_rect",
+      "doc": "",
+      "params": [
+        {
+          "name": "x",
+          "type": "f32"
+        },
+        {
+          "name": "y",
+          "type": "f32"
+        },
+        {
+          "name": "w",
+          "type": "f32"
+        },
+        {
+          "name": "h",
+          "type": "f32"
+        },
+        {
+          "name": "color",
+          "type": "u32"
+        },
+        {
+          "name": "width",
+          "type": "f32"
+        }
+      ],
+      "result": "void",
+      "group": "draw"
+    },
+    {
+      "name": "set_panel",
+      "doc": "原生圆角、阴影半径、偏移和ARGB颜色；阴影半径0禁用。",
+      "params": [
+        {
+          "name": "radius",
+          "type": "f32"
+        },
+        {
+          "name": "shadow_radius",
+          "type": "f32"
+        },
+        {
+          "name": "offset_x",
+          "type": "f32"
+        },
+        {
+          "name": "offset_y",
+          "type": "f32"
+        },
+        {
+          "name": "color",
+          "type": "i32"
+        }
+      ],
+      "result": "void",
+      "group": "surface"
+    },
+    {
+      "name": "set_backdrop",
+      "doc": "宿主材质合成，三个非负权重之和必须为1；不可用时使用不透明回退色。",
+      "params": [
+        {
+          "name": "enabled",
+          "type": "i32"
+        },
+        {
+          "name": "tint",
+          "type": "i32"
+        },
+        {
+          "name": "blur_sigma",
+          "type": "f32"
+        },
+        {
+          "name": "backdrop_balance",
+          "type": "f32"
+        },
+        {
+          "name": "afterglow_balance",
+          "type": "f32"
+        },
+        {
+          "name": "color_balance",
+          "type": "f32"
+        },
+        {
+          "name": "fallback_color",
+          "type": "i32"
+        }
+      ],
+      "result": "void",
+      "group": "surface"
+    },
+    {
+      "name": "set_visible",
+      "doc": "随帧提交可见性，0隐藏1显示；主机失焦隐藏优先于主题。",
+      "params": [
+        {
+          "name": "visible",
+          "type": "i32"
+        }
+      ],
+      "result": "void",
+      "group": "surface"
+    },
+    {
+      "name": "set_fixed_position",
+      "doc": "固定在主屏工作区，x/y为DIP偏移；窗口移动由host管理。",
+      "params": [
+        {
+          "name": "x",
+          "type": "f32"
+        },
+        {
+          "name": "y",
+          "type": "f32"
+        }
+      ],
+      "result": "void",
+      "group": "surface"
+    },
+    {
+      "name": "begin_drag",
+      "doc": "仅当前pointer-down可请求原生拖动固定窗口。",
+      "params": [],
+      "result": "void",
+      "group": "interaction"
+    },
+    {
+      "name": "set_size",
+      "doc": "声明内容尺寸DIP，不含宿主阴影；上限8192。",
+      "params": [
+        {
+          "name": "w",
+          "type": "f32"
+        },
+        {
+          "name": "h",
+          "type": "f32"
+        }
+      ],
+      "result": "void",
+      "group": "surface"
+    },
+    {
+      "name": "send_action",
+      "doc": "按Action请求语义动作，仅允许PointerPhase.Down/Up，绑定已展示快照。",
+      "params": [
+        {
+          "name": "action",
+          "type": "i32"
+        },
+        {
+          "name": "index",
+          "type": "i32"
+        }
+      ],
+      "result": "void",
+      "group": "interaction"
+    },
+    {
+      "name": "request_frame",
+      "doc": "合并的下一动画帧请求；未再次请求则停止。",
+      "params": [],
+      "result": "void",
+      "group": "animation"
+    },
+    {
+      "name": "time_ms",
+      "doc": "宿主进程单调毫秒，同theme_event的now；不是Unix日期。",
+      "params": [],
+      "result": "f64",
+      "group": "animation"
+    },
+    {
+      "name": "log",
+      "doc": "普通日志，level为LogLevel；UTF-8最多4096字节，不弹用户通知。",
+      "params": [
+        {
+          "name": "level",
+          "type": "i32"
+        },
+        {
+          "name": "ptr",
+          "type": "ptr"
+        },
+        {
+          "name": "len",
+          "type": "i32"
+        }
+      ],
+      "result": "void",
+      "group": "diagnostics"
+    },
+    {
+      "name": "report_notice",
+      "doc": "需要用户处理的问题，进入broker通知通道；不要用于调试日志。",
+      "params": [
+        {
+          "name": "ptr",
+          "type": "ptr"
+        },
+        {
+          "name": "len",
+          "type": "i32"
+        }
+      ],
+      "result": "void",
+      "group": "diagnostics"
+    },
+    {
+      "name": "request_wakeup",
+      "doc": "请求单调毫秒 deadline 后唤醒；重复请求取最早时间，不补发过期帧，最多24小时。",
+      "group": "animation",
+      "params": [
+        {
+          "name": "deadline_ms",
+          "type": "f64"
+        }
+      ],
+      "result": "void"
+    },
+    {
+      "name": "cancel_wakeup",
+      "doc": "取消待处理 WASM 唤醒；不停止独立的宿主图层动画。",
+      "group": "animation",
+      "params": [],
+      "result": "void"
+    },
+    {
+      "name": "layer_content",
+      "doc": "选择并清空此装饰层命令，正ID稳定且最多8层；id=0回到主画面。只能在事件内调用，切换时绘图栈必须平衡。",
+      "params": [
+        {
+          "name": "id",
+          "type": "i32"
+        },
+        {
+          "name": "width",
+          "type": "f32"
+        },
+        {
+          "name": "height",
+          "type": "f32"
+        }
+      ],
+      "result": "void",
+      "group": "layers"
+    },
+    {
+      "name": "layer_remove",
+      "doc": "移除装饰层及动画；随Present生效。",
+      "params": [
+        {
+          "name": "id",
+          "type": "i32"
+        }
+      ],
+      "result": "void",
+      "group": "layers"
+    },
+    {
+      "name": "layer_set",
+      "doc": "立即设置属性并替换该属性动画；随Present生效。",
+      "params": [
+        {
+          "name": "id",
+          "type": "i32"
+        },
+        {
+          "name": "property",
+          "type": "i32"
+        },
+        {
+          "name": "value",
+          "type": "f32"
+        }
+      ],
+      "result": "void",
+      "group": "layers"
+    },
+    {
+      "name": "layer_animate",
+      "doc": "从当前显示值转向新目标；同属性替换不排队。duration_ms最多3600000；时长为零时立即到目标。",
+      "params": [
+        {
+          "name": "id",
+          "type": "i32"
+        },
+        {
+          "name": "property",
+          "type": "i32"
+        },
+        {
+          "name": "to",
+          "type": "f32"
+        },
+        {
+          "name": "duration_ms",
+          "type": "f64"
+        },
+        {
+          "name": "easing",
+          "type": "i32"
+        }
+      ],
+      "result": "void",
+      "group": "layers"
+    },
+    {
+      "name": "layer_stop",
+      "doc": "停止属性动画；behavior为LayerStop。",
+      "params": [
+        {
+          "name": "id",
+          "type": "i32"
+        },
+        {
+          "name": "property",
+          "type": "i32"
+        },
+        {
+          "name": "behavior",
+          "type": "i32"
+        }
+      ],
+      "result": "void",
+      "group": "layers"
+    },
+    {
+      "name": "layer_clip",
+      "doc": "设置内容坐标系中的固定矩形裁剪；enabled=0取消。裁剪不随图层变换，影响绘制与命中。",
+      "params": [
+        {
+          "name": "id",
+          "type": "i32"
+        },
+        {
+          "name": "enabled",
+          "type": "i32"
+        },
+        {
+          "name": "x",
+          "type": "f32"
+        },
+        {
+          "name": "y",
+          "type": "f32"
+        },
+        {
+          "name": "width",
+          "type": "f32"
+        },
+        {
+          "name": "height",
+          "type": "f32"
+        }
+      ],
+      "result": "void",
+      "group": "layers"
+    },
+    {
+      "name": "layer_interactive",
+      "doc": "显式启停图层交互，默认关闭，与透明度独立。图层内hit_region为局部坐标，随位移和缩放命中。",
+      "params": [
+        {
+          "name": "id",
+          "type": "i32"
+        },
+        {
+          "name": "enabled",
+          "type": "i32"
+        }
+      ],
+      "result": "void",
+      "group": "layers"
+    },
+    {
+      "name": "pointer_layer",
+      "doc": "当前鼠标事件命中图层，0表示主画面或无命中。区域ID只需在各图层内唯一。",
+      "params": [],
+      "result": "i32",
+      "group": "interaction"
+    },
+    {
+      "name": "layer_z_index",
+      "doc": "设置图层叠放顺序，默认0，支持有符号i32，越大越靠前；相同值按创建顺序。仅对图层排序，始终在主画面上方。Present提交，不重建内容或动画。",
+      "params": [{"name": "id", "type": "i32"}, {"name": "z_index", "type": "i32"}],
+      "result": "void",
+      "group": "layers"
+    }
+  ]
+}

@@ -18,6 +18,9 @@
         "glass": {
           "name": "Glass"
         },
+        "orbit": {
+          "name": "Orbit · 月轨"
+        },
         "statusbar": {
           "name": "经典桌面状态栏"
         }

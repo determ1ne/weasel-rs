@@ -1,11 +1,11 @@
+import { FrameResult, EventKind, Capability, ABI_VERSION, ErrorCode } from "@weasel-rs/sdk-as/assembly";
 import {
   ACTION_DISMISS, ACTION_ITEM, ACTION_NEXT, ERR_BAD_VIEW, ERR_OK,
-  FONT_NUMBER, FONT_TEXT, FONT_TEXT_BOLD, MOUSE_DOWN, MOUSE_LEAVE,
+  FONT_NUMBER, FONT_TEXT, FONT_TEXT_BOLD, MOUSE_DOWN, MOUSE_CANCEL, MOUSE_LEAVE,
   MOUSE_MOVE, MOUSE_UP, View, begin_drag, draw, fill_rect, line_height, measure,
   options, roundedRect, send_action, set_fixed_position, set_font,
   set_panel, set_size, set_visible, stroke_rect,
 } from "@weasel-rs/sdk-as/assembly";
-export { default_config } from "./defaults";
 import {
   FONT_FACE, FONT_SIZE, POSITION_X, POSITION_Y, WIDTH,
 } from "./defaults";
@@ -128,18 +128,19 @@ function paintContent(): void {
   }
 }
 
-export function abi_version(): i32 { return 1; }
-export function probe_preedit(_required: i32): i32 { return ERR_OK; }
-// 通知宿主：即使没有候选，也需要收到焦点和中英文模式快照。
-export function probe_resident(): i32 { return 1; }
+export function theme_abi_version(): i32 { return ABI_VERSION; }
+export function theme_capabilities(): i32 { return Capability.Preedit | Capability.Resident; }
 
-export function init(_mode: i32, _dark: i32): i32 {
+// 通知宿主：即使没有候选，也需要收到焦点和中英文模式快照。
+
+
+export function theme_create(_mode: i32, _dark: i32): i32 {
   configure();
   set_visible(0);
   return ERR_OK;
 }
 
-export function render(): i32 {
+function render(): i32 {
   const next = readView();
   if (next == null) return ERR_BAD_VIEW;
   view = next;
@@ -147,15 +148,19 @@ export function render(): i32 {
   if (!chinese) {
     previousAscii = true;
     dismissed = false;
+
     set_visible(0);
-    return ERR_OK;
+
+    return FrameResult.Present;
   }
   // 模式重新进入中文或开始实际输入时，恢复被关闭的状态栏。
   if (previousAscii || next.hasPreedit || next.items.length > 0) dismissed = false;
   previousAscii = false;
   if (dismissed) {
+
     set_visible(0);
-    return ERR_OK;
+
+    return FrameResult.Present;
   }
   hoverClose = false;
   pressedClose = false;
@@ -163,15 +168,16 @@ export function render(): i32 {
   pressedNext = false;
   set_visible(1);
   paintContent();
-  return ERR_OK;
+  return FrameResult.Present;
 }
 
 function inside(x: f32, y: f32, left: f32, top: f32, w: f32, h: f32): bool {
   return x >= left && x < left + w && y >= top && y < top + h;
 }
 
-export function mouse(kind: i32, x: f32, y: f32): void {
-  if (view == null || !isFinite(x) || !isFinite(y)) return;
+function mouse(kind: i32, x: f32, y: f32): i32 {
+  let result = FrameResult.Keep;
+  if (view == null || !isFinite(x) || !isFinite(y)) return FrameResult.Keep;
   const close = inside(x, y, width - 37, CLOSE_Y, CLOSE_W, CLOSE_H);
   const next = inside(x, y, width - 28, HEADER, 25, HEIGHT - HEADER);
   let item: i32 = -1;
@@ -182,7 +188,7 @@ export function mouse(kind: i32, x: f32, y: f32): void {
   }
   if (kind == MOUSE_MOVE && hoverClose != close) {
     hoverClose = close;
-    paintContent();
+    paintContent(); result = FrameResult.Present;
   }
   if (kind == MOUSE_DOWN) {
     // 上层输入区（关闭按钮除外）作为整条状态栏的拖动把手。
@@ -191,12 +197,12 @@ export function mouse(kind: i32, x: f32, y: f32): void {
       pressedNext = false;
       pressedItem = -1;
       begin_drag();
-      return;
+      return FrameResult.Keep;
     }
     pressedClose = close;
     pressedNext = next;
     pressedItem = item;
-    if (close) paintContent();
+    if (close) paintContent(); result = FrameResult.Present;
   } else if (kind == MOUSE_UP) {
     const closeClick = pressedClose && close;
     const nextClick = pressedNext && next;
@@ -206,28 +212,47 @@ export function mouse(kind: i32, x: f32, y: f32): void {
     pressedItem = -1;
     if (closeClick) {
       dismissed = true;
-      set_visible(0);
+
+    set_visible(0); result = FrameResult.Present;
+
       send_action(ACTION_DISMISS, 0);
     } else if (nextClick && view!.canPageNext) {
       send_action(ACTION_NEXT, 0);
     } else if (itemClick) {
       send_action(ACTION_ITEM, item);
     }
-  } else if (kind == MOUSE_LEAVE) {
+  } else if (kind == MOUSE_LEAVE || kind == MOUSE_CANCEL) {
     hoverClose = false;
     pressedClose = false;
     pressedNext = false;
     pressedItem = -1;
-    paintContent();
+    paintContent(); result = FrameResult.Present;
   }
+  return result;
 }
 
-export function frame(_now: f64): void {}
-export function hide(): void {
+function frame(_now: f64): void {}
+function hide(): i32 {
   view = null;
   hits = [];
   dismissed = false;
   previousAscii = true;
-  set_visible(0);
+
+    set_visible(0);
+
+  return FrameResult.Present;
 }
-export function refresh(_dark: i32): void { paintContent(); }
+function refresh(_dark: i32): i32 { paintContent();   return view == null ? FrameResult.Keep : FrameResult.Present;
+}
+
+// host负责事务；只有完整绘制才返回Present，动作或无变化返回Keep。
+export function theme_event(kind: i32, detail: i32, x: f32, y: f32, now: f64): i32 {
+  switch (kind) {
+    case EventKind.View: return render();
+    case EventKind.Appearance: return refresh(detail);
+    case EventKind.Hide: return hide();
+    case EventKind.Pointer: return mouse(detail, x, y);
+    case EventKind.Animation: frame(now); return FrameResult.Keep;
+    default: return ErrorCode.InvalidArgument;
+  }
+}

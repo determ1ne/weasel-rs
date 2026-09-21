@@ -4,8 +4,8 @@
 //! 不自行处理 DPI 或创建窗口，也不填充不透明背景，以保留宿主的玻璃材质。
 use std::cell::{Cell, RefCell};
 use weasel_wasm_sdk::{
-    ABI_VERSION, BackdropStyle, CANDIDATE, FONT_TEXT_BOLD, Kind, draw, measure, raw, send_action,
-    set_backdrop, set_panel, set_size, set_text_glow,
+    ABI_VERSION, Action, BackdropStyle, ErrorCode, EventKind, FONT_TEXT_BOLD, FrameResult,
+    PointerPhase, draw_glow, line_height, measure, send_action, set_backdrop, set_panel, set_size,
 };
 
 const PAD: f32 = 8.0;
@@ -18,10 +18,11 @@ const TEXT_X: f32 = 22.0;
 const COMMENT_GAP: f32 = 8.0;
 const MAX_ITEMS: usize = 64;
 const MAX_WIDTH: f32 = 4096.0;
-const MOUSE_DOWN: i32 = 0;
-const MOUSE_UP: i32 = 2;
-const MOUSE_LEAVE: i32 = 3;
-const ACTION_ITEM: i32 = 0;
+const MOUSE_DOWN: i32 = PointerPhase::Down as i32;
+const MOUSE_UP: i32 = PointerPhase::Up as i32;
+const MOUSE_LEAVE: i32 = PointerPhase::Leave as i32;
+const MOUSE_CANCEL: i32 = PointerPhase::Cancel as i32;
+const ACTION_ITEM: i32 = Action::Item as i32;
 
 struct Item {
     text: String,
@@ -48,6 +49,9 @@ thread_local! {
 }
 
 fn paint(v: &View) {
+    paint_body(v);
+}
+fn paint_body(v: &View) {
     if v.width == 0.0 {
         return;
     }
@@ -72,52 +76,55 @@ fn paint(v: &View) {
             0
         };
         let color = if item.enabled { 0xff000000 } else { 0xff707070 };
-        draw(
+        draw_glow(
             &(i + 1).to_string(),
             item.x + 6.0,
             y + offsets[1],
             1,
             SMALL_SIZE,
             color,
+            3.0,
+            0xffffffff,
         );
-        draw(
+        draw_glow(
             &item.text,
             item.x + TEXT_X,
             y + offsets[0],
             font,
             TEXT_SIZE,
             color,
+            3.0,
+            0xffffffff,
         );
-        draw(
+        draw_glow(
             &item.comment,
             item.x + TEXT_X + COMMENT_GAP + item.text_width,
             y + offsets[2],
             2,
             SMALL_SIZE,
             color,
+            3.0,
+            0xffffffff,
         );
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn abi_version() -> i32 {
-    ABI_VERSION
+pub extern "C" fn theme_abi_version() -> u32 {
+    ABI_VERSION as u32
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn theme_capabilities() -> u32 {
+    0
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn probe_preedit(required: i32) -> i32 {
-    // 在 init 前拒绝外置 preedit，使 renderer 可以回退到支持它的主题。
-    if required == 0 { 0 } else { 1 }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn init(_mode: i32, _dark: i32) -> i32 {
-    set_text_glow(3.0, 0xffffffff);
+pub extern "C" fn theme_create(_mode: i32, _dark: i32) -> i32 {
     let mut offsets = [0.0; 3];
     for (slot, size) in [TEXT_SIZE, SMALL_SIZE, SMALL_SIZE].into_iter().enumerate() {
-        let height = unsafe { raw::line_height(slot as i32, size) };
+        let height = line_height(slot as i32, size);
         if !height.is_finite() || height <= 0.0 || height > ROW {
-            return 1;
+            return ErrorCode::InvalidArgument as i32;
         }
         offsets[slot] = (ROW - height) / 2.0;
     }
@@ -127,13 +134,11 @@ pub extern "C" fn init(_mode: i32, _dark: i32) -> i32 {
 
 /// 从宿主结构化快照读取候选并完成布局；失败时不发布半成品。
 fn read_view() -> Option<View> {
-    if CANDIDATE.kind("") != Kind::Object
-        || CANDIDATE.kind("/items") != Kind::Array
-        || CANDIDATE.kind("/preedit") == Kind::Object
-    {
+    let snapshot = weasel_wasm_sdk::View::read()?;
+    if snapshot.preedit.is_some() {
         return None;
     }
-    let count = CANDIDATE.len("/items").unwrap_or(0);
+    let count = snapshot.items.len();
     if count > MAX_ITEMS {
         return None;
     }
@@ -141,14 +146,9 @@ fn read_view() -> Option<View> {
         width: PAD * 2.0,
         ..View::default()
     };
-    for i in 0..count {
-        let path = format!("/items/{i}");
-        let text = CANDIDATE
-            .string(&format!("{path}/primary_text"))
-            .unwrap_or_default();
-        let comment = CANDIDATE
-            .string(&format!("{path}/secondary_text"))
-            .unwrap_or_default();
+    for (i, item) in snapshot.items.into_iter().enumerate() {
+        let text = item.primary;
+        let comment = item.secondary;
         // 两种字重共用一个预留槽位，鼠标命中区域与绘制宽度保持一致。
         let text_width =
             measure(&text, 0, TEXT_SIZE).max(measure(&text, FONT_TEXT_BOLD, TEXT_SIZE));
@@ -171,32 +171,25 @@ fn read_view() -> Option<View> {
             text_width,
             x,
             width,
-            enabled: CANDIDATE
-                .boolean(&format!("{path}/enabled"))
-                .unwrap_or(false),
+            enabled: item.enabled,
         });
     }
-    v.selected = CANDIDATE
-        .integer("/selected_index")
-        .and_then(|i| usize::try_from(i).ok())
-        .filter(|&i| i < count);
+    v.selected = Some(snapshot.selected_index as usize).filter(|&i| i < count);
     Some(v)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn render() -> i32 {
+fn render() -> i32 {
     // 即使新快照无效，也不能让旧候选继续响应点击。
     hide();
     let Some(v) = read_view() else {
-        return 1;
+        return ErrorCode::InvalidArgument as i32;
     };
     paint(&v);
     VIEW.with(|state| *state.borrow_mut() = v);
-    0
+    FrameResult::Present as i32
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn mouse(kind: i32, x: f32, y: f32) {
+fn mouse(kind: i32, x: f32, y: f32) {
     VIEW.with(|state| {
         let mut v = state.borrow_mut();
         let row = if x.is_finite() && y.is_finite() && y >= PAD_Y && y < PAD_Y + ROW {
@@ -215,20 +208,36 @@ pub extern "C" fn mouse(kind: i32, x: f32, y: f32) {
                     send_action(ACTION_ITEM, i as i32);
                 }
             }
-            MOUSE_LEAVE => v.pressed = None,
+            MOUSE_LEAVE | MOUSE_CANCEL => v.pressed = None,
             _ => {}
         }
     });
 }
 
-#[unsafe(no_mangle)]
 // 无动画：无需请求宿主持续调度帧。
-pub extern "C" fn frame(_now: f64) {}
-#[unsafe(no_mangle)]
-pub extern "C" fn hide() {
+fn frame(_now: f64) {}
+fn hide() {
     VIEW.with(|state| *state.borrow_mut() = View::default());
 }
-#[unsafe(no_mangle)]
-pub extern "C" fn refresh(_dark: i32) {
+fn refresh(_dark: i32) {
     VIEW.with(|state| paint(&state.borrow()));
+}
+
+/// ABI 2 统一事件入口；未重绘则不提交，避免空帧覆盖现有画面。
+#[unsafe(no_mangle)]
+pub extern "C" fn theme_event(kind: i32, detail: i32, x: f32, y: f32, now: f64) -> i32 {
+    let Ok(kind) = EventKind::try_from(kind) else {
+        return ErrorCode::InvalidArgument as i32;
+    };
+    match kind {
+        EventKind::View => return render(),
+        EventKind::Appearance => {
+            refresh(detail);
+            return FrameResult::Present as i32;
+        }
+        EventKind::Hide => hide(),
+        EventKind::Pointer => mouse(detail, x, y),
+        EventKind::Animation => frame(now),
+    }
+    FrameResult::Keep as i32
 }

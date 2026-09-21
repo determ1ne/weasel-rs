@@ -1,57 +1,21 @@
-//! Direct2D/DirectWrite 封装：WASM 主题后端中唯一接触 D2D/DWrite 绑定的文件。
-//!
-//! WASM 主题通过 host 导入函数产出 [`protocol::DrawCommand`] 命令流；本文件负责
-//! 把命令流转换为真实 D2D 渲染，并集中管理：
-//! - D2D 工厂与 DirectWrite 工厂的创建
-//! - 字体槽位（[`protocol::FONT_TEXT`] 等）× 字号 的文本格式按需缓存
-//! - Composition 透明表面生命周期
-//! - 每帧命令回放（`BeginDraw`/`EndDraw`，RAII 保证 `EndDraw` 必达）
-//! - 文本测量（DirectWrite `GetMetrics`）
-//!
-//! Pixels use premultiplied alpha; an untouched surface is transparent.
-//!
-//! 本模块不创建窗口；HWND、DPI、设备丢失重试策略属于 window.rs（步骤 3）。
-//! 所有方法只能在创建它的 UI 线程上调用（D2D 单线程工厂）。
+//! Composition透明表面的D2D回放。字体/文本测量属于resources模块，
+//! 此处仅缓存设备相关图片并回放已验证的资源命令，设备丢失后可重建。
+//! 所有调用都在创建窗口的UI线程，不能跨线程使用COM资源。
 
 use crate::d2d_bindings::*;
-use crate::protocol::{
-    DrawCommand, FONT_COMMENT, FONT_ICON, FONT_NUMBER, FONT_TEXT, FONT_TEXT_BOLD,
-};
+use crate::protocol::DrawCommand;
 use std::collections::HashMap;
 use windows_core::{Error, Result as WinResult};
-use windows_strings::{PCWSTR, w};
-
-/// 文本布局矩形的远端边界余量：文本按 `(x, y)` 左上锚点绘制，
-/// 矩形右/下边界取一个远超窗口尺寸的值以避免 `CLIP` 裁剪。
-const TEXT_EXTENT: f32 = 65_536.0;
-
-/// 字号合法范围（DIP）：小于 4 时 DirectWrite 输出退化，大于 512 无实际意义。
-const SIZE_MIN: f32 = 4.0;
-const SIZE_MAX: f32 = 512.0;
 
 /// D2D/DWrite 渲染器。COM 接口不 `Send`，实例必须留在创建线程上。
 pub struct Canvas {
-    write: IDWriteFactory,
-    /// (字体槽位, 字号位模式) → 文本格式；DirectWrite 格式是轻量 CPU 对象，
-    /// 按值缓存。字号用 `to_bits()` 做键，保证 f32 可哈希且同值同键。
-    formats: HashMap<(i32, u32), IDWriteTextFormat>,
-    families: HashMap<i32, windows_strings::HSTRING>,
     presenter: Option<crate::composition::Presenter>,
     panel: crate::protocol::PanelStyle,
     content_size: (f32, f32),
     dpi: u32,
     last_frame: Option<Vec<DrawCommand>>,
-}
-
-/// 字体槽位 → (字体族, 对齐方式)，映射规则与 ten 主题一致。
-/// 未知槽位回退为正文格式，保证坏主题仍可见。
-fn font_slot(font: i32) -> (PCWSTR, DWRITE_TEXT_ALIGNMENT) {
-    match font {
-        FONT_NUMBER => (w!("Segoe UI"), DWRITE_TEXT_ALIGNMENT_LEADING),
-        FONT_COMMENT => (w!("Microsoft YaHei UI"), DWRITE_TEXT_ALIGNMENT_LEADING),
-        FONT_ICON => (w!("Segoe MDL2 Assets"), DWRITE_TEXT_ALIGNMENT_LEADING),
-        _ => (w!("Microsoft YaHei UI"), DWRITE_TEXT_ALIGNMENT_LEADING),
-    }
+    layers: crate::layers::LayerScene,
+    images: HashMap<i32, (std::sync::Weak<crate::resources::Resource>, ID2D1Bitmap)>,
 }
 
 /// Straight ARGB colors; D2D writes premultiplied pixels into the composition surface.
@@ -101,19 +65,15 @@ fn stroke_edges(x: f32, y: f32, w: f32, h: f32, width: f32) -> [D2D_RECT_F; 4] {
 
 impl Canvas {
     pub fn new() -> WinResult<Self> {
-        unsafe {
-            let write: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            Ok(Self {
-                write,
-                formats: HashMap::new(),
-                families: HashMap::new(),
-                presenter: None,
-                panel: Default::default(),
-                content_size: (1.0, 1.0),
-                dpi: 96,
-                last_frame: None,
-            })
-        }
+        Ok(Self {
+            presenter: None,
+            panel: Default::default(),
+            content_size: (1.0, 1.0),
+            dpi: 96,
+            last_frame: None,
+            layers: Default::default(),
+            images: HashMap::new(),
+        })
     }
 
     pub fn ensure_target(&mut self, hwnd: HWND, dpi: u32) -> WinResult<()> {
@@ -164,6 +124,7 @@ impl Canvas {
 
     pub fn invalidate_target(&mut self) {
         self.presenter = None;
+        self.images.clear();
         self.last_frame = None;
     }
 
@@ -171,6 +132,37 @@ impl Canvas {
         if let Some(presenter) = &mut self.presenter {
             presenter.set_backdrop(style)?;
         }
+        Ok(())
+    }
+
+    /// Present-only commit. Runtime must roll back Keep before calling this.
+    /// Surface preparation completes before any decoration visual is changed.
+    pub fn set_layers(&mut self, scene: &crate::layers::LayerScene) -> WinResult<()> {
+        if !scene.validate(self.dpi) {
+            return Err(Error::from_hresult(E_INVALIDARG));
+        }
+        let scene = scene.clone();
+        self.images
+            .retain(|_, (owner, _)| owner.strong_count() != 0);
+        let mut presenter = self
+            .presenter
+            .take()
+            .ok_or_else(|| Error::from_hresult(E_UNEXPECTED))?;
+        let result = presenter.set_layers(&scene, |target, commands| {
+            self.draw_commands(target, commands)
+        });
+        self.presenter = Some(presenter);
+        result?;
+        self.layers = scene;
+        Ok(())
+    }
+
+    /// Host hide: stop all native motion and discard decoration surfaces.
+    pub fn clear_layers(&mut self) -> WinResult<()> {
+        if let Some(presenter) = &mut self.presenter {
+            presenter.clear_layers()?;
+        }
+        self.layers = Default::default();
         Ok(())
     }
 
@@ -182,115 +174,52 @@ impl Canvas {
         )
     }
 
-    /// 取 (槽位, 字号) 对应的 DirectWrite 文本格式，缺省时创建并缓存。
-    fn get_format(&mut self, font: i32, size: f32) -> WinResult<IDWriteTextFormat> {
-        let size = size.clamp(SIZE_MIN, SIZE_MAX);
-        let key = (font, size.to_bits());
-        if let Some(format) = self.formats.get(&key) {
-            return Ok(format.clone());
-        }
-        unsafe {
-            let (family, align) = font_slot(font);
-            let format = self.write.CreateTextFormat(
-                self.families
-                    .get(
-                        &(if font == FONT_TEXT_BOLD {
-                            FONT_TEXT
-                        } else {
-                            font
-                        }),
-                    )
-                    .map(|s| s.as_ptr())
-                    .map(PCWSTR)
-                    .unwrap_or(family),
-                None,
-                if font == FONT_TEXT_BOLD {
-                    DWRITE_FONT_WEIGHT_BOLD
-                } else {
-                    DWRITE_FONT_WEIGHT_NORMAL
-                },
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                size,
-                w!("zh-CN"),
-            )?;
-            format.SetTextAlignment(align).ok()?;
-            format
-                .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)
-                .ok()?;
-            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP).ok()?;
-            // Guest-selected sizes must not grow a process-lifetime cache forever.
-            if self.formats.len() >= 128 {
-                self.formats.clear();
-            }
-            self.formats.insert(key, format.clone());
-            Ok(format)
-        }
-    }
-
-    pub fn set_font(&mut self, slot: i32, family: &str) {
-        self.last_frame = None;
-        self.families
-            .insert(slot, windows_strings::HSTRING::from(family));
-        self.formats.retain(|(font, _), _| {
-            *font != slot && !(slot == FONT_TEXT && *font == FONT_TEXT_BOLD)
-        });
-    }
-
-    pub fn line_height(&mut self, font: i32, size: f32) -> WinResult<f32> {
-        let format = self.get_format(font, size)?;
-        unsafe {
-            let layout =
-                self.write
-                    .CreateTextLayout(&[0x004d, 0x4e2d], &format, 10000.0, 4096.0)?;
-            let mut metrics = DWRITE_TEXT_METRICS::default();
-            layout.GetMetrics(&mut metrics).ok()?;
-            Ok(metrics.height)
-        }
-    }
-
-    /// 文本宽度（DIP，含尾随空格），与 `draw_text` 使用同一格式，
-    /// 保证主题测量与实绘一致。
-    pub fn measure(&mut self, font: i32, size: f32, text: &str) -> WinResult<f32> {
-        let format = self.get_format(font, size)?;
-        let text: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            let layout =
-                self.write
-                    .CreateTextLayout(&text, &format, 1_000_000.0, size.max(16.0) * 4.0)?;
-            let mut metrics = DWRITE_TEXT_METRICS::default();
-            layout.GetMetrics(&mut metrics).ok()?;
-            Ok(metrics.widthIncludingTrailingWhitespace)
-        }
-    }
-
     /// 回放一帧命令：`BeginDraw` → 清屏 → 逐条绘制 → `EndDraw`。
     /// Transparent surface; unchanged command lists reuse the compositor's retained content.
     pub fn replay(&mut self, commands: &[DrawCommand]) -> WinResult<()> {
         if self.last_frame.as_deref() == Some(commands) {
             return Ok(());
         }
+        self.images
+            .retain(|_, (owner, _)| owner.strong_count() != 0);
         let target = self
             .presenter
             .as_mut()
             .ok_or_else(|| Error::from_hresult(E_UNEXPECTED))?
             .begin_draw()?;
-        let result: WinResult<()> = (|| unsafe {
+        let result = self.draw_commands(&target, commands);
+        let present = self
+            .presenter
+            .as_mut()
+            .ok_or_else(|| Error::from_hresult(E_UNEXPECTED))?
+            .end_draw();
+        result?;
+        present?;
+        self.last_frame = Some(commands.to_vec());
+        Ok(())
+    }
+
+    fn draw_commands(
+        &mut self,
+        target: &ID2D1RenderTarget,
+        commands: &[DrawCommand],
+    ) -> WinResult<()> {
+        (|| unsafe {
             // BeginDraw 之前分配好本帧全部 D2D 资源（与 ten 主题一致）。
             let mut brushes: Vec<(u32, ID2D1SolidColorBrush)> = Vec::new();
-            let mut formats: Vec<(usize, IDWriteTextFormat)> = Vec::new();
-            for (index, command) in commands.iter().enumerate() {
+            for command in commands {
                 let color = match command {
                     DrawCommand::FillRect { color, .. }
                     | DrawCommand::FillRoundedRect { color, .. }
                     | DrawCommand::StrokeRect { color, .. }
-                    | DrawCommand::Text { color, .. } => *color,
+                    | DrawCommand::Layout { color, .. } => *color,
+                    DrawCommand::Image { .. }
+                    | DrawCommand::PushClip(_)
+                    | DrawCommand::PushTransform(_)
+                    | DrawCommand::PopState => 0xffffffff,
                 };
                 if !brushes.iter().any(|(c, _)| *c == color) {
                     brushes.push((color, target.CreateSolidColorBrush(&to_color(color), None)?));
-                }
-                if let DrawCommand::Text { font, size, .. } = command {
-                    formats.push((index, self.get_format(*font, *size)?));
                 }
             }
             let brush = |color: u32| -> WinResult<&ID2D1SolidColorBrush> {
@@ -302,7 +231,8 @@ impl Canvas {
             };
 
             target.Clear(Some(&D2D_COLOR_F::default()));
-            for (index, command) in commands.iter().enumerate() {
+            let mut drawing = DrawStack::new(target);
+            for command in commands {
                 // 非有限坐标的命令（NaN/Inf）跳过：D2D 对此行为未定义。
                 if !command.is_finite() {
                     continue;
@@ -311,10 +241,112 @@ impl Canvas {
                     DrawCommand::FillRect { color, .. }
                     | DrawCommand::FillRoundedRect { color, .. }
                     | DrawCommand::StrokeRect { color, .. }
-                    | DrawCommand::Text { color, .. } => *color,
+                    | DrawCommand::Layout { color, .. } => *color,
+                    DrawCommand::Image { .. }
+                    | DrawCommand::PushClip(_)
+                    | DrawCommand::PushTransform(_)
+                    | DrawCommand::PopState => 0xffffffff,
                 };
                 let brush = brush(color)?;
                 match command {
+                    DrawCommand::PushTransform(matrix) => drawing.transform(*matrix)?,
+                    DrawCommand::PushClip(rect) => drawing.clip(*rect),
+                    DrawCommand::PopState => drawing.pop()?,
+                    DrawCommand::Image {
+                        resource,
+                        x,
+                        y,
+                        w,
+                        h,
+                        opacity,
+                    } => {
+                        let crate::resources::Kind::Image {
+                            pixels,
+                            width,
+                            height,
+                        } = &resource.kind
+                        else {
+                            return Err(Error::from_hresult(E_INVALIDARG));
+                        };
+                        if !self.images.contains_key(&resource.id) {
+                            let bitmap = target.CreateBitmap(
+                                D2D_SIZE_U {
+                                    width: *width,
+                                    height: *height,
+                                },
+                                Some(pixels.as_ptr().cast()),
+                                *width * 4,
+                                &D2D1_BITMAP_PROPERTIES {
+                                    pixelFormat: D2D1_PIXEL_FORMAT {
+                                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                                        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                                    },
+                                    dpiX: 96.0,
+                                    dpiY: 96.0,
+                                },
+                            )?;
+                            self.images
+                                .insert(resource.id, (std::sync::Arc::downgrade(resource), bitmap));
+                        }
+                        let bitmap = &self.images[&resource.id].1;
+                        target.DrawBitmap(
+                            bitmap,
+                            Some(&D2D_RECT_F {
+                                left: *x,
+                                top: *y,
+                                right: x + w,
+                                bottom: y + h,
+                            }),
+                            *opacity,
+                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                            None,
+                        );
+                    }
+                    DrawCommand::Layout {
+                        resource,
+                        x,
+                        y,
+                        glow,
+                        ..
+                    } => {
+                        let crate::resources::Kind::Layout { layout, .. } = &resource.kind else {
+                            return Err(Error::from_hresult(E_INVALIDARG));
+                        };
+                        if glow.0 > 0.0 && glow.1 >> 24 != 0 {
+                            let halo = target.CreateSolidColorBrush(&to_color(glow.1), None)?;
+                            for (radius, strength) in [(glow.0, 0.08), (glow.0 * 0.5, 0.16)] {
+                                let mut color = to_color(glow.1);
+                                color.a *= strength;
+                                halo.SetColor(&color);
+                                for (dx, dy) in [
+                                    (1., 0.),
+                                    (-1., 0.),
+                                    (0., 1.),
+                                    (0., -1.),
+                                    (0.707, 0.707),
+                                    (-0.707, 0.707),
+                                    (0.707, -0.707),
+                                    (-0.707, -0.707),
+                                ] {
+                                    target.DrawTextLayout(
+                                        windows_numerics::Vector2 {
+                                            x: x + dx * radius,
+                                            y: y + dy * radius,
+                                        },
+                                        layout,
+                                        &halo,
+                                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                                    );
+                                }
+                            }
+                        }
+                        target.DrawTextLayout(
+                            windows_numerics::Vector2 { x: *x, y: *y },
+                            layout,
+                            brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        );
+                    }
                     DrawCommand::FillRoundedRect {
                         x, y, w, h, radius, ..
                     } => {
@@ -352,91 +384,82 @@ impl Canvas {
                             target.FillRectangle(&edge, brush);
                         }
                     }
-                    DrawCommand::Text {
-                        x,
-                        y,
-                        size,
-                        text,
-                        glow,
-                        ..
-                    } => {
-                        let format = &formats
-                            .iter()
-                            .find(|(i, _)| *i == index)
-                            .expect("文本命令的格式已预取")
-                            .1;
-                        let text: Vec<u16> = text.encode_utf16().collect();
-                        if glow.0 > 0.0 && glow.1 >> 24 != 0 && !text.is_empty() {
-                            // Bounded two-ring soft halo, sharing one shaped layout with
-                            // the foreground. No extra guest calls or retained textures.
-                            let layout = self.write.CreateTextLayout(
-                                &text,
-                                format,
-                                TEXT_EXTENT,
-                                size.clamp(SIZE_MIN, SIZE_MAX) * 2.0,
-                            )?;
-                            let halo = target.CreateSolidColorBrush(&to_color(glow.1), None)?;
-                            for (radius, strength) in [(glow.0, 0.08), (glow.0 * 0.5, 0.16)] {
-                                let mut color = to_color(glow.1);
-                                color.a *= strength;
-                                halo.SetColor(&color);
-                                for (dx, dy) in [
-                                    (1., 0.),
-                                    (-1., 0.),
-                                    (0., 1.),
-                                    (0., -1.),
-                                    (0.707, 0.707),
-                                    (-0.707, 0.707),
-                                    (0.707, -0.707),
-                                    (-0.707, -0.707),
-                                ] {
-                                    target.DrawTextLayout(
-                                        windows_numerics::Vector2 {
-                                            x: x + dx * radius,
-                                            y: y + dy * radius,
-                                        },
-                                        &layout,
-                                        &halo,
-                                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                                    );
-                                }
-                            }
-                            target.DrawTextLayout(
-                                windows_numerics::Vector2 { x: *x, y: *y },
-                                &layout,
-                                brush,
-                                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                            );
-                            continue;
-                        }
-                        let rect = D2D_RECT_F {
-                            left: *x,
-                            top: *y,
-                            right: x + TEXT_EXTENT,
-                            bottom: y + size.clamp(SIZE_MIN, SIZE_MAX) * 2.0,
-                        };
-                        target.DrawText(
-                            &text,
-                            format,
-                            &rect,
-                            brush,
-                            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                            DWRITE_MEASURING_MODE_NATURAL,
-                        );
-                    }
                 }
             }
             Ok(())
-        })();
-        let present = self
-            .presenter
-            .as_mut()
-            .ok_or_else(|| Error::from_hresult(E_UNEXPECTED))?
-            .end_draw();
-        result?;
-        present?;
-        self.last_frame = Some(commands.to_vec());
+        })()
+    }
+}
+
+/// 失败路径同样恢复裁剪与变换；不能把Composition提供的表面偏移覆盖掉。
+struct DrawStack<'a> {
+    target: &'a ID2D1RenderTarget,
+    base: windows_numerics::Matrix3x2,
+    stack: Vec<Option<windows_numerics::Matrix3x2>>,
+}
+impl<'a> DrawStack<'a> {
+    fn new(target: &'a ID2D1RenderTarget) -> Self {
+        let mut base = windows_numerics::Matrix3x2::default();
+        unsafe { target.GetTransform(&mut base) };
+        Self {
+            target,
+            base,
+            stack: Vec::new(),
+        }
+    }
+    fn transform(&mut self, m: [f32; 6]) -> WinResult<()> {
+        let mut p = windows_numerics::Matrix3x2::default();
+        unsafe { self.target.GetTransform(&mut p) };
+        let next = windows_numerics::Matrix3x2 {
+            m11: m[0] * p.m11 + m[1] * p.m21,
+            m12: m[0] * p.m12 + m[1] * p.m22,
+            m21: m[2] * p.m11 + m[3] * p.m21,
+            m22: m[2] * p.m12 + m[3] * p.m22,
+            m31: m[4] * p.m11 + m[5] * p.m21 + p.m31,
+            m32: m[4] * p.m12 + m[5] * p.m22 + p.m32,
+        };
+        if [next.m11, next.m12, next.m21, next.m22, next.m31, next.m32]
+            .iter()
+            .any(|v| !v.is_finite() || v.abs() > 1e9)
+        {
+            return Err(Error::from_hresult(E_INVALIDARG));
+        }
+        self.stack.push(Some(p));
+        unsafe { self.target.SetTransform(&next) };
         Ok(())
+    }
+    fn clip(&mut self, r: crate::protocol::Rect) {
+        unsafe {
+            self.target.PushAxisAlignedClip(
+                &D2D_RECT_F {
+                    left: r.x,
+                    top: r.y,
+                    right: r.x + r.w,
+                    bottom: r.y + r.h,
+                },
+                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            )
+        };
+        self.stack.push(None);
+    }
+    fn pop(&mut self) -> WinResult<()> {
+        match self
+            .stack
+            .pop()
+            .ok_or_else(|| Error::from_hresult(E_INVALIDARG))?
+        {
+            Some(matrix) => unsafe { self.target.SetTransform(&matrix) },
+            None => unsafe { self.target.PopAxisAlignedClip() },
+        }
+        Ok(())
+    }
+}
+impl Drop for DrawStack<'_> {
+    fn drop(&mut self) {
+        while !self.stack.is_empty() {
+            let _ = self.pop();
+        }
+        unsafe { self.target.SetTransform(&self.base) };
     }
 }
 
@@ -444,7 +467,7 @@ impl Canvas {
 mod tests {
     use super::*;
     use crate::bindings::Windows::Win32::{RO_INIT_SINGLETHREADED, RoInitialize, RoUninitialize};
-    use crate::protocol::FONT_TEXT;
+    use windows_strings::{PCWSTR, w};
 
     const CLASS: PCWSTR = w!("Weasel.ThemeWasm.CanvasTest");
 
@@ -495,19 +518,29 @@ mod tests {
             canvas.ensure_target(hwnd, 96).expect("ensure_target");
             canvas.resize(300, 60, 96).expect("resize");
 
-            let width = canvas
-                .measure(FONT_TEXT, 24.0, "你好 world")
-                .expect("measure");
-            assert!(width > 0.0, "测量宽度必须为正");
-            assert_eq!(
-                width,
-                canvas.measure(FONT_TEXT, 24.0, "你好 world").unwrap(),
-                "相同槽位/字号/文本的测量必须稳定（格式缓存）"
-            );
-            assert!(
-                canvas.measure(FONT_TEXT, 40.0, "你好 world").unwrap() > width,
-                "字号增大后测量宽度必须增大"
-            );
+            let mut resources = crate::resources::Resources::default();
+            let font = resources.font("Microsoft YaHei UI", 24.0, 400).unwrap();
+            let layout = resources
+                .layout(font, "你好 world", 300.0, 60.0, false as i32)
+                .unwrap();
+            let layout = resources.get(layout).unwrap();
+            let crate::resources::Kind::Layout { metrics, .. } = &layout.kind else {
+                panic!("layout expected")
+            };
+            assert!(metrics[0] > 0.0 && metrics[1] > 0.0 && metrics[2] > 0.0);
+            let mut png = Vec::new();
+            {
+                let mut encoder = png::Encoder::new(&mut png, 1, 1);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder
+                    .write_header()
+                    .unwrap()
+                    .write_image_data(&[255, 0, 0, 128])
+                    .unwrap();
+            }
+            let image = resources.image(&png).unwrap();
+            let image = resources.get(image).unwrap();
 
             canvas
                 .replay(&[
@@ -526,14 +559,29 @@ mod tests {
                         color: 0xFF_111111,
                         width: 2.0,
                     },
-                    DrawCommand::Text {
-                        x: 10.0,
-                        y: 8.0,
-                        font: FONT_TEXT,
-                        size: 24.0,
-                        color: 0xFF_111111,
-                        text: "你好".to_string(),
+                    DrawCommand::PushTransform([1.0, 0.0, 0.0, 1.0, 10.0, 8.0]),
+                    DrawCommand::PushClip(crate::protocol::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 250.0,
+                        h: 40.0,
+                    }),
+                    DrawCommand::Layout {
+                        resource: layout,
+                        x: 0.0,
+                        y: 0.0,
+                        color: 0xff111111,
                         glow: (0.0, 0),
+                    },
+                    DrawCommand::PopState,
+                    DrawCommand::PopState,
+                    DrawCommand::Image {
+                        resource: image,
+                        x: 260.0,
+                        y: 0.0,
+                        w: 40.0,
+                        h: 60.0,
+                        opacity: 0.8,
                     },
                 ])
                 .expect("replay");
@@ -552,6 +600,101 @@ mod tests {
             canvas.invalidate_target();
             canvas.ensure_target(hwnd, 96).expect("ensure_target 重建");
             canvas.replay(&[]).expect("replay 空帧");
+
+            use crate::layers::{
+                LayerMotion, LayerOperation, LayerProperty, LayerScene, LayerState,
+            };
+            let start = std::time::Instant::now();
+            let mut scene = LayerScene {
+                layers: vec![LayerState {
+                    z_index: 0,
+                    generation: 1,
+                    clip: None,
+                    interactive: false,
+                    regions: Vec::new(),
+                    id: 1,
+                    size: (32.0, 32.0),
+                    commands: vec![DrawCommand::FillRect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 32.0,
+                        h: 32.0,
+                        color: 0x80ff0000,
+                    }],
+                    motions: vec![LayerMotion {
+                        snap_from: false,
+                        property: LayerProperty::Opacity,
+                        easing: crate::abi::Easing::SmoothStep,
+                        revision: 1,
+                        operation: LayerOperation::Animate,
+                        from: 0.0,
+                        to: 1.0,
+                        start,
+                        deadline: start + std::time::Duration::from_secs(1),
+                    }],
+                }],
+            };
+            canvas.set_layers(&scene).expect("native decoration");
+            // 单轴静态写入与另一轴动画共存，不写回整个 Offset 向量。
+            let mut vertical = scene.layers[0].motions[0];
+            vertical.property = LayerProperty::OffsetY;
+            vertical.from = 5.0;
+            vertical.to = 1.0;
+            let mut horizontal = vertical;
+            horizontal.property = LayerProperty::OffsetX;
+            horizontal.operation = LayerOperation::Set;
+            horizontal.to = 80.0;
+            scene.layers[0].motions.extend([vertical, horizontal]);
+            canvas.set_layers(&scene).expect("independent axes");
+            scene.layers[0].clip = Some(crate::protocol::Rect {
+                x: 5.0,
+                y: 5.0,
+                w: 40.0,
+                h: 30.0,
+            });
+            let objects = canvas.presenter.as_ref().unwrap().layer_objects(1);
+            canvas.set_layers(&scene).expect("retained revision");
+            assert_eq!(objects, canvas.presenter.as_ref().unwrap().layer_objects(1));
+            scene.layers[0].motions[2].revision += 10;
+            scene.layers[0].motions[2].operation = LayerOperation::Animate;
+            scene.layers[0].motions[2].from = 80.0;
+            scene.layers[0].motions[2].to = 120.0;
+            canvas
+                .set_layers(&scene)
+                .expect("native slide reuses surface");
+            assert_eq!(objects, canvas.presenter.as_ref().unwrap().layer_objects(1));
+            canvas
+                .set_panel(Default::default(), (240.0, 48.0), 96)
+                .unwrap();
+            canvas
+                .set_layers(&scene)
+                .expect("clip resize retains animation");
+            assert_eq!(objects, canvas.presenter.as_ref().unwrap().layer_objects(1));
+            scene.layers[0].motions[0].revision = 2;
+            scene.layers[0].motions[0].to = 0.4;
+            canvas
+                .set_layers(&scene)
+                .expect("retarget from presentation");
+            assert_eq!(objects, canvas.presenter.as_ref().unwrap().layer_objects(1));
+            canvas.invalidate_target();
+            canvas.ensure_target(hwnd, 96).unwrap();
+            canvas.replay(&[]).unwrap();
+            canvas
+                .set_layers(&scene)
+                .expect("restore decoration deadline");
+            assert_ne!(objects, canvas.presenter.as_ref().unwrap().layer_objects(1));
+            scene.layers[0].motions[0].revision = 3;
+            scene.layers[0].motions[0].operation = LayerOperation::StopCurrent;
+            canvas.set_layers(&scene).expect("stop at presentation");
+            scene.layers[0].motions[0].revision = 4;
+            scene.layers[0].motions[0].operation = LayerOperation::StopEnd;
+            canvas.set_layers(&scene).expect("stop at target");
+            scene.layers[0].id = 0;
+            assert!(canvas.set_layers(&scene).is_err());
+            assert_eq!(canvas.layers.layers[0].id, 1);
+            canvas.clear_layers().expect("hide clears decorations");
+            assert!(canvas.layers.layers.is_empty());
+            drop(canvas);
 
             let _ = DestroyWindow(hwnd);
             RoUninitialize();
