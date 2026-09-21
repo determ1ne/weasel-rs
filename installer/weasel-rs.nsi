@@ -65,8 +65,6 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "Weasel-RS contributors"
 !insertmacro MUI_UNPAGE_FINISH
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
-Var CopiedFiles
-Var TriedRegistration
 Var InstallerMutex
 Var IsUpgrade
 Var InstalledVersion
@@ -74,7 +72,6 @@ Var OldDll
 Var BackupDll
 Var BackupList
 Var RetireResult
-Var TransactionStarted
 Var TransactionCommitted
 Var PreviousTip32
 Var PreviousTip64
@@ -135,9 +132,6 @@ Function .onInit
 !ifdef DEV_INSTALLER
   Call SelectAllDevComponents
 !endif
-  StrCpy $CopiedFiles 0
-  StrCpy $TriedRegistration 0
-  StrCpy $TransactionStarted 0
   StrCpy $TransactionCommitted 0
   StrCpy $PreviousTip32 ""
   StrCpy $PreviousTip64 ""
@@ -259,8 +253,6 @@ FunctionEnd
 
 ; Rename before extraction: a loaded TIP must never be overwritten in place.
 ; GetTempFileName reserves a unique sibling, not a shared .old filename.
-; The caller decides whether failure is fatal; rollback uses this as a
-; best-effort primitive and must continue restoring unrelated files.
 Function RetireDll
   StrCpy $RetireResult 1
   IfFileExists "$OldDll" 0 retire_done
@@ -312,38 +304,6 @@ Function DeleteRetiredDlls
   cleanup_done:
 FunctionEnd
 
-; Best-effort recovery for an installation that failed after replacing COM/TSF
-; registration. The paths were captured before the transaction began.
-Function RestorePreviousTipRegistration
-  ${If} $PreviousTip32 != ""
-    IfFileExists "$PreviousTip32" 0 restore_previous_x86_missing
-    ClearErrors
-    ExecWait '"$SYSDIR\regsvr32.exe" /s "$PreviousTip32"' $0
-    ${If} ${Errors}
-    ${OrIf} $0 != 0
-      !insertmacro InstallLog "ERROR: 无法恢复先前的 x86 TIP 注册：$PreviousTip32"
-    ${EndIf}
-    Goto restore_previous_x64
-    restore_previous_x86_missing:
-      !insertmacro InstallLog "ERROR: 先前的 x86 TIP 文件不存在：$PreviousTip32"
-  ${EndIf}
-  restore_previous_x64:
-  ${If} $PreviousTip64 != ""
-    IfFileExists "$PreviousTip64" 0 restore_previous_x64_missing
-    ${DisableX64FSRedirection}
-    ClearErrors
-    ExecWait '"$SYSDIR\regsvr32.exe" /s "$PreviousTip64"' $0
-    ${EnableX64FSRedirection}
-    ${If} ${Errors}
-    ${OrIf} $0 != 0
-      !insertmacro InstallLog "ERROR: 无法恢复先前的 x64 TIP 注册：$PreviousTip64"
-    ${EndIf}
-    Goto restore_previous_done
-    restore_previous_x64_missing:
-      !insertmacro InstallLog "ERROR: 先前的 x64 TIP 文件不存在：$PreviousTip64"
-  ${EndIf}
-  restore_previous_done:
-FunctionEnd
 
 ; Explicit file list: never recursively remove the install root or user data.
 !macro AssertSafeUninstallDirectory DIRECTORY
@@ -417,7 +377,6 @@ Section "Weasel-RS" SEC_MAIN
   Call BeginRecords
   SetOverwrite on
   SetOutPath "$INSTDIR"
-  StrCpy $CopiedFiles 1
   ClearErrors
   !insertmacro ManagedFile "${X64_RELEASE}\weasel-broker.exe" "weasel-broker.exe"
   !insertmacro ManagedFile "${X64_RELEASE}\weasel-server.exe" "weasel-server.exe"
@@ -595,20 +554,20 @@ Section "-注册与安装信息" SEC_REGISTER
   Call InstallRuntime_x86
   Call InstallRuntime_x64
   Call StopApplicationProcesses
-  ${If} $IsUpgrade == 1
-    Call BackupOldPayload
-  ${EndIf}
-  StrCpy $TransactionStarted 1
   Call RemoveOldPayload
   Delete "$INSTDIR\files.lst"
   Delete "$INSTDIR\files.pending.lst"
+  ; Persist the new payload list before copying; a failure leaves files in
+  ; place rather than attempting to restore or unregister the old version.
+  ClearErrors
+  CopyFiles /SILENT "$StageRoot\files.pending.lst" "$INSTDIR"
+  IfErrors install_failed
   !insertmacro InstallLog "INFO: 开始提交新文件"
   Call CommitStagedPayload
 
   !insertmacro InstallLog "INFO: 开始注册 TIP"
   ; RegDLL is 32-bit in this installer; use native regsvr32 for the x64 DLL.
   SetOutPath "$INSTDIR"
-  StrCpy $TriedRegistration 1
   ClearErrors
   ExecWait '"$SYSDIR\regsvr32.exe" /s "$INSTDIR\x86\weasel_tip.dll"' $0
   ${If} ${Errors}
@@ -707,50 +666,16 @@ Function .onInstFailed
       !insertmacro CleanupUiAccessCertificate "$PLUGINSDIR\new-uiaccess.cer"
     ${EndIf}
   ${EndIf}
-  !insertmacro InstallLog "ERROR: 安装未完成；正在恢复安装前状态；日志：$InstallLog"
+  !insertmacro InstallLog "ERROR: 安装未完成；保留当前文件，不执行回滚；日志：$InstallLog"
   Call CloseRecords
-  ${If} $TransactionStarted == 1
-  ${AndIf} $TransactionCommitted == 0
-    ; Remove any newly registered classes before replacing the DLLs again.
-    ${If} $TriedRegistration == 1
-      ClearErrors
-      ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\x86\weasel_tip.dll"' $0
-      ${DisableX64FSRedirection}
-      ClearErrors
-      ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\x64\weasel_tip.dll"' $1
-      ${EnableX64FSRedirection}
-    ${EndIf}
-    Call RemoveCommittedPayload
-    ${If} $IsUpgrade == 1
-      Call RestoreOldPayload
-      WriteRegStr HKLM "${PRODUCT_KEY}" "InstallDir" "$INSTDIR"
-      ${If} $InstalledVersion != ""
-        WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "$InstalledVersion"
-      ${EndIf}
-    ${Else}
-      DeleteRegKey HKLM "${UNINSTALL_KEY}"
-      DeleteRegKey HKLM "${PRODUCT_KEY}"
-      !insertmacro RemoveProgramFiles
-    ${EndIf}
-    ${If} $TriedRegistration == 1
-      Call RestorePreviousTipRegistration
-    ${EndIf}
-    Call DeleteRetiredDlls
-  ${ElseIf} $IsUpgrade == 0
-  ${AndIf} $CopiedFiles == 1
-    Delete "$SMPROGRAMS\小狼毫RS\小狼毫RS.lnk"
-    Delete "$SMPROGRAMS\小狼毫RS\小狼毫RS算法服务.lnk"
-    Delete "$SMPROGRAMS\小狼毫RS\卸载.lnk"
-    RMDir "$SMPROGRAMS\小狼毫RS"
-    DeleteRegKey HKLM "${UNINSTALL_KEY}"
-    DeleteRegKey HKLM "${PRODUCT_KEY}"
-    !insertmacro RemoveProgramFiles
-  ${EndIf}
+  ; Do not delete payload, undo registrations, or erase installation records.
+  ; Keep retired DLLs on failure for the next successful installation to clean.
   ${If} $InstallLogHandle != ""
     FileClose $InstallLogHandle
     StrCpy $InstallLogHandle ""
   ${EndIf}
-  MessageBox MB_OK|MB_ICONEXCLAMATION "安装未完成。已尝试恢复安装前状态。$\r$\n安装日志：$InstallLog" /SD IDOK
+  SetErrorLevel 1
+  MessageBox MB_OK|MB_ICONEXCLAMATION "安装未完成，部分文件可能已更新，未执行回滚。请解决错误后重新运行安装程序。$\r$\n安装日志：$InstallLog" /SD IDOK
 FunctionEnd
 
 Function un.onInit

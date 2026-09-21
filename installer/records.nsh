@@ -22,9 +22,6 @@ Var PathCheckCursor
 Var PathCheckParent
 Var PathCheckResult
 Var StageRoot
-Var RollbackRoot
-Var RollbackManifest
-Var RollbackHandle
 Var ManagedFinalOutDir
 Var ManagedRelativeDir
 Var PayloadTargetDirectory
@@ -86,7 +83,6 @@ FunctionEnd
 Function BeginRecords
   InitPluginsDir
   StrCpy $StageRoot "$PLUGINSDIR\payload-stage"
-  StrCpy $RollbackRoot "$PLUGINSDIR\payload-rollback"
   CreateDirectory "$StageRoot"
   ClearErrors
   FileOpen $ManifestHandle "$StageRoot\files.pending.lst" w
@@ -252,6 +248,11 @@ Function RemoveManifestPayload
 FunctionEnd
 
 Function RemoveOldPayload
+  IfFileExists "$INSTDIR\files.lst" remove_old_recorded 0
+    !insertmacro InstallLog "INFO: 缺少 files.lst，保留旧文件并覆盖安装"
+    ClearErrors
+    Return
+  remove_old_recorded:
   StrCpy $ManifestSource "$INSTDIR\files.lst"
   Call RemoveManifestPayload
   ; Also remove payload left by an interrupted installation before truncating
@@ -260,97 +261,9 @@ Function RemoveOldPayload
   Call RemoveManifestPayload
 FunctionEnd
 
-; Copy the previous successful payload before any destructive upgrade step.
-; The backup manifest is written only after each copy succeeds.
-Function BackupOldPayload
-  CreateDirectory "$RollbackRoot"
-  IfFileExists "$INSTDIR\files.lst" backup_payload_copy_manifest 0
-    !insertmacro InstallLog "ERROR: 已安装版本缺少 files.lst，无法安全升级"
-    MessageBox MB_OK|MB_ICONSTOP "现有安装缺少文件清单，无法安全升级。请先卸载旧版本；如果卸载程序也不可用，请备份用户数据后手动清理安装目录。" /SD IDOK
-    Abort
 
-  backup_payload_copy_manifest:
-  ClearErrors
-  CopyFiles /SILENT "$INSTDIR\files.lst" "$RollbackRoot"
-  ${If} ${Errors}
-    !insertmacro InstallLog "ERROR: 无法备份旧安装清单"
-    Abort
-  ${EndIf}
-  ClearErrors
-  Rename "$RollbackRoot\files.lst" "$RollbackRoot\old-files.lst"
-  ${If} ${Errors}
-    !insertmacro InstallLog "ERROR: 无法保存旧安装清单副本"
-    Abort
-  ${EndIf}
-
-  StrCpy $RollbackManifest "$RollbackRoot\rollback.lst"
-  ClearErrors
-  FileOpen $RollbackHandle "$RollbackManifest" w
-  ${If} ${Errors}
-    !insertmacro InstallLog "ERROR: 无法创建升级回滚清单"
-    Abort
-  ${EndIf}
-  ClearErrors
-  FileOpen $ManifestReader "$INSTDIR\files.lst" r
-  ${If} ${Errors}
-    FileClose $RollbackHandle
-    StrCpy $RollbackHandle ""
-    !insertmacro InstallLog "ERROR: 无法读取待备份的旧安装清单"
-    Abort
-  ${EndIf}
-
-  backup_payload_next:
-    ClearErrors
-    FileReadUTF16LE $ManifestReader $ManifestEntry
-    IfErrors backup_payload_reader_close
-    ${TrimNewLines} "$ManifestEntry" $ManifestEntry
-    StrCmp $ManifestEntry "" backup_payload_next
-    IfFileExists "$INSTDIR\$ManifestEntry" 0 backup_payload_next
-    StrCpy $PathCheckCandidate "$INSTDIR\$ManifestEntry"
-    Call CheckManagedPath
-    StrCmp $PathCheckResult 1 0 backup_payload_invalid
-    ClearErrors
-    ${GetFileAttributes} "$PathCheckCandidate" "DIRECTORY" $0
-    ${If} ${Errors}
-    ${OrIf} $0 == 1
-      Goto backup_payload_invalid
-    ${EndIf}
-    ${GetParent} "$RollbackRoot\$ManifestEntry" $0
-    CreateDirectory "$0"
-    ClearErrors
-    CopyFiles /SILENT "$INSTDIR\$ManifestEntry" "$0"
-    ${If} ${Errors}
-      FileClose $ManifestReader
-      FileClose $RollbackHandle
-      StrCpy $RollbackHandle ""
-      !insertmacro InstallLog "ERROR: 无法备份旧安装文件：$ManifestEntry"
-      Abort
-    ${EndIf}
-    FileWriteUTF16LE $RollbackHandle "$ManifestEntry$\r$\n"
-    ${If} ${Errors}
-      FileClose $ManifestReader
-      FileClose $RollbackHandle
-      StrCpy $RollbackHandle ""
-      !insertmacro InstallLog "ERROR: 无法记录升级回滚文件：$ManifestEntry"
-      Abort
-    ${EndIf}
-    Goto backup_payload_next
-
-  backup_payload_invalid:
-    FileClose $ManifestReader
-    FileClose $RollbackHandle
-    StrCpy $RollbackHandle ""
-    !insertmacro InstallLog "ERROR: 旧安装清单包含不安全路径：$ManifestEntry"
-    Abort
-  backup_payload_reader_close:
-    FileClose $ManifestReader
-    FileClose $RollbackHandle
-    StrCpy $RollbackHandle ""
-    ClearErrors
-FunctionEnd
-
-; Copy every staged file to its final location. If this stops part-way,
-; onInstFailed removes entries from the same pending list before restoration.
+; Copy staged payload without backups. On failure, keep installed files and
+; the pending manifest for a subsequent installation attempt.
 Function CommitStagedPayload
   ClearErrors
   FileOpen $ManifestReader "$StageRoot\files.pending.lst" r
@@ -374,6 +287,26 @@ Function CommitStagedPayload
     Call CheckManagedPath
     StrCmp $PathCheckResult 1 0 commit_payload_invalid
     ClearErrors
+    ; Missing manifests must still support replacing loaded DLLs safely.
+    IfFileExists "$INSTDIR\$ManifestEntry" 0 commit_payload_copy
+    StrCpy $PathCheckCandidate "$INSTDIR\$ManifestEntry"
+    Call CheckManagedPath
+    StrCmp $PathCheckResult 1 0 commit_payload_invalid
+    ${GetFileAttributes} "$PathCheckFull" "DIRECTORY" $0
+    IfErrors commit_payload_invalid
+    StrCmp $0 0 0 commit_payload_invalid
+    ${GetFileExt} "$ManifestEntry" $ManifestExtension
+    ${If} $ManifestExtension == "dll"
+      StrCpy $OldDll "$INSTDIR\$ManifestEntry"
+      Call RetireDll
+      ${If} $RetireResult != 1
+        FileClose $ManifestReader
+        !insertmacro InstallLog "ERROR: 无法替换占用中的 DLL：$ManifestEntry"
+        Abort
+      ${EndIf}
+    ${EndIf}
+  commit_payload_copy:
+    ClearErrors
     CopyFiles /SILENT "$StageRoot\$ManifestEntry" "$PayloadTargetDirectory"
     ${If} ${Errors}
       FileClose $ManifestReader
@@ -391,97 +324,6 @@ Function CommitStagedPayload
     !insertmacro InstallLog "ERROR: 不安全的安装目标：$ManifestEntry"
     Abort
   commit_payload_close:
-    FileClose $ManifestReader
-    ClearErrors
-FunctionEnd
-
-; Restore files copied by BackupOldPayload after a failed upgrade commit.
-Function RestoreOldPayload
-  IfFileExists "$RollbackManifest" 0 restore_old_manifest
-  ClearErrors
-  FileOpen $ManifestReader "$RollbackManifest" r
-  ${If} ${Errors}
-    !insertmacro InstallLog "ERROR: 无法读取升级回滚清单"
-    Goto restore_old_manifest
-  ${EndIf}
-  restore_old_next:
-    ClearErrors
-    FileReadUTF16LE $ManifestReader $ManifestEntry
-    IfErrors restore_old_close
-    ${TrimNewLines} "$ManifestEntry" $ManifestEntry
-    StrCmp $ManifestEntry "" restore_old_next
-    IfFileExists "$RollbackRoot\$ManifestEntry" 0 restore_old_next
-    ${GetParent} "$INSTDIR\$ManifestEntry" $PayloadTargetDirectory
-    CreateDirectory "$PayloadTargetDirectory"
-    StrCpy $PathCheckCandidate "$PayloadTargetDirectory"
-    Call CheckManagedPath
-    ${If} $PathCheckResult != 1
-      !insertmacro InstallLog "ERROR: 回滚目标不安全：$ManifestEntry"
-      Goto restore_old_next
-    ${EndIf}
-    ClearErrors
-    CopyFiles /SILENT "$RollbackRoot\$ManifestEntry" "$PayloadTargetDirectory"
-    ${If} ${Errors}
-      !insertmacro InstallLog "ERROR: 无法恢复旧安装文件：$ManifestEntry"
-    ${Else}
-      !insertmacro InstallLog "INFO: 已恢复旧安装文件：$ManifestEntry"
-    ${EndIf}
-    Goto restore_old_next
-  restore_old_close:
-    FileClose $ManifestReader
-  restore_old_manifest:
-    IfFileExists "$RollbackRoot\old-files.lst" 0 restore_old_done
-    Delete "$INSTDIR\files.lst"
-    ClearErrors
-    CopyFiles /SILENT "$RollbackRoot\old-files.lst" "$INSTDIR"
-    ${IfNot} ${Errors}
-      ClearErrors
-      Rename "$INSTDIR\old-files.lst" "$INSTDIR\files.lst"
-      ${If} ${Errors}
-        !insertmacro InstallLog "ERROR: 无法恢复旧安装清单"
-      ${EndIf}
-    ${EndIf}
-  restore_old_done:
-    ClearErrors
-FunctionEnd
-
-; Move files that may already have been copied from staging out of the way.
-; Rollback must keep going when one file cannot be retired, otherwise a single
-; lock would prevent every unrelated old file from being restored.
-Function RemoveCommittedPayload
-  ClearErrors
-  FileOpen $ManifestReader "$StageRoot\files.pending.lst" r
-  ${If} ${Errors}
-    !insertmacro InstallLog "ERROR: 无法读取待回滚的新安装清单"
-    Return
-  ${EndIf}
-  rollback_remove_next:
-    ClearErrors
-    FileReadUTF16LE $ManifestReader $ManifestEntry
-    IfErrors rollback_remove_close
-    ${TrimNewLines} "$ManifestEntry" $ManifestEntry
-    StrCmp $ManifestEntry "" rollback_remove_next
-    IfFileExists "$INSTDIR\$ManifestEntry" 0 rollback_remove_next
-    StrCpy $PathCheckCandidate "$INSTDIR\$ManifestEntry"
-    Call CheckManagedPath
-    ${If} $PathCheckResult != 1
-      !insertmacro InstallLog "ERROR: 跳过不安全的回滚清理路径：$ManifestEntry"
-      Goto rollback_remove_next
-    ${EndIf}
-    ClearErrors
-    ${GetFileAttributes} "$PathCheckFull" "DIRECTORY" $0
-    ${If} ${Errors}
-    ${OrIf} $0 == 1
-      !insertmacro InstallLog "ERROR: 跳过无效的回滚清理项：$ManifestEntry"
-      Goto rollback_remove_next
-    ${EndIf}
-    StrCpy $OldDll "$PathCheckFull"
-    Call RetireDll
-    ${If} $RetireResult != 1
-      !insertmacro InstallLog "ERROR: 无法移开新安装文件，旧版对应文件可能无法恢复：$ManifestEntry"
-    ${EndIf}
-    Goto rollback_remove_next
-  rollback_remove_close:
     FileClose $ManifestReader
     ClearErrors
 FunctionEnd
@@ -558,7 +400,7 @@ FunctionEnd
 
 Function FinishRecords
   Call CloseRecords
-  ; Keep the old list authoritative through staging, copy and registration.
+  ; Archive the new list after payload and registration succeed.
   ClearErrors
   CopyFiles /SILENT "$StageRoot\files.pending.lst" "$INSTDIR"
   ${If} ${Errors}
