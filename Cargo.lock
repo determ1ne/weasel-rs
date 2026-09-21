@@ -6291,7 +6291,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-broker"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "embed-resource",
  "serde_json",
@@ -6306,7 +6306,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-common"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "prost",
  "prost-build",
@@ -6327,7 +6327,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-renderer"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "embed-resource",
  "serde",
@@ -6342,7 +6342,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-server"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "bindgen",
  "embed-resource",
@@ -6361,7 +6361,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-settings"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "embed-resource",
  "raw-window-handle",
@@ -6379,7 +6379,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-theme-abc"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "embed-resource",
  "serde_json",
@@ -6393,7 +6393,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-theme-api"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -6402,7 +6402,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-theme-eleven"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "embed-resource",
  "serde_json",
@@ -6417,7 +6417,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-theme-support"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "weasel-theme-api",
  "windows-bindgen",
@@ -6433,7 +6433,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-theme-ten"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "embed-resource",
  "serde_json",
@@ -6446,7 +6446,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-theme-void"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "embed-resource",
  "serde_json",
@@ -6456,7 +6456,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-theme-wasm"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "embed-resource",
  "png",
@@ -6474,7 +6474,7 @@ dependencies = [
 
 [[package]]
 name = "weasel-tip"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "embed-resource",
  "tokio",
