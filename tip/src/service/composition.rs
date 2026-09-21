@@ -1,6 +1,45 @@
 use super::*;
 use crate::bindings::TF_E_READONLY;
 
+#[derive(Default)]
+enum CompositionPhase {
+    #[default]
+    Preedit,
+    Committing,
+    Committed,
+}
+
+/// Metadata belongs to the text being applied, not the latest queued reply.
+#[derive(Default)]
+pub(super) struct CompositionContent {
+    phase: CompositionPhase,
+    raw: Option<String>,
+}
+
+impl CompositionContent {
+    pub(super) fn preedit(raw: Option<String>) -> Self {
+        Self {
+            phase: CompositionPhase::Preedit,
+            raw,
+        }
+    }
+
+    fn begin_commit(&mut self) {
+        // SetText can reenter the host. Never roll back an in-flight or
+        // uncertain commit to raw input, including when SetText fails.
+        self.phase = CompositionPhase::Committing;
+        self.raw = None;
+    }
+
+    pub(super) fn finish(&mut self) -> Option<String> {
+        let previous = std::mem::take(self);
+        match previous.phase {
+            CompositionPhase::Preedit => previous.raw,
+            CompositionPhase::Committing | CompositionPhase::Committed => None,
+        }
+    }
+}
+
 impl TextService {
     pub(super) fn request_edit_session(
         &self,
@@ -161,6 +200,13 @@ impl TextService {
         self.edit_mutated.store(true, Ordering::Release);
         let composition = unsafe { context_composition.StartComposition(ec, &range, sink)? };
         let previous = self.lock(&state.composition)?.replace(composition);
+        *self.lock(&state.composition_content)? = CompositionContent::preedit(
+            response
+                .commit_text
+                .is_empty()
+                .then(|| response.raw_input.clone())
+                .flatten(),
+        );
         state.composition_epoch.store(
             response.token.as_ref().map_or(0, |t| t.connection_epoch),
             Ordering::Release,
@@ -200,6 +246,8 @@ impl TextService {
             .cloned()
             .ok_or_else(|| Error::from_hresult(E_POINTER))?;
         let range = unsafe { active.GetRange()? };
+        *self.lock(&state.composition_content)? =
+            CompositionContent::preedit(response.raw_input.clone());
         self.set_range_text(&range, ec, &response.composition)?;
         // Display attributes are optional.  Continue the edit session when
         // the host does not expose a writable attribute property.
@@ -274,9 +322,28 @@ impl TextService {
             .ok_or_else(|| Error::from_hresult(E_POINTER))?;
         let range = unsafe { active.GetRange()? };
         self.clear_display_attribute_best_effort(context, ec, &range);
+        if !state.matches(response.token.as_ref())?
+            || self.lock(&state.composition)?.as_ref() != Some(&active)
+        {
+            return Ok(());
+        }
+        self.lock(&state.composition_content)?.begin_commit();
         self.set_range_text(&range, ec, &response.commit_text)?;
+        // A host termination callback may already have taken this composition
+        // and invalidated its generation while SetText was executing.
+        if !state.matches(response.token.as_ref())?
+            || self.lock(&state.composition)?.as_ref() != Some(&active)
+        {
+            return Ok(());
+        }
+        self.lock(&state.composition_content)?.phase = CompositionPhase::Committed;
         self.collapse_end(&range, ec)?;
         self.set_selection(context, ec, &range, 0)?;
+        if !state.matches(response.token.as_ref())?
+            || self.lock(&state.composition)?.as_ref() != Some(&active)
+        {
+            return Ok(());
+        }
         self.request_edit_session(
             context.clone(),
             response.clone(),
@@ -306,6 +373,7 @@ impl TextService {
         }
 
         let active = self.lock(&state.composition)?.take();
+        let _ = self.lock(&state.composition_content)?.finish();
         if let Some(active) = active {
             let range = unsafe { active.GetRange()? };
             self.clear_display_attribute_best_effort(context, ec, &range);
@@ -408,6 +476,7 @@ impl TextService {
                 if let Some(active) = active {
                     let range = unsafe { active.GetRange()? };
                     let owned = self.lock(&state.composition)?.take();
+                    let _ = self.lock(&state.composition_content)?.finish();
                     drop(owned);
                     self.clear_display_attribute_best_effort(&context, ec, &range);
                     self.edit_mutated.store(true, Ordering::Release);
@@ -432,5 +501,38 @@ impl TextService {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod content_tests {
+    use super::{CompositionContent, CompositionPhase};
+
+    #[test]
+    fn termination_preserves_inflight_and_completed_commits() {
+        for completed in [false, true] {
+            let mut content = CompositionContent::preedit(Some("nihao".into()));
+            content.begin_commit();
+            if completed {
+                content.phase = CompositionPhase::Committed;
+            }
+            // Both host termination and the click-outside task use finish().
+            assert_eq!(content.finish(), None);
+            assert_eq!(content.finish(), None);
+        }
+    }
+
+    #[test]
+    fn new_preedit_after_commit_has_its_own_raw_input() {
+        let mut content = CompositionContent::preedit(Some("nihao".into()));
+        assert_eq!(content.finish().as_deref(), Some("nihao"));
+        content = CompositionContent::preedit(Some("ni".into()));
+        content.begin_commit();
+        content.phase = CompositionPhase::Committed;
+        assert_eq!(content.finish(), None);
+        content = CompositionContent::preedit(Some("hao".into()));
+        assert_eq!(content.finish().as_deref(), Some("hao"));
+        // Older servers without raw_input must not synthesize any text.
+        assert_eq!(CompositionContent::preedit(None).finish(), None);
     }
 }

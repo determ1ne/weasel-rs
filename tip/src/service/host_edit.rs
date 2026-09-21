@@ -137,7 +137,7 @@ impl TextService {
         let Some(active) = active else {
             return Ok(());
         };
-        let raw = self.lock(&state.composition_raw)?.take();
+        let raw = self.lock(&state.composition_content)?.finish();
         let expected_empty = self.lock(&state.composition_text)?.is_empty();
         let range = unsafe { active.GetRange()? };
         let mut selection = TF_SELECTION::default();
