@@ -78,18 +78,19 @@ struct UiState {
 }
 
 /// Called and dropped on the UI runtime's initialized STA.
-fn supports_xaml(version: OsVersion) -> bool {
-    version >= OsVersion::new(10, 0, 0, 18362)
+fn supports_eleven(version: OsVersion) -> bool {
+    version >= OsVersion::new(10, 0, 0, 22000)
 }
 
 fn create(
     mode: UiMode,
     config: config::ThemeConfig,
 ) -> Result<Box<dyn crate::theme_api::ThemeBackend>, String> {
-    // The XAML Island backend requires Windows 10 1903 (build 18362) or later.
-    if !supports_xaml(OsVersion::current()) {
+    // Require Windows 11 for the theme's native rounded window corners.
+    // Reject before creating any XAML resources so the next theme can be tried.
+    if !supports_eleven(OsVersion::current()) {
         return Err(format!(
-            "XAML Island backend requires Windows 10 1903 (build 18362) or later, but the current version is {}",
+            "eleven theme requires Windows 11 (build 22000) or later, but the current version is {}",
             OsVersion::current().build
         ));
     }
@@ -101,10 +102,11 @@ mod version_tests {
     use super::*;
     #[test]
     fn checks_build_not_service_pack() {
-        assert!(!supports_xaml(OsVersion::new(10, 0, 0, 17763)));
-        assert!(supports_xaml(OsVersion::new(10, 0, 0, 18362)));
-        assert!(supports_xaml(OsVersion::new(10, 0, 0, 19044)));
-        assert!(supports_xaml(OsVersion::new(10, 0, 0, 22621)));
+        for build in [17763, 18362, 19044, 19045, 21999] {
+            assert!(!supports_eleven(OsVersion::new(10, 0, 0, build)));
+        }
+        assert!(supports_eleven(OsVersion::new(10, 0, 0, 22000)));
+        assert!(supports_eleven(OsVersion::new(10, 0, 0, 22621)));
     }
 }
 
