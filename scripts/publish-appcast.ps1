@@ -11,6 +11,19 @@ $ErrorActionPreference = 'Stop'
 if ($Tag -cnotmatch '^v(\d+\.\d+\.\d+)$') { throw 'Tag must be vMAJOR.MINOR.PATCH.' }
 $version = $Matches[1]
 $repository = 'determ1ne/weasel-rs'
+$publicKey = if ([string]::IsNullOrWhiteSpace($env:WINSPARKLE_PUBLIC_KEY)) {
+    'GAmmGQQoLRtAPyTj3s2gtK9NfVnlcqPHaGJbDF3Zc9E='
+} else {
+    $env:WINSPARKLE_PUBLIC_KEY
+}
+$feedUrl = if ([string]::IsNullOrWhiteSpace($env:WINSPARKLE_APPCAST_URL)) {
+    'https://rimers.sigsegv.top/appcast.xml'
+} else {
+    $env:WINSPARKLE_APPCAST_URL
+}
+if ($feedUrl -notmatch '^https://[^/]+/appcast\.xml$') {
+    throw 'WINSPARKLE_APPCAST_URL must be an HTTPS URL ending in /appcast.xml.'
+}
 $headers = @{ 'User-Agent' = 'weasel-rs-appcast-publisher'; 'Accept' = 'application/vnd.github+json' }
 $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repository/releases/tags/$Tag" -Headers $headers
 if ($release.draft -or $release.prerelease -or -not $release.published_at) {
@@ -28,11 +41,15 @@ if ($installer.Count -ne 1 -or $signatureAsset.Count -ne 1) {
 if ($installer[0].size -le 0 -or $installer[0].browser_download_url -notmatch '^https://') {
     throw 'Mini installer asset metadata is invalid.'
 }
-$signature = (Invoke-WebRequest -Uri $signatureAsset[0].browser_download_url -Headers $headers).Content.Trim()
+$signatureContent = (Invoke-WebRequest -Uri $signatureAsset[0].browser_download_url -Headers $headers).Content
+$signature = if ($signatureContent -is [byte[]]) {
+    [Text.Encoding]::UTF8.GetString($signatureContent).Trim()
+} else {
+    ([string]$signatureContent).Trim()
+}
 try { $signatureBytes = [Convert]::FromBase64String($signature) }
 catch { throw 'Release signature is not base64.' }
 if ($signatureBytes.Length -ne 64) { throw 'Release signature is not Ed25519 (64 bytes).' }
-if (-not $env:WINSPARKLE_PUBLIC_KEY) { throw 'Set WINSPARKLE_PUBLIC_KEY to the public key embedded in the broker.' }
 
 $root = Split-Path -Parent $PSScriptRoot
 $tool = Join-Path $root 'artifacts\winsparkle\winsparkle-tool.exe'
@@ -45,16 +62,12 @@ try {
     if ((Get-Item -LiteralPath $temporaryInstaller).Length -ne $installer[0].size) {
         throw 'Downloaded Mini installer length differs from release metadata.'
     }
-    & $tool verify --public-key $env:WINSPARKLE_PUBLIC_KEY --signature $signature $temporaryInstaller
+    & $tool verify --public-key $publicKey --signature $signature $temporaryInstaller
     if ($LASTEXITCODE -ne 0) { throw 'Published Mini installer does not match its WinSparkle signature.' }
 } finally {
     if (Test-Path -LiteralPath $temporaryInstaller) { Remove-Item -LiteralPath $temporaryInstaller -Force }
 }
 
-$feedUrl = $env:WINSPARKLE_APPCAST_URL
-if (-not $feedUrl -or $feedUrl -notmatch '^https://[^/]+/appcast\.xml$') {
-    throw 'Set WINSPARKLE_APPCAST_URL to the HTTPS Pages URL ending in /appcast.xml.'
-}
 $outputDirectory = Join-Path $root 'artifacts\appcast'
 $null = New-Item -ItemType Directory -Path $outputDirectory -Force
 $otherFiles = @(Get-ChildItem -LiteralPath $outputDirectory -Force | Where-Object { $_.Name -cne 'appcast.xml' })
@@ -77,7 +90,9 @@ try {
     $writer.WriteStartElement('item')
     $writer.WriteElementString('title', "小狼毫RS $version")
     $writer.WriteElementString('sparkle', 'version', $namespace, $version)
-    $writer.WriteElementString('sparkle', 'minimumSystemVersion', $namespace, '10.0.17763')
+    # Temporary bridge: older brokers without a Windows 10 supportedOS manifest
+    # are reported as Windows 8 by VerifyVersionInfoW and would miss this update.
+    # $writer.WriteElementString('sparkle', 'minimumSystemVersion', $namespace, '10.0.17763')
     $writer.WriteElementString('sparkle', 'releaseNotesLink', $namespace, $release.html_url)
     $date = ([datetimeoffset]$release.published_at).ToUniversalTime().ToString(
         "ddd, dd MMM yyyy HH:mm:ss 'GMT'", [Globalization.CultureInfo]::InvariantCulture)
@@ -100,9 +115,6 @@ if ($DryRun) {
     return
 }
 if (-not $ProjectName) { throw 'Set WINSPARKLE_PAGES_PROJECT or pass -ProjectName.' }
-if (-not $env:CLOUDFLARE_ACCOUNT_ID -or -not $env:CLOUDFLARE_API_TOKEN) {
-    throw 'Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN for Pages deployment.'
-}
 if (-not (Get-Command wrangler -CommandType Application -ErrorAction SilentlyContinue)) {
     throw 'Install Wrangler and add it to PATH before deploying.'
 }
