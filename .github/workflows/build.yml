@@ -20,6 +20,8 @@ jobs:
         shell: pwsh
     env:
       CARGO_TERM_COLOR: always
+      WINSPARKLE_APPCAST_URL: ${{ vars.WINSPARKLE_APPCAST_URL }}
+      WINSPARKLE_PUBLIC_KEY: ${{ vars.WINSPARKLE_PUBLIC_KEY }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -49,6 +51,7 @@ jobs:
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
+    environment: release-signing
     runs-on: windows-2022
     permissions:
       contents: write
@@ -56,11 +59,31 @@ jobs:
       group: release-${{ github.ref }}
       cancel-in-progress: false
     steps:
+      - name: Check out signing script
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
       - name: Download installer and checksum
         uses: actions/download-artifact@v7
         with:
           name: Weasel-RS-${{ needs.build.outputs.version }}-x64
           path: release-assets
+
+      - name: Prepare WinSparkle signer
+        shell: pwsh
+        run: ./scripts/download_winsparkle.ps1
+
+      - name: Sign Mini installer
+        shell: pwsh
+        env:
+          WINSPARKLE_PRIVATE_KEY: ${{ secrets.WINSPARKLE_PRIVATE_KEY }}
+          WINSPARKLE_PUBLIC_KEY: ${{ vars.WINSPARKLE_PUBLIC_KEY || 'GAmmGQQoLRtAPyTj3s2gtK9NfVnlcqPHaGJbDF3Zc9E=' }}
+          BUILD_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -cne "v$env:BUILD_VERSION") { throw 'Release tag and Cargo version differ.' }
+          ./scripts/sign-update.ps1 -Installer "release-assets/Weasel-RS-$env:BUILD_VERSION-x64-mini-setup.exe" -PublicKey $env:WINSPARKLE_PUBLIC_KEY
 
       - name: Attach installer to release
         shell: pwsh
@@ -73,7 +96,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $installer = "release-assets/Weasel-RS-$env:BUILD_VERSION-x64-setup.exe"
           $mini = "release-assets/Weasel-RS-$env:BUILD_VERSION-x64-mini-setup.exe"
-          $assets = @($installer, "$installer.sha256", $mini, "$mini.sha256")
+          $assets = @($installer, "$installer.sha256", $mini, "$mini.sha256", "$mini.edSignature")
           foreach ($file in $assets) {
             if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing release asset: $file" }
           }

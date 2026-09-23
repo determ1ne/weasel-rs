@@ -6294,6 +6294,7 @@ name = "weasel-broker"
 version = "0.1.6"
 dependencies = [
  "embed-resource",
+ "libloading",
  "serde_json",
  "tokio",
  "weasel-common",

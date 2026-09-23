@@ -3,6 +3,9 @@
 本清单根据 Cargo.lock 与 Windows x64 的 cargo metadata 解析结果补充，
 包含直接、传递、构建及开发依赖；列入清单不代表每项均链接到发行二进制。
 保留已有其他目标依赖及非 Cargo 组件声明。许可证表达式来自包元数据。
+WinSparkle 0.9.4（Copyright 2009–2026 Vaclav Slavik）采用 MIT 风格许可；
+安装包随附其 COPYING 全文，安装后文件名为 WinSparkle-LICENSE.txt。
+WinSparkle 所含 Expat 的许可全文见 WinSparkle-Expat-LICENSE.txt。
 
 设置应用采用 Slint 的 GPL-3.0-only 许可选项；Slint 包元数据另列商业及
 免版税许可选项，本项目未选择这些选项。设置应用组合产物的说明见

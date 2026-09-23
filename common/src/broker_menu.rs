@@ -11,6 +11,7 @@ pub const RESTART: u32 = 1008;
 pub const ABOUT: u32 = 1009;
 pub const DIAGNOSTICS: u32 = 1010;
 pub const SETTINGS: u32 = 1011;
+pub const CHECK_UPDATES: u32 = 1012;
 pub const ITEMS: &[(u32, &str)] = &[
     (SETTINGS, "设置 (&S)"),
     (USER_DIRECTORY, "用户文件夹 (&U)"),
@@ -20,6 +21,7 @@ pub const ITEMS: &[(u32, &str)] = &[
     (HELP, "帮助 (&H)"),
     (FORUM, "论坛 (&F)"),
     (ABOUT, "关于小狼毫RS (&A)"),
+    (CHECK_UPDATES, "检查更新 (&C)"),
     (0, ""),
     (DEPLOY, "重新部署Rime (&D)"),
     (RESTART, "重启 (&R)"),

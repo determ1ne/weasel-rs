@@ -23,6 +23,9 @@ try {
     $requiredFiles = @(
         'weasel.json',
         'target\x86_64-pc-windows-msvc\release\weasel-broker.exe',
+        'artifacts\winsparkle\WinSparkle.dll',
+        'artifacts\winsparkle\WinSparkle-LICENSE.txt',
+        'artifacts\winsparkle\WinSparkle-Expat-LICENSE.txt',
         'target\x86_64-pc-windows-msvc\release\weasel-server.exe',
         'target\x86_64-pc-windows-msvc\release\weasel-renderer.exe',
         'target\x86_64-pc-windows-msvc\release\uiaccess\weasel-renderer.exe',

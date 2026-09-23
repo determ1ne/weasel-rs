@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
     path::PathBuf,
     process::Stdio,
@@ -31,9 +32,16 @@ static OPERATION_THREAD: Mutex<Option<thread::JoinHandle<()>>> = Mutex::new(None
 static STOPPING: AtomicBool = AtomicBool::new(false);
 static LOGGER: OnceLock<ComponentLogger> = OnceLock::new();
 static TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+thread_local! {
+    static UPDATER: RefCell<Option<crate::updater::Updater>> = const { RefCell::new(None) };
+}
 
 static BROKER_STATE: OnceLock<Arc<Mutex<BrokerState>>> = OnceLock::new();
 static MONITOR_WAKE: OnceLock<OwnedHandle> = OnceLock::new();
+
+pub(crate) fn can_shutdown_for_update() -> bool {
+    !DEPLOYING.load(Ordering::Acquire) && !STOPPING.load(Ordering::Acquire)
+}
 
 fn wake_monitor() {
     if let Some(event) = MONITOR_WAKE.get() {
@@ -141,7 +149,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err(error);
         }
     };
+    match crate::updater::Updater::start(&directory, tray.window) {
+        Ok(updater) => UPDATER.with(|cell| *cell.borrow_mut() = Some(updater)),
+        Err(error) => {
+            if let Some(logger) = LOGGER.get() {
+                logger.record(
+                    weasel_common::logging::Level::WARN,
+                    "weasel-broker",
+                    format_args!("update checks unavailable: {error}"),
+                );
+            }
+        }
+    }
     message_loop();
+    UPDATER.with(|cell| *cell.borrow_mut() = None);
 
     stop_monitor.store(true, Ordering::Release);
     wake_monitor();
@@ -998,6 +1019,20 @@ fn handle_command(window: HWND, command: u32) {
         }
         broker_menu::DEPLOY => begin_deploy(window, Operation::Deploy),
         broker_menu::RESTART => begin_deploy(window, Operation::Restart),
+        broker_menu::CHECK_UPDATES => UPDATER.with(|cell| {
+            if let Some(updater) = cell.borrow().as_ref() {
+                updater.check_with_ui();
+            } else {
+                unsafe {
+                    let _ = MessageBoxW(
+                        Some(window),
+                        &HSTRING::from("更新功能尚未配置，或 WinSparkle.dll 不可用。"),
+                        &HSTRING::from("小狼毫RS"),
+                        (MB_OK | MB_ICONERROR | MB_SETFOREGROUND) as u32,
+                    );
+                }
+            }
+        }),
         broker_menu::EXIT => {
             STOPPING.store(true, Ordering::Release);
             unsafe { PostQuitMessage(0) };

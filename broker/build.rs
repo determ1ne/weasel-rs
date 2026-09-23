@@ -3,6 +3,8 @@ use std::path::PathBuf;
 mod icon;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=WINSPARKLE_APPCAST_URL");
+    println!("cargo:rerun-if-env-changed=WINSPARKLE_PUBLIC_KEY");
     icon::embed();
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is not set"));
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("broker.manifest");

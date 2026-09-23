@@ -31,9 +31,17 @@ $targetDirectory = Join-Path $projectRoot 'target'
 $buildTargets = @('x86_64-pc-windows-msvc', 'i686-pc-windows-msvc')
 $previousCargoIncremental = [Environment]::GetEnvironmentVariable('CARGO_INCREMENTAL', 'Process')
 $previousUiAccess = [Environment]::GetEnvironmentVariable('WEASEL_RENDERER_UIACCESS', 'Process')
+$previousAppcastUrl = [Environment]::GetEnvironmentVariable('WINSPARKLE_APPCAST_URL', 'Process')
+$previousPublicKey = [Environment]::GetEnvironmentVariable('WINSPARKLE_PUBLIC_KEY', 'Process')
 
 Push-Location -LiteralPath $projectRoot
 try {
+    if ([string]::IsNullOrWhiteSpace($previousAppcastUrl)) {
+        $env:WINSPARKLE_APPCAST_URL = 'https://rimers.sigsegv.top/appcast.xml'
+    }
+    if ([string]::IsNullOrWhiteSpace($previousPublicKey)) {
+        $env:WINSPARKLE_PUBLIC_KEY = 'GAmmGQQoLRtAPyTj3s2gtK9NfVnlcqPHaGJbDF3Zc9E='
+    }
     $env:WEASEL_RENDERER_UIACCESS = '0'
     if ($Dev) {
         # Cargo already caches unchanged crates in target. Release builds normally
@@ -177,6 +185,8 @@ try {
     Write-Error -ErrorRecord $_ -ErrorAction Continue
     exit 1
 } finally {
+    [Environment]::SetEnvironmentVariable('WINSPARKLE_APPCAST_URL', $previousAppcastUrl, 'Process')
+    [Environment]::SetEnvironmentVariable('WINSPARKLE_PUBLIC_KEY', $previousPublicKey, 'Process')
     [Environment]::SetEnvironmentVariable('WEASEL_RENDERER_UIACCESS', $previousUiAccess, 'Process')
     if ($Dev) {
         [Environment]::SetEnvironmentVariable('CARGO_INCREMENTAL', $previousCargoIncremental, 'Process')

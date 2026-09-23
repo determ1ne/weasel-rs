@@ -23,7 +23,7 @@ try {
     # & cargo test --workspace --locked --no-fail-fast
     # if ($LASTEXITCODE -ne 0) { Write-Warning 'Workspace tests failed.' }
 
-    foreach ($script in @('download_librime.ps1', 'download_vcredist.ps1', 'build-release.ps1', 'build-installer.ps1')) {
+    foreach ($script in @('download_librime.ps1', 'download_vcredist.ps1', 'download_winsparkle.ps1', 'build-release.ps1', 'build-installer.ps1')) {
         & pwsh -NoProfile -File (Join-Path $PSScriptRoot $script)
         if ($LASTEXITCODE -ne 0) { throw "$script failed (exit code $LASTEXITCODE)." }
     }

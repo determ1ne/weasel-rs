@@ -379,6 +379,9 @@ Section "Weasel-RS" SEC_MAIN
   SetOutPath "$INSTDIR"
   ClearErrors
   !insertmacro ManagedFile "${X64_RELEASE}\weasel-broker.exe" "weasel-broker.exe"
+  !insertmacro ManagedFile "${PROJECT_ROOT}\artifacts\winsparkle\WinSparkle.dll" "WinSparkle.dll"
+  !insertmacro ManagedFile "${PROJECT_ROOT}\artifacts\winsparkle\WinSparkle-LICENSE.txt" "WinSparkle-LICENSE.txt"
+  !insertmacro ManagedFile "${PROJECT_ROOT}\artifacts\winsparkle\WinSparkle-Expat-LICENSE.txt" "WinSparkle-Expat-LICENSE.txt"
   !insertmacro ManagedFile "${X64_RELEASE}\weasel-server.exe" "weasel-server.exe"
   !insertmacro ManagedFile "${X64_RELEASE}\weasel-renderer.exe" "weasel-renderer.exe"
   Call PrepareUiAccessRenderer

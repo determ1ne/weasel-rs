@@ -12,6 +12,8 @@ mod settings_rpc;
 mod shortcut;
 mod shutdown;
 mod toast;
+#[cfg(windows)]
+mod updater;
 
 #[cfg(windows)]
 mod bindings;
