@@ -67,6 +67,7 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "Weasel-RS contributors"
 
 Var InstallerMutex
 Var IsUpgrade
+Var ForceStopUnregisteredInstall
 Var InstalledVersion
 Var OldDll
 Var BackupDll
@@ -117,15 +118,6 @@ FunctionEnd
   SetShellVarContext all
 !macroend
 
-!macro CheckBroker
-  FindWindow $0 "weasel-rs-broker"
-  ${If} $0 != 0
-    MessageBox MB_OK|MB_ICONSTOP "请先从托盘退出小狼毫RS，再重新运行安装或卸载程序。" /SD IDOK
-    SetErrorLevel 1
-    Quit
-  ${EndIf}
-!macroend
-
 Function .onInit
   !insertmacro CheckPlatform
   !insertmacro LockInstaller
@@ -136,6 +128,7 @@ Function .onInit
   StrCpy $PreviousTip32 ""
   StrCpy $PreviousTip64 ""
   StrCpy $IsUpgrade 0
+  StrCpy $ForceStopUnregisteredInstall 0
   StrCpy $INSTDIR "$PROGRAMFILES64\Weasel-RS"
   ; makensis emits an x86 installer, while product metadata is intentionally
   ; machine-wide in the 64-bit registry view.
@@ -197,22 +190,23 @@ Function .onInit
     SetErrorLevel 1
     Quit
   registration_checked:
-  ; A fixed, new directory prevents overwriting user files.
+  ; Without an installation record, an occupied directory needs explicit
+  ; consent before any existing files can be replaced.
   StrCmp $IsUpgrade 1 fresh_directory
   IfFileExists "$INSTDIR\*.*" 0 fresh_directory
-    MessageBox MB_OK|MB_ICONSTOP "安装目录已存在，请检查并手动处理旧文件后重试。" /SD IDOK
-    SetErrorLevel 1
-    Quit
+    StrCpy $ForceStopUnregisteredInstall 1
   fresh_directory:
 FunctionEnd
 
 ; Called only during the installation phase, never while browsing its pages.
 Function StopApplicationProcesses
+  StrCpy $ScanPassLimit 4
   StrCpy $ScanMode 0
   Call ScanApplicationProcesses
   StrCmp $ScanResult 0 processes_stopped
   StrCmp $ScanResult 20 settings_open
   StrCmp $ScanResult 10 0 process_error
+  StrCmp $ForceStopUnregisteredInstall 1 force_stop
   ; Use the bundled new broker, because an old installed broker may not know
   ; --shutdown. This command does not start a tray or managed children.
   InitPluginsDir
@@ -232,6 +226,7 @@ Function StopApplicationProcesses
   SetErrorLevel 1
   Abort
   force_stop:
+  !insertmacro InstallLog "INFO: 正在强制结束未退出的小狼毫RS服务进程"
   StrCpy $ScanMode 1
   Call ScanApplicationProcesses
   StrCmp $ScanResult 20 settings_open
@@ -684,7 +679,6 @@ FunctionEnd
 Function un.onInit
   !insertmacro CheckPlatform
   !insertmacro LockInstaller
-  !insertmacro CheckBroker
   SetRegView 64
   ReadRegStr $0 HKLM "${PRODUCT_KEY}" "InstallDir"
   ${If} $0 != $INSTDIR
@@ -701,8 +695,43 @@ Function un.onInit
   !insertmacro ValidateWasmPayloadRemoval
 FunctionEnd
 
+; Run only after the user confirms uninstallation. Do not block the confirm
+; page just because the broker is still running.
+Function un.StopApplicationProcesses
+  ; The settings editor may contain unsaved changes. Leave it alone; its files
+  ; can be removed on reboot if necessary.
+  StrCpy $ScanPassLimit 3
+  StrCpy $ScanMode 0
+  Call un.ScanApplicationProcesses
+  StrCmp $ScanResult 0 uninstall_processes_stopped
+
+  ; The installed broker understands --shutdown and asks its children to exit.
+  ; A missing or damaged broker falls through to the path-checked force stop.
+  IfFileExists "$INSTDIR\weasel-broker.exe" 0 uninstall_force_stop
+  DetailPrint "正在请求算法服务正常退出……"
+  nsExec::ExecToLog /TIMEOUT=40000 '"$INSTDIR\weasel-broker.exe" --shutdown "$INSTDIR"'
+  Pop $0
+  DetailPrint "退出命令返回：$0"
+  StrCpy $ScanMode 0
+  Call un.ScanApplicationProcesses
+  StrCmp $ScanResult 0 uninstall_processes_stopped
+
+  uninstall_force_stop:
+    DetailPrint "正在结束未退出的小狼毫RS服务进程……"
+    StrCpy $ScanMode 1
+    Call un.ScanApplicationProcesses
+    StrCpy $ScanMode 0
+    Call un.ScanApplicationProcesses
+    StrCmp $ScanResult 0 uninstall_processes_stopped
+    ; Continue uninstalling and let /REBOOTOK retire files still in use.
+    DetailPrint "警告：部分服务进程未能结束；剩余文件将在重启后移除。"
+    SetRebootFlag true
+  uninstall_processes_stopped:
+FunctionEnd
+
 Section "Uninstall"
   SetOutPath "$TEMP"
+  Call un.StopApplicationProcesses
   ClearErrors
   ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\x86\weasel_tip.dll"' $0
   IfErrors uninstall_failed

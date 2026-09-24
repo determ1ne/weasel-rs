@@ -9,11 +9,13 @@ Var ProcessHandle
 Var ProcessName
 Var ProcessPass
 Var ProcessId
+Var ScanPassLimit
 
 ; ScanResult: 0 = clear, 10 = service running, 20 = settings open, 1 = error.
 ; This installer is x86-unicode, so PROCESSENTRY32W is 556 bytes even on x64.
 ; Never terminate by filename alone: query and terminate the same open handle.
-Function ScanApplicationProcesses
+!macro DefineScanApplicationProcesses PREFIX
+Function ${PREFIX}ScanApplicationProcesses
   StrCpy $ScanResult 0
   StrCpy $ProcessPass 0
   scan_pass:
@@ -91,7 +93,7 @@ Function ScanApplicationProcesses
     System::Free $ProcessEntry
     System::Call 'kernel32::CloseHandle(p $ProcessSnapshot)'
     IntOp $ProcessPass $ProcessPass + 1
-    IntCmp $ProcessPass 4 scan_done scan_pass scan_done
+    IntCmp $ProcessPass $ScanPassLimit scan_done scan_pass scan_done
   scan_entry_error:
     ${If} $ProcessHandle != 0
       System::Call 'kernel32::CloseHandle(p $ProcessHandle)'
@@ -103,4 +105,8 @@ Function ScanApplicationProcesses
     StrCpy $ScanResult 1
   scan_done:
 FunctionEnd
+!macroend
+
+!insertmacro DefineScanApplicationProcesses ""
+!insertmacro DefineScanApplicationProcesses "un."
 !endif
