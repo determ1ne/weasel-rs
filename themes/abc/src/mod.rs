@@ -629,6 +629,7 @@ impl Window {
             self.hide();
             return Ok(());
         }
+        let was_hidden = self.app.borrow().content.is_none();
         {
             let mut app = self.app.borrow_mut();
             app.content = Some(Content {
@@ -638,6 +639,13 @@ impl Window {
             });
         }
         self.position().map_err(|e| e.to_string())?;
+        if was_hidden {
+            // A hidden HWND render target retains its last presented pixels.
+            // Replace them before the window can expose the previous composition.
+            if let Err(error) = self.paint() {
+                self.graphics_error(error);
+            }
+        }
         unsafe {
             let _ = ShowWindow(
                 self.hwnd.get(),

@@ -60,6 +60,8 @@ message LayoutUpdate {
   uint64 session_id = 1;
   RenderRect anchor = 2;
   ContextToken token = 3;
+  // The host composition revision whose edit has completed before this probe.
+  optional uint64 applied_revision = 4;
 }
 
 message OpenInput { ContextToken token = 1; }

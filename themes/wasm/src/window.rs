@@ -158,6 +158,7 @@ pub struct Window {
     preview: bool,
     dark: Cell<bool>,
     wake_deadline: Cell<Option<f64>>,
+    shown: Cell<bool>,
 }
 
 impl Window {
@@ -191,6 +192,7 @@ impl Window {
             preview,
             dark: Cell::new(appearance::is_dark()),
             wake_deadline: Cell::new(None),
+            shown: Cell::new(false),
         }
     }
 
@@ -526,6 +528,12 @@ impl Window {
             if let Err(e) = self.app.borrow().canvas.borrow_mut().clear_layers() {
                 self.fail(e);
             }
+        } else if !self.shown.get() {
+            // The D2D surface survives SW_HIDE. Present the guest's new frame
+            // before ShowWindow can expose pixels from the previous composition.
+            if let Err(error) = self.paint() {
+                self.graphics_error(error);
+            }
         }
         unsafe {
             let _ = ShowWindow(
@@ -541,6 +549,7 @@ impl Window {
                 },
             );
         }
+        self.shown.set(visible);
     }
 
     /// 渲染入口：同内容快照只重定位；新快照交给 wasm 重排。
@@ -663,6 +672,7 @@ impl Window {
             let _ = KillTimer(Some(self.hwnd.get()), FRAME_TIMER);
             let _ = ShowWindow(self.hwnd.get(), SW_HIDE);
         }
+        self.shown.set(false);
     }
 
     /// 外观变化：通知主题（wasm 内部重排），随后回放最新命令。

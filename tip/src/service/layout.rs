@@ -4,6 +4,35 @@ use crate::bindings::{
 };
 use weasel_common::message::ContextToken;
 
+/// Returns the narrow range used to anchor candidate UI.
+///
+/// Querying the entire composition makes the result depend on whether the
+/// host has finished laying out every newly inserted glyph. Query
+/// one target character so delayed layout of the remaining text cannot move
+/// or suppress the candidate anchor.
+///
+/// An empty composition (external preedit) remains collapsed at the caret.
+fn composition_target_range(composition: &ITfComposition, ec: TfEditCookie) -> Result<ITfRange> {
+    let composition_range = unsafe { composition.GetRange()? };
+    let empty = unsafe { composition_range.IsEmpty(ec)? }.as_bool();
+    let target_range = unsafe { composition_range.Clone()? };
+    let hr = unsafe { target_range.Collapse(ec, TF_ANCHOR_START) };
+    if hr.is_err() {
+        return Err(Error::from_hresult(hr));
+    }
+
+    if empty {
+        return Ok(target_range);
+    }
+
+    let mut moved = 0;
+    let hr = unsafe { target_range.ShiftEnd(ec, 1, &mut moved, ptr::null()) };
+    if hr.is_err() {
+        return Err(Error::from_hresult(hr));
+    }
+    Ok(target_range)
+}
+
 /// One pending TSF read, refreshed by notifications received before it runs.
 #[derive(Default)]
 pub(super) struct LayoutSchedule {
@@ -109,9 +138,10 @@ impl ITfEditSession_Impl for LayoutProbe_Impl {
             else {
                 return Ok(());
             };
+            let applied_revision = self.state.applied_layout_revision.load(Ordering::Acquire);
             // Query current geometry, not a range captured before queued edits.
             let view = unsafe { self.state.context.GetActiveView()? };
-            let range = unsafe { composition.GetRange()? };
+            let range = composition_target_range(&composition, ec)?;
             let mut rect = RECT::default();
             let mut clipped = BOOL(0);
             if unsafe { view.GetTextExt(ec, &range, &mut rect, &mut clipped) }.is_err() {
@@ -120,6 +150,7 @@ impl ITfEditSession_Impl for LayoutProbe_Impl {
             }
             let rect = physical_text_rect(&view, rect);
             if self.generation.load(Ordering::Acquire) != self.requested_generation
+                || self.state.applied_layout_revision.load(Ordering::Acquire) != applied_revision
                 || !self.state.matches(Some(&token))?
                 || self
                     .state
@@ -138,6 +169,9 @@ impl ITfEditSession_Impl for LayoutProbe_Impl {
                 .send_layout_update(LayoutUpdate {
                     session_id: self.state.id,
                     token: Some(token),
+                    // Some(0) means this TIP has not applied the host edit yet;
+                    // None is reserved for older TIPs without this field.
+                    applied_revision: Some(applied_revision),
                     anchor: Some(RenderRect {
                         left: rect.left,
                         top: rect.top,

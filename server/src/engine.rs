@@ -43,6 +43,8 @@ struct ClientSession {
     revision: u64,
     route: session_route::SessionRoute,
     anchor: RenderRect,
+    waiting_for_layout: Option<u64>,
+    latest_layout_revision: Option<u64>,
     last_response: KeyEventResponse,
 }
 
@@ -70,9 +72,69 @@ fn host_response(mut response: KeyEventResponse) -> KeyEventResponse {
     response
 }
 
+fn reset_anchor_for_new_composition(
+    previous: &KeyEventResponse,
+    next: &KeyEventResponse,
+    anchor: &mut RenderRect,
+) -> bool {
+    if !previous.composing && next.composing && next.state_updated {
+        *anchor = RenderRect::default();
+        return true;
+    }
+    false
+}
+
+fn layout_matches_pending(
+    applied_revision: Option<u64>,
+    waiting_for_layout: Option<u64>,
+    latest_layout_revision: Option<u64>,
+) -> bool {
+    // Older TIPs omit the revision and retain the token-only behavior. A new
+    // TIP must not let an in-flight probe from a previous edit unlock this one.
+    applied_revision.is_none_or(|revision| {
+        waiting_for_layout.is_none_or(|required| revision >= required)
+            && latest_layout_revision.is_none_or(|accepted| revision >= accepted)
+    })
+}
+
 #[cfg(test)]
 mod preedit_tests {
     use super::*;
+
+    #[test]
+    fn new_composition_waits_for_its_own_layout() {
+        let old = KeyEventResponse::default();
+        let next = KeyEventResponse {
+            composing: true,
+            state_updated: true,
+            external_preedit: true,
+            composition: "nihao".into(),
+            ..Default::default()
+        };
+        let mut anchor = RenderRect {
+            left: 10,
+            right: 11,
+            top: 20,
+            bottom: 40,
+            valid: true,
+        };
+        assert!(reset_anchor_for_new_composition(&old, &next, &mut anchor));
+        assert!(!anchor.valid);
+        assert!(!render_snapshot(1, 1, &next, &anchor).visible);
+        anchor.valid = true;
+        assert!(!reset_anchor_for_new_composition(&next, &next, &mut anchor));
+        assert!(anchor.valid);
+        assert!(render_snapshot(1, 1, &next, &anchor).visible);
+    }
+
+    #[test]
+    fn layout_revision_rejects_old_probes_but_accepts_legacy_tip() {
+        assert!(!layout_matches_pending(Some(0), Some(5), Some(3)));
+        assert!(!layout_matches_pending(Some(4), Some(5), Some(3)));
+        assert!(!layout_matches_pending(Some(2), None, Some(3)));
+        assert!(layout_matches_pending(Some(5), Some(5), Some(3)));
+        assert!(layout_matches_pending(None, Some(5), Some(3)));
+    }
 
     #[test]
     fn external_preedit_keeps_host_composition_and_commit_but_routes_text_to_renderer() {
@@ -348,6 +410,8 @@ impl Engine {
                             focused: false,
                         },
                         anchor: Default::default(),
+                        waiting_for_layout: None,
+                        latest_layout_revision: None,
                         last_response: Default::default(),
                     },
                 );
@@ -430,11 +494,26 @@ impl Engine {
                         response.external_preedit = response.composing
                             && self.renderer.supports_preedit()
                             && !client.inline_preedit;
+                        let previous_visible = client.anchor.valid
+                            && (!client.last_response.candidates.is_empty()
+                                || (client.last_response.external_preedit
+                                    && client.last_response.composing));
+                        let previous_ascii = client.last_response.ascii_mode;
+                        let anchor_reset = reset_anchor_for_new_composition(
+                            &client.last_response,
+                            &response,
+                            &mut client.anchor,
+                        );
                         if response.state_updated {
                             client.revision = client.revision.wrapping_add(1);
                         }
                         response.token = client.route.token.clone();
                         response.revision = client.revision;
+                        if anchor_reset {
+                            client.waiting_for_layout = Some(response.revision);
+                        } else if response.state_updated && !response.composing {
+                            client.waiting_for_layout = None;
+                        }
                         if response.state_updated {
                             client.last_response = response.clone();
                         }
@@ -442,14 +521,31 @@ impl Engine {
                             client.last_response.ascii_mode = response.ascii_mode;
                         }
                         client.last_response.token = client.route.token.clone();
-                        let snapshot = (response.state_updated || focus_changed).then(|| {
-                            render_snapshot(
-                                client_id,
-                                client.revision,
-                                &client.last_response,
-                                &client.anchor,
-                            )
-                        });
+                        let snapshot = if client.waiting_for_layout.is_some() {
+                            // The host edit has not supplied geometry for this
+                            // composition. Do not send an intermediate frame
+                            // containing new candidates but no matching anchor.
+                            (previous_visible
+                                || focus_changed
+                                || previous_ascii != client.last_response.ascii_mode)
+                                .then(|| RenderSnapshot {
+                                    session_id: client_id,
+                                    revision: client.revision,
+                                    token: client.route.token.clone(),
+                                    active: true,
+                                    ascii_mode: client.last_response.ascii_mode,
+                                    ..Default::default()
+                                })
+                        } else {
+                            (response.state_updated || focus_changed).then(|| {
+                                render_snapshot(
+                                    client_id,
+                                    client.revision,
+                                    &client.last_response,
+                                    &client.anchor,
+                                )
+                            })
+                        };
                         (response, snapshot)
                     }
                 };
@@ -498,6 +594,8 @@ impl Engine {
                             client.session.context_action(ContextAction::Cancel);
                             client.last_response = Default::default();
                             client.anchor = Default::default();
+                            client.waiting_for_layout = None;
+                            client.latest_layout_revision = None;
                         }
                         let was_active = self.active_client == Some(client_id);
                         match action {
@@ -547,6 +645,16 @@ impl Engine {
                         client.revision = client.revision.wrapping_add(1);
                         response.token = client.route.token.clone();
                         response.revision = client.revision;
+                        if matches!(
+                            action,
+                            ContextAction::Blur
+                                | ContextAction::Cancel
+                                | ContextAction::Submit
+                                | ContextAction::HostTerminated
+                        ) || (response.state_updated && !response.composing)
+                        {
+                            client.waiting_for_layout = None;
+                        }
                         if response.state_updated {
                             client.last_response = response.clone();
                         }
@@ -609,6 +717,9 @@ impl Engine {
         client.revision = client.revision.wrapping_add(1);
         response.token = client.route.token.clone();
         response.revision = client.revision;
+        if !response.composing {
+            client.waiting_for_layout = None;
+        }
         client.last_response = response.clone();
         let snapshot =
             render_snapshot(event.session_id, client.revision, &response, &client.anchor);
@@ -677,18 +788,33 @@ impl Processor<Work> for Engine {
                 .connection
                 .take_layout_for(client.route.token.as_ref())
         {
-            let anchor = update.anchor.unwrap_or_default();
-            if client.anchor != anchor {
-                client.anchor = anchor;
-                if !client.last_response.candidates.is_empty()
-                    || client.last_response.external_preedit
-                {
-                    self.renderer.publish(render_snapshot(
-                        client_id,
-                        client.revision,
-                        &client.last_response,
-                        &client.anchor,
-                    ));
+            let matching = layout_matches_pending(
+                update.applied_revision,
+                client.waiting_for_layout,
+                client.latest_layout_revision,
+            );
+            if matching {
+                if let Some(revision) = update.applied_revision {
+                    client.latest_layout_revision = Some(revision);
+                }
+                let anchor = update.anchor.unwrap_or_default();
+                let became_ready = client.waiting_for_layout.is_some() && anchor.valid;
+                if became_ready {
+                    client.waiting_for_layout = None;
+                }
+                if client.anchor != anchor || became_ready {
+                    client.anchor = anchor;
+                    if client.waiting_for_layout.is_none()
+                        && (!client.last_response.candidates.is_empty()
+                            || client.last_response.external_preedit)
+                    {
+                        self.renderer.publish(render_snapshot(
+                            client_id,
+                            client.revision,
+                            &client.last_response,
+                            &client.anchor,
+                        ));
+                    }
                 }
             }
         }

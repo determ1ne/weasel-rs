@@ -531,6 +531,7 @@ impl Window {
             self.hide();
             return Ok(());
         }
+        let was_hidden = self.app.borrow().content.is_none();
         {
             let mut app = self.app.borrow_mut();
             let mut primary_widths = Vec::with_capacity(snapshot.items.len());
@@ -560,6 +561,15 @@ impl Window {
             });
         }
         self.position().map_err(|e| e.to_string())?;
+        if was_hidden {
+            // The HWND render target retains its previous frame while hidden.
+            // Present this composition before making the window visible.
+            if let Err(error) = self.paint() {
+                self.graphics_error(error);
+                // Keep the existing recovery path; device loss may require a
+                // fresh target and the timer-driven repaint below.
+            }
+        }
         unsafe {
             let _ = ShowWindow(
                 self.hwnd.get(),

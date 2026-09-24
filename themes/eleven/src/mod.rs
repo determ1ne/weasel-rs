@@ -236,7 +236,17 @@ impl ThemeBackend for UiState {
 
     fn hide(&mut self) {
         self.last_snapshot = None;
+        self.measured_size = None;
         self.revokers.clear();
+        // XAML composition is asynchronous. Remove candidate visuals while the
+        // Island is hidden so a later ShowWindow cannot expose the last frame
+        // while the replacement tree is still being committed.
+        if let Ok(children) = self.rows.Children() {
+            let _ = children.Clear();
+        }
+        if let Ok(children) = self.quick_actions.Children() {
+            let _ = children.Clear();
+        }
         unsafe {
             let _ = ShowWindow(self.window, SW_HIDE);
         }
