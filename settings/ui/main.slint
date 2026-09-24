@@ -21,6 +21,9 @@ export component SettingsWindow inherits Window {
     in property <[SettingField]> fields;
     in property <[SettingField]> visible-fields;
     in property <bool> invalid;
+    in property <bool> update-available: false;
+    in-out property <bool> update-checked: false;
+    in property <string> update-status: "正在读取更新设置…";
     private property <string> new-app-name;
     in-out property <string> app-add-error;
     in property <[AppEntry]> apps;
@@ -30,6 +33,7 @@ export component SettingsWindow inherits Window {
     callback app-remove(string);
     callback app-edit(string, string, bool, bool);
     callback changed(int, int, string);
+    callback update-changed(bool);
     callback loaded();
     callback save(bool);
     callback request-close();
@@ -200,6 +204,43 @@ export component SettingsWindow inherits Window {
                       }
                       }
                     }
+                    }
+                }
+                VerticalBox {
+                    padding: 0px;
+                    padding-top: 20px;
+                    spacing: 8px;
+                    Text { text: "其他"; font-size: 20px; font-weight: 600; }
+                    Rectangle {
+                        vertical-stretch: 0;
+                        border-radius: 6px;
+                        background: Palette.control-background;
+                        border-width: 1px;
+                        border-color: Palette.foreground.with-alpha(0.08);
+                        HorizontalBox {
+                            padding: 16px;
+                            spacing: 12px;
+                            VerticalBox {
+                                padding: 0px;
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+                                Text { text: "自动检查更新"; font-size: 17px; font-weight: 600; }
+                                Text { text: "WinSparkle · 当前用户"; font-size: 12px; opacity: 0.65; }
+                                Text {
+                                    text: root.update-status != "" ? root.update-status : "定期检查新版本；关闭后仍可从托盘手动检查。此项不写入 weasel.custom.json，重新启动托盘中的算法服务后生效。";
+                                    font-size: 12px;
+                                    opacity: 0.75;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            Switch {
+                                width: 44px;
+                                height: 32px;
+                                enabled: root.editable && root.update-available;
+                                checked <=> root.update-checked;
+                                toggled => { root.update-changed(self.checked); }
+                            }
+                        }
                     }
                 }
             }

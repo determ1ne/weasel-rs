@@ -6365,6 +6365,7 @@ name = "weasel-settings"
 version = "0.1.7"
 dependencies = [
  "embed-resource",
+ "libloading",
  "raw-window-handle",
  "regex",
  "serde_json",

@@ -10,6 +10,7 @@ mod config;
 mod form;
 mod frame;
 mod metadata;
+mod updater;
 mod wasm_modules;
 use slint::{ComponentHandle, Model, VecModel};
 use std::{cell::RefCell, collections::HashSet, rc::Rc};
@@ -24,6 +25,8 @@ struct State {
     changed: HashSet<usize>,
     invalid: HashSet<usize>,
     module_errors: HashSet<String>,
+    auto_update_saved: Option<bool>,
+    auto_update_pending: bool,
 }
 impl State {
     fn show_apps(&self, ui: &SettingsWindow) -> Result<(), String> {
@@ -263,6 +266,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let state = state.clone();
         let weak = window.as_weak();
+        window.on_update_changed(move |checked| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let mut guard = state.borrow_mut();
+            let Some(state) = guard.as_mut() else {
+                return;
+            };
+            if let Some(saved) = state.auto_update_saved {
+                state.auto_update_pending = checked;
+                let dirty = !state.changed.is_empty() || checked != saved;
+                ui.set_dirty(dirty);
+                ui.set_status(if dirty {
+                    "有未保存修改；可仅保存或保存并应用。".into()
+                } else {
+                    "自动检查更新设置未更改。".into()
+                });
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let weak = window.as_weak();
+        let update_directory = paths.executable_directory.clone();
         window.on_save(move |apply| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -284,22 +311,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
             }
-            match state.document.save() {
-                Ok(()) => {
-                    state.changed.clear();
-                    ui.set_dirty(false);
-                    let message = if apply {
-                        match broker::request_restart() {
-                            Ok(()) => "配置已保存，已向 broker 发送重启服务请求。".to_owned(),
-                            Err(error) => format!("配置已保存，但未能请求应用：{error}"),
-                        }
-                    } else {
-                        "配置已保存，尚未请求应用。".to_owned()
-                    };
-                    ui.set_status(message.into());
+            let config_changed = !state.changed.is_empty();
+            let update_changed = state
+                .auto_update_saved
+                .is_some_and(|saved| saved != state.auto_update_pending);
+            if config_changed {
+                if let Err(error) = state.document.save() {
+                    ui.set_status(format!("保存失败：{error}").into());
+                    return;
                 }
-                Err(error) => ui.set_status(format!("保存失败：{error}").into()),
+                state.changed.clear();
             }
+            if update_changed {
+                if let Err(error) = updater::write(&update_directory, state.auto_update_pending) {
+                    ui.set_dirty(true);
+                    let prefix = if config_changed {
+                        "普通配置已保存，但"
+                    } else {
+                        ""
+                    };
+                    ui.set_status(format!("{prefix}自动检查更新设置保存失败：{error}").into());
+                    return;
+                }
+                state.auto_update_saved = Some(state.auto_update_pending);
+            }
+            ui.set_dirty(false);
+            let mut messages = Vec::new();
+            // 现有重启命令只重启子组件，不重新初始化 broker 中的 WinSparkle。
+            if apply && (config_changed || !update_changed) {
+                messages.push(match broker::request_restart() {
+                    Ok(()) => "已向 broker 发送重启服务请求。".to_owned(),
+                    Err(error) => format!("未能请求应用普通配置：{error}"),
+                });
+            } else if config_changed {
+                messages.push("普通配置已保存，尚未请求应用。".to_owned());
+            }
+            if update_changed {
+                messages.push(
+                    "自动检查更新设置已保存；退出并重新启动托盘中的算法服务后生效。".to_owned(),
+                );
+            }
+            if messages.is_empty() {
+                messages.push("没有需要保存的修改。".to_owned());
+            }
+            ui.set_status(messages.join("\n").into());
         });
     }
     window.set_status("正在读取配置描述…".into());
@@ -438,8 +493,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     let weak = window.as_weak();
-    let (tx, rx) =
-        std::sync::mpsc::sync_channel::<Result<(config::Document, catalog::Catalog), String>>(1);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<
+        Result<(config::Document, catalog::Catalog, Result<bool, String>), String>,
+    >(1);
     window.on_loaded(move || {
         let Some(ui) = weak.upgrade() else {
             return;
@@ -448,7 +504,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return;
         };
         match result {
-            Ok((document, catalog)) => {
+            Ok((document, catalog, auto_update)) => {
+                let (auto_update_saved, update_status) = match auto_update {
+                    Ok(enabled) => (Some(enabled), String::new()),
+                    Err(error) => (None, format!("更新组件不可用：{error}")),
+                };
                 let mut next = State {
                     document,
                     catalog,
@@ -457,12 +517,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     changed: HashSet::new(),
                     invalid: HashSet::new(),
                     module_errors: HashSet::new(),
+                    auto_update_saved,
+                    auto_update_pending: auto_update_saved.unwrap_or(false),
                 };
                 if let Err(error) = next.show(&ui) {
                     ui.set_status(error.into());
                     return;
                 }
                 ui.set_status(next.catalog.notices.join("\n").into());
+                ui.set_update_available(auto_update_saved.is_some());
+                ui.set_update_checked(next.auto_update_pending);
+                ui.set_update_status(update_status.into());
                 *state.borrow_mut() = Some(next);
                 ui.set_editable(true);
             }
@@ -474,7 +539,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .name("settings-catalog".into())
         .spawn(move || {
             let result = config::Document::load(&paths).and_then(|document| {
-                catalog::load(&paths, &document).map(|catalog| (document, catalog))
+                catalog::load(&paths, &document).map(|catalog| {
+                    let auto_update = updater::read(&paths.executable_directory);
+                    (document, catalog, auto_update)
+                })
             });
             if tx.send(result).is_ok() {
                 let _ = weak.upgrade_in_event_loop(|ui| ui.invoke_loaded());
