@@ -5,7 +5,7 @@ mod version;
 pub fn embed() {
     version::embed();
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-    let resource = root.join("assets/weasel.rc");
+    let resource = root.join("build_support/weasel.rc");
     let icon = root.join("assets/weasel.ico");
     println!("cargo:rerun-if-changed={}", resource.display());
     println!("cargo:rerun-if-changed={}", icon.display());
