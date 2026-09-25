@@ -59,7 +59,6 @@ fn main() {
             "Windows.Win32.CoInitializeEx",
             "Windows.Win32.CoUninitialize",
             "Windows.Win32.COINIT_APARTMENTTHREADED",
-            "Windows.Win32.AllocConsole",
             "Windows.Win32.CREATE_NO_WINDOW",
             "Windows.Win32.RegisterClassW",
             "Windows.Win32.RegisterWindowMessageW",

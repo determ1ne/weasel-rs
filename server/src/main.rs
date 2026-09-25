@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod admission;
 mod bindings;
+mod client_connection;
 mod data_lock;
 mod deploy_drag;
 mod deploy_job;
@@ -15,6 +16,7 @@ mod silent_deploy;
 mod ui_bindings;
 mod worker;
 
+use client_connection::ClientConnection;
 use engine::Work;
 use std::sync::{
     Arc,
@@ -22,12 +24,42 @@ use std::sync::{
 };
 use weasel_common::{
     logging::ComponentLogger,
-    message::{Envelope, Failure, FailureCode, Pong, ShutdownResponse, envelope::Payload},
-    process::SingleInstance,
-    rpc::{RpcConnection, RpcServer, default_pipe_name},
-    runtime_paths::RuntimePaths,
+    message::{
+        Envelope, Failure, FailureCode, PeerRole, Pong, QueryConfig, ShutdownResponse,
+        envelope::Payload,
+    },
+    process::{RuntimePaths, SingleInstance},
+    rpc::{RpcClient, RpcServer, default_pipe_name, try_default_broker_pipe_name},
 };
 const MAX_CONNECTIONS: usize = 128;
+
+async fn load_broker_settings() -> Result<weasel_common::settings::ConfigSnapshot, String> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let pipe = try_default_broker_pipe_name().map_err(|error| error.to_string())?;
+        let client = RpcClient::connect_as_with_timeout(
+            pipe,
+            PeerRole::Server,
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let response = client
+            .request(Payload::QueryConfig(QueryConfig {
+                refresh: false,
+                path: ".".into(),
+            }))
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(Payload::ConfigValue(value)) = response.payload else {
+            return Err("broker returned an unexpected configuration response".into());
+        };
+        let json = value.json.ok_or("broker returned no configuration root")?;
+        weasel_common::settings::ConfigSnapshot::from_json(&json)
+            .map_err(|error| format!("broker returned invalid configuration JSON: {error}"))
+    })
+    .await
+    .map_err(|_| "configuration query timed out".to_owned())?
+}
 
 struct ClientLife(Arc<AtomicBool>, Arc<dyn Fn() + Send + Sync>);
 impl Drop for ClientLife {
@@ -37,7 +69,7 @@ impl Drop for ClientLife {
     }
 }
 struct ShutdownNotice {
-    connection: Arc<RpcConnection>,
+    connection: Arc<ClientConnection>,
     written: Option<tokio::sync::oneshot::Receiver<Result<(), weasel_common::rpc::RpcError>>>,
 }
 
@@ -67,7 +99,7 @@ fn control_reply(envelope: &Envelope, ready: bool) -> Option<Envelope> {
 
 async fn read_connection(
     client_id: u64,
-    connection: Arc<RpcConnection>,
+    connection: Arc<ClientConnection>,
     engine: worker::Sender<Work>,
     ready: Arc<AtomicBool>,
     shutdown: tokio::sync::mpsc::Sender<ShutdownNotice>,
@@ -94,6 +126,11 @@ async fn read_connection(
             Ok(Some(received)) => received,
             _ => break,
         };
+        if let Some(Payload::LayoutUpdate(update)) = envelope.payload.as_ref() {
+            connection.push_layout(update.clone());
+            drop(request);
+            continue;
+        }
         if let Some(reply) = control_reply(&envelope, ready.load(Ordering::Acquire)) {
             let written = connection.enqueue(reply);
             if matches!(envelope.payload, Some(Payload::Shutdown(_))) {
@@ -129,9 +166,7 @@ async fn read_connection(
                 }
                 Some(Payload::KeyEvent(_) | Payload::ContextCommand(_)) => {
                     let token = match envelope.payload.as_ref() {
-                        Some(Payload::KeyEvent(key)) if !key.test && key.keycode.is_some() => {
-                            key.token
-                        }
+                        Some(Payload::KeyEvent(key)) => key.token,
                         Some(Payload::ContextCommand(command))
                             if command.action == ContextAction::Focus as i32 =>
                         {
@@ -180,7 +215,13 @@ async fn read_connection(
 }
 
 fn main() -> std::process::ExitCode {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let args = match weasel_common::service_owner::take_launch_args(std::env::args_os().skip(1)) {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     if args.iter().any(|arg| arg == "--silent") {
         if !silent_deploy::valid_arguments(&args) {
             // Silent mode must not leak even argument errors to inherited handles.
@@ -188,7 +229,7 @@ fn main() -> std::process::ExitCode {
         }
         return silent_deploy::run();
     }
-    match run() {
+    match run(args) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Error: {error:?}");
@@ -198,16 +239,11 @@ fn main() -> std::process::ExitCode {
 }
 
 #[tokio::main]
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let deploy_ui_mode = std::env::args().any(|arg| arg == "--deploy-ui");
-    let deploy_mode = std::env::args().any(|arg| arg == "--deploy");
+async fn run(args: Vec<std::ffi::OsString>) -> Result<(), Box<dyn std::error::Error>> {
+    let deploy_ui_mode = args.iter().any(|arg| arg == "--deploy-ui");
+    let deploy_mode = args.iter().any(|arg| arg == "--deploy");
     let paths = RuntimePaths::discover()?;
     paths.ensure()?;
-    if paths.development && !deploy_ui_mode && !deploy_mode {
-        unsafe {
-            let _ = bindings::AllocConsole();
-        }
-    }
     if deploy_ui_mode {
         init_logging(&paths, &format!("deploy-ui-{}", std::process::id()))?;
         return deploy_ui::run().map_err(Into::into);
@@ -228,7 +264,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .spawn(move || {
                 let _data_lock = data_lock::DataLock::acquire(&paths.user_data)?;
                 init_logging(&paths, "deploy")?;
-                librime::Librime::deploy(&paths.executable_directory)
+                librime::Librime::deploy(&paths.executable_directory, &paths.user_data)
             })?
             .join()
             .map_err(|_| "deployment thread panicked")?
@@ -238,23 +274,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn init_logging(paths: &RuntimePaths, component: &str) -> Result<(), String> {
-    use tracing_subscriber::fmt::writer::MakeWriterExt;
     let logger = ComponentLogger::for_paths(paths, component).map_err(|error| error.to_string())?;
-    if paths.development {
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_timer(weasel_common::logging::UtcTimer)
-            .with_writer(logger.and(std::io::stderr))
-            .try_init()
-            .map_err(|error| error.to_string())
-    } else {
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_timer(weasel_common::logging::UtcTimer)
-            .with_writer(logger)
-            .try_init()
-            .map_err(|error| error.to_string())
-    }
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_timer(weasel_common::logging::UtcTimer)
+        .with_writer(logger)
+        .try_init()
+        .map_err(|error| error.to_string())
 }
 
 async fn serve(paths: RuntimePaths) -> Result<(), String> {
@@ -263,23 +289,21 @@ async fn serve(paths: RuntimePaths) -> Result<(), String> {
         let _ = parent_exit.send(());
     })
     .map_err(|e| e.to_string())?;
-    let settings =
-        match weasel_common::settings::fetch(weasel_common::message::PeerRole::Server, false).await
-        {
-            Ok(settings) => Some(settings),
-            Err(error) => {
-                eprintln!(
-                    "weasel-server: broker settings unavailable: {error}; using Rime defaults"
-                );
-                None
-            }
-        };
+    let settings = match load_broker_settings().await {
+        Ok(settings) => Some(settings),
+        Err(error) => {
+            eprintln!("weasel-server: broker settings unavailable: {error}; using Rime defaults");
+            None
+        }
+    };
     let (publisher, snapshots) = renderer_bridge::RendererPublisher::channel();
     let capability = publisher.clone();
-    let eager_renderer = settings.as_ref().is_some_and(|s| {
-        s.needs_external_preedit()
-            || s.get::<String>(".theme").ok().flatten().as_deref() == Some("wasm")
-    });
+    let eager_renderer = match settings.as_ref() {
+        Some(settings) => {
+            settings.needs_external_preedit()? || settings.required::<String>(".theme")? == "wasm"
+        }
+        None => false,
+    };
     let mut engine = worker::Worker::spawn(engine::QUEUE_CAPACITY, move || {
         engine::Engine::new(paths, publisher, settings)
     })?;
@@ -292,7 +316,7 @@ async fn serve(paths: RuntimePaths) -> Result<(), String> {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel(1);
 
     let mut readers = tokio::task::JoinSet::new();
-    let mut connections = std::collections::HashMap::<u64, Arc<RpcConnection>>::new();
+    let mut connections = std::collections::HashMap::<u64, Arc<ClientConnection>>::new();
     let gate = admission::Gate::new(MAX_CONNECTIONS);
     let mut task_clients = std::collections::HashMap::new();
     let mut next_client_id = 1_u64;
@@ -314,7 +338,7 @@ async fn serve(paths: RuntimePaths) -> Result<(), String> {
             },
             accepted = server.accept() => {
                 let connection = match accepted {
-                    Ok(connection) => Arc::new(connection),
+                    Ok(connection) => Arc::new(ClientConnection::new(connection)),
                     Err(error) => { listener_error = Some(error.to_string()); break; }
                 };
                 if connections.len() >= MAX_CONNECTIONS + admission::PENDING_LIMIT { continue; }
@@ -412,25 +436,39 @@ mod control_tests {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel(1);
         let reader = tokio::spawn(read_connection(
             1,
-            Arc::new(connection.unwrap()),
+            Arc::new(ClientConnection::new(connection.unwrap())),
             engine.sender.clone(),
             engine.ready.clone(),
             shutdown_tx,
             None,
         ));
         assert!(
-            tokio::time::timeout(Duration::from_secs(1), client.ping("ready"))
-                .await
-                .unwrap()
-                .is_err()
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                client.request(Payload::Ping(Ping {
+                    text: "ready".into(),
+                }))
+            )
+            .await
+            .unwrap()
+            .is_err()
         );
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), client.shutdown("test"))
-                .await
-                .unwrap()
-                .unwrap()
-                .accepted
-        );
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.request(Payload::Shutdown(Shutdown {
+                reason: "test".into(),
+            })),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            response.payload,
+            Some(Payload::ShutdownResponse(ShutdownResponse {
+                accepted: true,
+                ..
+            }))
+        ));
         let notice = shutdown_rx.recv().await.unwrap();
         engine.request_stop();
         release.send(()).unwrap();

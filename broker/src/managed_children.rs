@@ -16,14 +16,12 @@ use weasel_common::{
 };
 
 struct Owner {
-    token: String,
     birth: u64,
 }
 static OWNER: OnceLock<Owner> = OnceLock::new();
 pub fn initialize() -> io::Result<()> {
     let process = service_owner::open_process(std::process::id())?;
     let _ = OWNER.set(Owner {
-        token: service_owner::new_token()?,
         birth: service_owner::birth(&process)?,
     });
     Ok(())
@@ -53,6 +51,7 @@ pub struct Child {
     stop: StopSignal,
     component: &'static str,
     instance: String,
+    token: String,
 }
 impl Child {
     pub fn id(&self) -> u32 {
@@ -65,14 +64,15 @@ impl Child {
         self.process.wait()
     }
     pub async fn verify(&self, client: &RpcClient) -> Result<(), String> {
-        let identity = client.identify_service().await.map_err(|e| e.to_string())?;
-        let owner = OWNER.get().ok_or("broker ownership not initialized")?;
+        let identity = crate::service_rpc::identify(client)
+            .await
+            .map_err(|e| e.to_string())?;
         if !matches_identity(
             &identity,
             client.server_pid(),
             self.id(),
             self.component,
-            &owner.token,
+            &self.token,
         ) || (!self.instance.is_empty() && self.instance != identity.instance)
         {
             return Err("pipe belongs to a different service instance".into());
@@ -114,34 +114,30 @@ pub fn start(directory: &Path, executable: &str, arguments: &[&str]) -> io::Resu
         .ok_or_else(|| io::Error::other("broker ownership not initialized"))?;
     // A live foreign instance is a conflict, not a child we can adopt.
     drop(SingleInstance::acquire(component).map_err(io::Error::other)?);
-    let stop = StopSignal::new()?;
-    let mut command = Command::new(directory.join(executable));
-    command
-        .args(arguments)
-        .current_dir(directory)
-        .stdin(Stdio::null())
-        .env(service_owner::TOKEN_ENV, &owner.token)
-        .env(service_owner::PID_ENV, std::process::id().to_string())
-        .env(service_owner::BIRTH_ENV, owner.birth.to_string())
-        .env(service_owner::STOP_ENV, &stop.name);
-    if !weasel_common::runtime_paths::is_development_directory(directory) {
-        command.stdout(Stdio::null()).stderr(Stdio::null());
-    }
+    let token = service_owner::new_token()?;
+    let stop = StopSignal::new(&token)?;
+    let mut launch_args = vec![
+        "--broker-owner".to_owned(),
+        token.clone(),
+        std::process::id().to_string(),
+        owner.birth.to_string(),
+    ];
     let process = if component == "renderer" {
-        let mut args = vec![
-            "--broker-owner".to_owned(),
-            owner.token.clone(),
-            std::process::id().to_string(),
-            owner.birth.to_string(),
-            stop.name.clone(),
-        ];
-        args.extend(arguments.iter().map(|arg| (*arg).to_owned()));
+        launch_args.extend(arguments.iter().map(|arg| (*arg).to_owned()));
         crate::child_process::ChildProcess::shell(
             directory.join(executable),
             directory.to_owned(),
-            args,
+            launch_args,
         )?
     } else {
+        let mut command = Command::new(directory.join(executable));
+        command
+            .args(&launch_args)
+            .args(arguments)
+            .current_dir(directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         crate::child_process::ChildProcess::Direct(command.spawn()?)
     };
     let mut child = Child {
@@ -149,6 +145,7 @@ pub fn start(directory: &Path, executable: &str, arguments: &[&str]) -> io::Resu
         stop,
         component,
         instance: String::new(),
+        token,
     };
     let result = runtime()?.block_on(async {
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -164,13 +161,15 @@ pub fn start(directory: &Path, executable: &str, arguments: &[&str]) -> io::Resu
                             "service pipe was occupied by a different PID",
                         ));
                     }
-                    let identity = client.identify_service().await.map_err(io::Error::other)?;
+                    let identity = crate::service_rpc::identify(&client)
+                        .await
+                        .map_err(io::Error::other)?;
                     if !matches_identity(
                         &identity,
                         client.server_pid(),
                         child.id(),
                         component,
-                        &owner.token,
+                        &child.token,
                     ) {
                         return Err(io::Error::other("service ownership handshake failed"));
                     }
@@ -235,8 +234,11 @@ pub fn clear_stale(directory: &Path, executable: &str) -> io::Result<()> {
             }
             // Older services lack IdentifyService. Kernel PID + exact executable
             // path are sufficient for cleanup, but never for readiness/adoption.
-            if let Ok(Ok(identity)) =
-                tokio::time::timeout(Duration::from_millis(500), client.identify_service()).await
+            if let Ok(Ok(identity)) = tokio::time::timeout(
+                Duration::from_millis(500),
+                crate::service_rpc::identify(&client),
+            )
+            .await
             {
                 if identity.pid != pid || identity.component != component {
                     return Err(io::Error::other("stale service identity mismatch"));
@@ -251,10 +253,12 @@ pub fn clear_stale(directory: &Path, executable: &str) -> io::Result<()> {
             {
                 return Err(io::Error::other("stale service changed during cleanup"));
             }
-            let response = client
-                .shutdown("broker startup is replacing an unmanaged service")
-                .await
-                .map_err(io::Error::other)?;
+            let response = crate::service_rpc::shutdown(
+                &client,
+                "broker startup is replacing an unmanaged service",
+            )
+            .await
+            .map_err(io::Error::other)?;
             if !response.accepted {
                 return Err(io::Error::other(response.message));
             }

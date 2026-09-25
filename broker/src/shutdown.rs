@@ -29,7 +29,7 @@ pub fn run(directory: &std::path::Path) -> Result<(), Box<dyn std::error::Error>
             PostMessageW(
                 Some(hwnd),
                 WM_COMMAND as u32,
-                WPARAM(weasel_common::broker_menu::EXIT as usize),
+                WPARAM(weasel_common::command_menu::EXIT as usize),
                 LPARAM(0),
             )
             .ok()?;

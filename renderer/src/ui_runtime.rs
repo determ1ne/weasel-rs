@@ -358,12 +358,13 @@ fn run_ui(
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let config =
             config.with_theme_defaults(registration.name(), registration.default_settings()?)?;
+        let inline_preedit = config.required::<bool>(".inline_preedit")?;
         let creation = registration.create(mode, &config);
         for notice in creation.notices {
             crate::notifications::report(registration.name(), notice);
         }
         let backend = creation.backend?;
-        if !config.inline_preedit() && !registration.capabilities().preedit {
+        if !inline_preedit && !registration.capabilities().preedit {
             crate::diagnostics::record(format_args!(
                 "theme {} does not support preedit; using inline preedit",
                 registration.name()
@@ -386,7 +387,7 @@ fn run_ui(
         // layout leaves the controller's previous preview alive.
         if mode == UiMode::Preview {
             let mut snapshot = crate::preview::synthetic_snapshot();
-            if !config.inline_preedit() && registration.capabilities().preedit {
+            if !inline_preedit && registration.capabilities().preedit {
                 snapshot.preedit = Some(weasel_common::message::RenderPreedit {
                     text: "nihao".into(),
                     cursor_utf16: 5,

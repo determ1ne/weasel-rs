@@ -8,7 +8,7 @@ use std::{
 use libloading::Library;
 
 use crate::bindings::{HWND, LPARAM, PostMessageW, WM_COMMAND, WPARAM};
-use weasel_common::broker_menu;
+use weasel_common::command_menu;
 
 type SetAppDetails = unsafe extern "C" fn(*const u16, *const u16, *const u16);
 type SetAppcastUrl = unsafe extern "C" fn(*const i8);
@@ -31,7 +31,7 @@ unsafe extern "C" fn request_shutdown() {
             PostMessageW(
                 Some(HWND(window as *mut _)),
                 WM_COMMAND as u32,
-                WPARAM(broker_menu::EXIT as usize),
+                WPARAM(command_menu::EXIT as usize),
                 LPARAM(0),
             )
         };

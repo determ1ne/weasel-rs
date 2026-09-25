@@ -1,5 +1,5 @@
 use crate::bindings::{GetKeyboardLayout, GetKeyboardState, ToUnicodeEx};
-use weasel_common::message::KeyEvent;
+use weasel_common::message::InputKey;
 
 const EMOJI_SHORTCUT_TAG: usize = 0x57525345;
 
@@ -43,16 +43,16 @@ pub fn open_emoji_panel() {
 }
 
 /// Translate on the TSF input thread, before crossing into the RPC worker.
-pub fn translate(vk: u32, lparam: i64, key_up: bool) -> KeyEvent {
-    let mut event = KeyEvent {
+pub fn translate(vk: u32, lparam: i64, key_up: bool) -> Option<InputKey> {
+    let mut event = InputKey {
         virtual_key: vk,
-        lparam,
-        key_up,
+        native_lparam: lparam,
+        released: key_up,
         ..Default::default()
     };
     let mut state = [0u8; 256];
     if !unsafe { GetKeyboardState(state.as_mut_ptr()) }.as_bool() {
-        return event;
+        return None;
     }
     event.modifiers = i32::from(state[0x10] & 0x80 != 0)
         | (i32::from(state[0x14] & 1 != 0) << 1)
@@ -62,8 +62,8 @@ pub fn translate(vk: u32, lparam: i64, key_up: bool) -> KeyEvent {
     if vk == 0x14 && !key_up {
         event.modifiers ^= 2;
     }
-    event.keycode = special_key(vk, lparam);
-    if event.keycode.is_none() {
+    let mut keycode = special_key(vk, lparam);
+    if keycode.is_none() {
         // Keep modifiers in the protocol but obtain the printable character.
         for index in [0x11, 0xa2, 0xa3, 0x12, 0xa4, 0xa5] {
             state[index] = 0;
@@ -81,9 +81,10 @@ pub fn translate(vk: u32, lparam: i64, key_up: bool) -> KeyEvent {
                 Some(GetKeyboardLayout(0)),
             )
         };
-        event.keycode = decode_character(&text, count);
+        keycode = decode_character(&text, count);
     }
-    event
+    event.keycode = keycode?;
+    Some(event)
 }
 
 fn special_key(vk: u32, lparam: i64) -> Option<i32> {

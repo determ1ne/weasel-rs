@@ -1,7 +1,9 @@
 #![cfg(windows)]
 
+mod support;
 use prost::Message;
 use std::{os::windows::io::AsRawHandle, time::Duration};
+use support::ConnectionProtocol as _;
 #[path = "../src/bindings.rs"]
 mod bindings;
 use bindings::*;
@@ -11,10 +13,10 @@ use tokio::{
     time::timeout,
 };
 use weasel_common::{
-    framing,
+    data_frame,
     message::{Hello, PeerRole, Ping, Request, RpcFrame, request::Operation, rpc_frame::Body},
-    platform::RuntimeIdentity,
     rpc::{self, RpcConnection, RpcError, RpcServer},
+    windows_security::RuntimeIdentity,
 };
 
 const DEADLINE: Duration = Duration::from_secs(5);
@@ -37,7 +39,7 @@ async fn pair(server: &RpcServer) -> (NamedPipeClient, RpcConnection) {
 }
 
 fn frame(id: u64) -> Vec<u8> {
-    framing::encode(&RpcFrame {
+    data_frame::encode(&RpcFrame {
         protocol_version: rpc::PROTOCOL_VERSION,
         body: Some(Body::Request(Request {
             id,
@@ -55,7 +57,7 @@ async fn handshake(client: &mut NamedPipeClient) -> u64 {
 
 async fn handshake_as(client: &mut NamedPipeClient, peer: PeerRole, local: PeerRole) -> u64 {
     // Read first to prove the server writes hello without awaiting ours.
-    let bytes = framing::read(client).await.unwrap().unwrap();
+    let bytes = data_frame::read(client).await.unwrap().unwrap();
     let hello = RpcFrame::decode(bytes.as_slice()).unwrap();
     assert_eq!(hello.protocol_version, rpc::PROTOCOL_VERSION);
     let Some(Body::Hello(hello)) = hello.body else {
@@ -63,7 +65,7 @@ async fn handshake_as(client: &mut NamedPipeClient, peer: PeerRole, local: PeerR
     };
     assert_eq!(hello.role, local as i32);
     assert_ne!(hello.instance_id, 0);
-    framing::write(
+    data_frame::write(
         client,
         &RpcFrame {
             protocol_version: rpc::PROTOCOL_VERSION,
@@ -166,7 +168,7 @@ async fn role_operation_allowlists_and_response_rejection() {
                 let mut client = ClientOptions::new().open(server.pipe_name()).unwrap();
                 let connection = server.accept().await.unwrap();
                 handshake_as(&mut client, peer, local).await;
-                framing::write(
+                data_frame::write(
                     &mut client,
                     &RpcFrame {
                         protocol_version: rpc::PROTOCOL_VERSION,
@@ -176,13 +178,6 @@ async fn role_operation_allowlists_and_response_rejection() {
                 .await
                 .unwrap();
                 if allowed.contains(&index) {
-                    if index == 5 {
-                        // Authorized layout bypasses the ordered input FIFO.
-                        while connection.take_layout_for(None).is_none() {
-                            tokio::task::yield_now().await;
-                        }
-                        continue;
-                    }
                     assert!(
                         connection.recv().await.unwrap().is_some(),
                         "{peer:?} operation {index}"
@@ -225,7 +220,7 @@ async fn business_before_hello_is_rejected_and_closes_connection() {
         let mut client = ClientOptions::new().open(server.pipe_name()).unwrap();
         let connection = server.accept().await.unwrap();
         // Consume the server hello, but send a business request instead of ours.
-        assert!(framing::read(&mut client).await.unwrap().is_some());
+        assert!(data_frame::read(&mut client).await.unwrap().is_some());
         client.write_all(&frame(1)).await.unwrap();
         assert!(matches!(
             connection.recv().await,

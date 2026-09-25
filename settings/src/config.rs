@@ -5,7 +5,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
-use weasel_common::{runtime_paths::RuntimePaths, settings::merge};
+use weasel_common::{process::RuntimePaths, settings::merge};
 pub struct Document {
     pub base: Value,
     pub patch: Value,
@@ -86,11 +86,10 @@ mod tests {
     #[test]
     fn preserves_unknown_fields_and_rejects_external_changes() {
         let directory = tempfile::tempdir().unwrap();
-        let paths = RuntimePaths::for_directory(directory.path().to_path_buf()).unwrap();
-        // 不使用当前用户目录：整个读写检查仅发生在临时目录。
         let paths = RuntimePaths {
+            executable_directory: directory.path().to_path_buf(),
             user_data: directory.path().join("user"),
-            ..paths
+            logs: directory.path().join("logs"),
         };
         fs::create_dir_all(&paths.user_data).unwrap();
         let path = paths.user_data.join("weasel.custom.json");

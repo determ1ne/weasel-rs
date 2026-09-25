@@ -3,18 +3,17 @@
 pub mod about;
 #[cfg(windows)]
 mod bindings;
-pub mod broker_menu;
+pub mod command_menu;
+pub mod data_frame;
 pub mod deploy_protocol;
-pub mod framing;
 pub mod logging;
 pub mod message;
-pub mod platform;
 #[cfg(windows)]
 pub mod process;
 pub mod rpc;
-pub mod runtime_paths;
 #[cfg(windows)]
 pub mod service_owner;
 pub mod settings;
 #[cfg(feature = "wasm-metadata")]
 pub mod wasm_metadata;
+pub mod windows_security;

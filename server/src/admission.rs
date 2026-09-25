@@ -1,13 +1,13 @@
 //! Input-intent admission with ranked reclamation; never truncate in-flight work.
+use crate::client_connection::ClientConnection;
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use weasel_common::rpc::RpcConnection;
 
 /// Four extra connections may perform a handshake/OpenInput before presenting
 /// real input intent. They cannot take an active slot just by connecting.
 pub(crate) const PENDING_LIMIT: usize = 4;
 pub(crate) struct Gate {
     slots: Arc<tokio::sync::Semaphore>,
-    pub peers: std::sync::Mutex<HashMap<u64, Arc<RpcConnection>>>,
+    pub peers: std::sync::Mutex<HashMap<u64, Arc<ClientConnection>>>,
     pub changed: tokio::sync::Notify,
     active: std::sync::Mutex<std::collections::HashSet<u64>>,
     pending: std::sync::atomic::AtomicUsize,
@@ -56,7 +56,7 @@ impl Admission {
             }
         })
     }
-    pub async fn promote(&mut self, id: u64, connection: &RpcConnection) -> bool {
+    pub async fn promote(&mut self, id: u64, connection: &ClientConnection) -> bool {
         if self.permit.is_some() {
             return true;
         }
@@ -126,7 +126,7 @@ impl Drop for Admission {
 }
 
 #[cfg(test)]
-fn retire_stale(connections: &HashMap<u64, Arc<RpcConnection>>, age: Duration) -> Option<u64> {
+fn retire_stale(connections: &HashMap<u64, Arc<ClientConnection>>, age: Duration) -> Option<u64> {
     let mut candidates: Vec<_> = connections
         .iter()
         .filter_map(|(id, connection)| connection.stale_since(age).map(|since| (since, *id)))
@@ -158,9 +158,9 @@ mod tests {
             let listener = RpcServer::new(&pipe);
             listener.bind().await.unwrap();
             let old_client = RpcClient::connect(&pipe).await.unwrap();
-            let old = Arc::new(listener.accept().await.unwrap());
+            let old = Arc::new(ClientConnection::new(listener.accept().await.unwrap()));
             let new_client = RpcClient::connect(&pipe).await.unwrap();
-            let new = Arc::new(listener.accept().await.unwrap());
+            let new = Arc::new(ClientConnection::new(listener.accept().await.unwrap()));
             let gate = Gate::new(1);
             gate.peers
                 .lock()
@@ -191,9 +191,9 @@ mod tests {
             let listener = RpcServer::new(&pipe);
             listener.bind().await.unwrap();
             let first = RpcClient::connect(&pipe).await.unwrap();
-            let a = Arc::new(listener.accept().await.unwrap());
+            let a = Arc::new(ClientConnection::new(listener.accept().await.unwrap()));
             let second = RpcClient::connect(&pipe).await.unwrap();
-            let b = Arc::new(listener.accept().await.unwrap());
+            let b = Arc::new(ClientConnection::new(listener.accept().await.unwrap()));
             a.set_idle(true);
             b.set_idle(true);
             let connections = HashMap::from([(1, a), (2, b.clone())]);

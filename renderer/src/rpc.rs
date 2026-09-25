@@ -10,8 +10,10 @@ use tokio::{
     task::JoinSet,
 };
 use weasel_common::{
-    message::{Envelope, PeerRole, RendererEvent, ShutdownResponse, envelope::Payload},
-    rpc::{RpcServer, default_renderer_pipe_name},
+    message::{
+        Envelope, PeerRole, QueryConfig, RendererEvent, ShutdownResponse, envelope::Payload,
+    },
+    rpc::{RpcClient, RpcServer, default_renderer_pipe_name, try_default_broker_pipe_name},
 };
 
 pub fn run() -> Result<(), String> {
@@ -22,12 +24,14 @@ pub fn run() -> Result<(), String> {
         .map_err(|error| format!("could not create renderer runtime: {error}"))?;
     // The live strip uses the broker's published configuration (no disk re-read).
     let settings = runtime.block_on(load_theme(false)).unwrap_or_else(|error| {
-        crate::diagnostics::record(format_args!("{error}; using eleven"));
-        weasel_common::settings::ConfigSnapshot::new(serde_json::json!({
-            "theme": "eleven", "inline_preedit": true, "themeSettings": {}
-        }))
+        crate::diagnostics::record(format_args!("{error}; using embedded settings"));
+        weasel_common::settings::ConfigSnapshot::new(
+            serde_json::from_str(include_str!("../../weasel.json"))
+                .expect("embedded settings must be valid JSON"),
+        )
     });
-    let ui = UiHandle::start(&settings.theme()?, UiMode::Live, &settings)?;
+    let theme = settings.required::<String>(".theme")?;
+    let ui = UiHandle::start(&theme, UiMode::Live, &settings)?;
     runtime.block_on(run_rpc(
         RpcServer::with_role(default_renderer_pipe_name(), PeerRole::Renderer),
         ui,
@@ -40,8 +44,29 @@ pub fn run() -> Result<(), String> {
 pub(crate) async fn load_theme(
     refresh: bool,
 ) -> Result<weasel_common::settings::ConfigSnapshot, String> {
-    let settings = weasel_common::settings::fetch(PeerRole::Renderer, refresh).await?;
-    if !crate::backend::supports_theme(&settings.theme()?) {
+    let settings = tokio::time::timeout(Duration::from_secs(2), async {
+        let pipe = try_default_broker_pipe_name().map_err(|error| error.to_string())?;
+        let client =
+            RpcClient::connect_as_with_timeout(pipe, PeerRole::Renderer, Duration::from_secs(2))
+                .await
+                .map_err(|error| error.to_string())?;
+        let response = client
+            .request(Payload::QueryConfig(QueryConfig {
+                refresh,
+                path: ".".into(),
+            }))
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(Payload::ConfigValue(value)) = response.payload else {
+            return Err("broker returned an unexpected configuration response".into());
+        };
+        let json = value.json.ok_or("broker returned no configuration root")?;
+        weasel_common::settings::ConfigSnapshot::from_json(&json)
+            .map_err(|error| format!("broker returned invalid configuration JSON: {error}"))
+    })
+    .await
+    .map_err(|_| "configuration query timed out".to_owned())??;
+    if !crate::backend::supports_theme(&settings.required::<String>(".theme")?) {
         return Err("broker returned an unsupported renderer theme".into());
     }
     Ok(settings)
@@ -178,7 +203,12 @@ async fn serve_connection(
             }
             Some(Payload::Ping(_)) => {
                 connection
-                    .send_pong(envelope.request_id, "renderer ready")
+                    .send(&Envelope {
+                        request_id: envelope.request_id,
+                        payload: Some(Payload::Pong(weasel_common::message::Pong {
+                            text: "renderer ready".into(),
+                        })),
+                    })
                     .await
                     .map_err(|e| e.to_string())?;
             }
@@ -188,13 +218,13 @@ async fn serve_connection(
             Some(Payload::Shutdown(_)) => {
                 let response = tokio::time::timeout(
                     Duration::from_secs(2),
-                    connection.send_shutdown_response(
-                        envelope.request_id,
-                        ShutdownResponse {
+                    connection.send(&Envelope {
+                        request_id: envelope.request_id,
+                        payload: Some(Payload::ShutdownResponse(ShutdownResponse {
                             accepted: true,
                             message: "renderer shutting down".into(),
-                        },
-                    ),
+                        })),
+                    }),
                 )
                 .await;
                 let _ = shutdown_sender.send(true);
@@ -239,18 +269,31 @@ mod tests {
             let serve = tokio::spawn(serve_connection(
                 connection, 1, commands, receiver, shutdown, true,
             ));
-            assert_eq!(
-                client.ping("readiness").await.unwrap().text,
-                "renderer ready"
-            );
+            let response = client
+                .request(Payload::Ping(weasel_common::message::Ping {
+                    text: "readiness".into(),
+                }))
+                .await
+                .unwrap();
+            assert!(matches!(
+                response.payload,
+                Some(Payload::Pong(weasel_common::message::Pong { ref text }))
+                    if text == "renderer ready"
+            ));
             assert!(!observer.is_owner(1));
-            assert_eq!(
-                client
-                    .query_config(".capabilities.preedit", false)
-                    .await
-                    .unwrap(),
-                Some(serde_json::json!(true))
-            );
+            let response = client
+                .request(Payload::QueryConfig(QueryConfig {
+                    refresh: false,
+                    path: ".capabilities.preedit".into(),
+                }))
+                .await
+                .unwrap();
+            assert!(matches!(
+                response.payload,
+                Some(Payload::ConfigValue(weasel_common::message::ConfigValue {
+                    json: Some(ref value),
+                })) if value == "true"
+            ));
             client.disconnect().await;
             serve.await.unwrap().unwrap();
         })

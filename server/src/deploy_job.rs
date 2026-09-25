@@ -126,8 +126,7 @@ pub fn run(ui: Option<Arc<UiMailbox>>, guard: SingleInstance) -> DeployComplete 
 async fn run_process(
     publish: &mut impl FnMut(&str, String),
 ) -> Result<std::process::ExitStatus, String> {
-    let paths =
-        weasel_common::runtime_paths::RuntimePaths::discover().map_err(|e| e.to_string())?;
+    let paths = weasel_common::process::RuntimePaths::discover().map_err(|e| e.to_string())?;
     let exe = paths.executable_directory.join("weasel-server.exe");
     let mut child = tokio::process::Command::new(&exe)
         .arg("--deploy")

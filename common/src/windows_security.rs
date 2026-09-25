@@ -1,8 +1,30 @@
+//! Windows 运行身份与本地对象安全设施。
+
+/// Win32 `SECURITY_ATTRIBUTES` 的公共类型别名。
 pub use crate::bindings::SECURITY_ATTRIBUTES as SecurityAttributes;
 use crate::bindings::*;
-use std::{ffi::c_void, io};
+use std::io;
 use windows_strings::HSTRING;
 
+/// 验证将要嵌入 Windows 内核对象名称的组件名。
+///
+/// 合法名称由 1 至 64 个 ASCII 字母、数字、连字符或下划线组成。
+pub(crate) fn validate_component(component: &str) -> io::Result<()> {
+    if component.is_empty()
+        || component.len() > 64
+        || !component
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "component must be 1..64 ASCII letters, digits, hyphens or underscores",
+        ));
+    }
+    Ok(())
+}
+
+/// 自动关闭的进程访问令牌句柄。
 struct Token(HANDLE);
 impl Drop for Token {
     fn drop(&mut self) {
@@ -11,6 +33,7 @@ impl Drop for Token {
         }
     }
 }
+/// 读取一块按指针宽度对齐的访问令牌信息。
 fn token_information(token: &Token, class: TOKEN_INFORMATION_CLASS) -> io::Result<Vec<usize>> {
     let mut size = 0;
     unsafe {
@@ -36,6 +59,7 @@ fn token_information(token: &Token, class: TOKEN_INFORMATION_CLASS) -> io::Resul
     Ok(data)
 }
 
+/// 将 Windows SID 转换为规范的字符串表示。
 fn sid_string(sid: PSID) -> io::Result<String> {
     let mut text = windows_core::PWSTR::null();
     if !unsafe { ConvertSidToStringSidW(sid, &mut text) }.as_bool() {
@@ -52,8 +76,10 @@ fn sid_string(sid: PSID) -> io::Result<String> {
     }
 }
 
-/// Process token identity, independent of thread impersonation. A logon SID
-/// distinguishes separate logons of the same account, including terminal sessions.
+/// 当前进程所属的 Windows 用户与登录会话身份。
+///
+/// 身份取自进程访问令牌，不受线程模拟影响。同一用户的不同登录会话具有不同
+/// 的登录 SID，因此远程桌面和快速用户切换产生的会话不会共享本地 IPC 对象。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeIdentity {
     user_sid: String,
@@ -61,6 +87,7 @@ pub struct RuntimeIdentity {
 }
 
 impl RuntimeIdentity {
+    /// 从当前进程访问令牌读取用户 SID 和唯一登录 SID。
     pub fn current() -> io::Result<Self> {
         let mut handle = HANDLE::default();
         if !unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY as u32, &mut handle) }
@@ -90,53 +117,69 @@ impl RuntimeIdentity {
             logon_sid,
         })
     }
+    /// 返回拥有当前进程的 Windows 用户 SID。
     pub fn user_sid(&self) -> &str {
         &self.user_sid
     }
+
+    /// 返回当前登录会话的 SID。
     pub fn logon_sid(&self) -> &str {
         &self.logon_sid
     }
+
+    /// 生成包含用户和登录会话身份的对象名后缀。
     fn suffix(&self, component: &str) -> io::Result<String> {
-        super::validate_component(component)?;
+        validate_component(component)?;
         Ok(format!(
             "weasel-rs-{component}-{}-{}",
             self.user_sid, self.logon_sid
         ))
     }
+    /// 生成当前登录会话专用的 `Local\` 互斥体名称。
     pub fn mutex_name(&self, component: &str) -> io::Result<String> {
         Ok(format!(r"Local\{}", self.suffix(component)?))
     }
+
+    /// 生成当前登录会话专用的命名管道路径。
     pub fn pipe_name(&self, component: &str) -> io::Result<String> {
         Ok(format!(r"\\.\pipe\{}", self.suffix(component)?))
     }
 }
 
-/// Owned LocalAlloc descriptor. Keep alive through the object creation call.
-/// Internal objects remain logon-private; the input pipe explicitly supports
-/// AppContainer and low-integrity hosts using Mozc's sharable-pipe policy.
+/// 由 `LocalAlloc` 分配并自动释放的 Windows 安全描述符。
+///
+/// 创建内核对象时必须保持该值存活，直到使用其安全属性的 Win32 调用返回。
+/// 普通内部对象仅允许当前登录会话访问；输入管道则显式允许 AppContainer 和
+/// 低完整性宿主，以支持受限应用中的 TIP。
 pub struct LocalSecurityDescriptor(PSECURITY_DESCRIPTOR);
 
 impl LocalSecurityDescriptor {
+    /// 为当前登录会话内的普通命名管道创建安全描述符。
     pub fn for_named_pipe(identity: &RuntimeIdentity) -> io::Result<Self> {
         Self::for_logon(identity)
     }
+
+    /// 为 TIP 输入管道创建可供受限宿主访问的安全描述符。
     pub fn for_input_pipe(identity: &RuntimeIdentity) -> io::Result<Self> {
-        // Mozc kSharablePipe: suppress implicit owner rights, grant System,
-        // administrators, app packages and the user; label low integrity.
-        // Keep network denial. No Everyone or Restricted Code grant.
-        // This is deliberately not a logon-only ACL: the logon suffix in the
-        // name is routing, not authentication, and peer roles are self-reported.
+        // 参考 Mozc 的 kSharablePipe 实现
+        // - 抑制隐式所有者权限
+        // - 授权 System、管理员、App Packages 和当前用户
+        // - 设置低完整性标签
+        // - 拒绝网络登录
+        // - 不向 Everyone 或 Restricted Code 授权
         Self::from_sddl(format!(
             "O:{}D:P(D;;GA;;;NU)(A;;;;;OW)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)(A;;GA;;;{})S:(ML;;NX;;;LW)",
             identity.user_sid, identity.user_sid
         ))
     }
+    /// 为仅限当前登录会话访问的本地对象创建安全描述符。
     pub(crate) fn for_logon(identity: &RuntimeIdentity) -> io::Result<Self> {
         Self::from_sddl(format!(
             "O:{}D:P(D;;GA;;;NU)(A;;GA;;;{})",
             identity.user_sid, identity.logon_sid
         ))
     }
+    /// 将 SDDL 字符串解析为拥有所有权的安全描述符。
     fn from_sddl(sddl: String) -> io::Result<Self> {
         let sddl = HSTRING::from(sddl);
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
@@ -154,17 +197,17 @@ impl LocalSecurityDescriptor {
         }
         Ok(Self(descriptor))
     }
-    /// Pass to the pipe API's raw security-attributes argument. Caller must also
-    /// set PIPE_REJECT_REMOTE_CLIENTS and first-instance protection on creation.
+    /// 构造可传给 Win32 对象创建函数的安全属性。
+    ///
+    /// 返回值借用本对象持有的安全描述符；调用方必须让对象存活到对象创建
+    /// 调用返回。创建命名管道时仍须设置 `PIPE_REJECT_REMOTE_CLIENTS`，并启用
+    /// first-instance 保护。
     pub fn security_attributes(&self) -> SecurityAttributes {
         SecurityAttributes {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: self.0.0,
             bInheritHandle: false.into(),
         }
-    }
-    pub fn as_ptr(&self) -> *mut c_void {
-        self.0.0
     }
 }
 impl Drop for LocalSecurityDescriptor {
@@ -193,10 +236,11 @@ mod tests {
                 .is_null()
         );
         let mut text = windows_core::PWSTR::null();
+        let attributes = descriptor.security_attributes();
         assert!(
             unsafe {
                 ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                    PSECURITY_DESCRIPTOR(descriptor.as_ptr()),
+                    PSECURITY_DESCRIPTOR(attributes.lpSecurityDescriptor),
                     SDDL_REVISION_1 as u32,
                     SECURITY_INFORMATION(DACL_SECURITY_INFORMATION as u32),
                     &mut text,

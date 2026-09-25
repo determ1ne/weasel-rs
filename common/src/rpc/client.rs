@@ -1,141 +1,62 @@
-//! RPC client used by tip and other front-end components.
+//! 与业务消息无关的 Named Pipe 双向 RPC 客户端。
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
 use tokio::{
     net::windows::named_pipe::ClientOptions,
-    sync::{broadcast, mpsc, oneshot, watch},
+    sync::{broadcast, mpsc, watch},
 };
 
-use crate::message::{
-    Envelope, KeyEvent, KeyEventResponse, LayoutUpdate, LogEvent, Ping, Pong, RenderSnapshot,
-    RendererEvent, Shutdown, ShutdownResponse, envelope::Payload,
+use crate::message::{Envelope, envelope::Payload};
+
+use super::{
+    RpcError, codec,
+    limits::{protocol, runtime},
 };
 
-use super::{RpcError, read_frame, wire, write_frame};
+mod connection;
+mod pending;
 
-type Pending = Arc<Mutex<Option<HashMap<u64, oneshot::Sender<Result<Envelope, RpcError>>>>>>;
-
-async fn close_connection(pending: &Pending, closed: &watch::Sender<bool>) {
-    // Registration and closing share one lock: requests cannot be inserted
-    // after the final drain, even if the writer still has queue capacity.
-    if let Some(requests) = pending.lock().unwrap_or_else(|p| p.into_inner()).take() {
-        for (_, sender) in requests {
-            let _ = sender.send(Err(RpcError::Disconnected));
-        }
-    }
-    closed.send_replace(true);
-}
+use connection::ClientTasks;
+use pending::PendingRequests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
+#[path = "tests/client.rs"]
+mod tests;
 
-    #[tokio::test]
-    async fn cancelled_requests_remove_pending_and_last_clone_drop_closes_pipe() {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let name = format!(r"\\.\pipe\weasel-cancel-pending-{}", std::process::id());
-            let server = super::super::RpcServer::new(&name);
-            assert!(
-                tokio::time::timeout(Duration::from_millis(1), server.accept())
-                    .await
-                    .is_err()
-            );
-            let client = RpcClient::connect(&name).await.unwrap();
-            let connection = server.accept().await.unwrap();
-            let drain = tokio::spawn(async move {
-                let mut received = 0;
-                while connection.recv().await.unwrap().is_some() {
-                    received += 1;
-                }
-                received
-            });
-            // More cancellations than the pending-map bound, with no replies.
-            for _ in 0..80 {
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(1), client.ping("cancel"))
-                        .await
-                        .is_err()
-                );
-                assert_eq!(client.pending.lock().unwrap().as_ref().unwrap().len(), 0);
-            }
-            drop(client);
-            assert!(drain.await.unwrap() > 0);
-        })
-        .await
-        .expect("cancel/drop must not leak reader and writer tasks");
-    }
-}
-
-struct ClientTasks(Mutex<Vec<tokio::task::JoinHandle<()>>>);
-impl Drop for ClientTasks {
-    fn drop(&mut self) {
-        for task in self.0.get_mut().unwrap_or_else(|p| p.into_inner()) {
-            task.abort();
-        }
-    }
-}
-struct PendingCall {
-    pending: Pending,
-    id: u64,
-}
-impl Drop for PendingCall {
-    fn drop(&mut self) {
-        if let Some(requests) = self
-            .pending
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_mut()
-        {
-            requests.remove(&self.id);
-        }
-    }
-}
-
-/// A connected bidirectional RPC client.
+/// 已连接的双向 RPC 客户端。
+///
+/// 克隆客户端会共享同一条管道及其后台任务；丢弃最后一个克隆时，后台任务随之结束。
+/// 请求通过请求 ID 与响应关联，普通请求最多等待五秒；调用被取消时会移除其待处理记录。
+/// 连接关闭会使尚未完成的请求以断开错误结束。服务器主动发送的事件则可由各自的订阅接收。
 #[derive(Clone)]
 pub struct RpcClient {
     server_pid: u32,
-    layout: watch::Sender<Option<LayoutUpdate>>,
     outbound: mpsc::Sender<Envelope>,
-    pending: Pending,
+    pending: PendingRequests,
     closed: watch::Sender<bool>,
-    events: broadcast::Sender<LogEvent>,
-    render_snapshots: broadcast::Sender<RenderSnapshot>,
-    renderer_events: broadcast::Sender<RendererEvent>,
-    key_updates: broadcast::Sender<KeyEventResponse>,
-    key_responses: broadcast::Sender<KeyEventResponse>,
+    incoming: broadcast::Sender<Envelope>,
     next_request_id: Arc<std::sync::atomic::AtomicU64>,
     tasks: Arc<ClientTasks>,
-    input_open: Arc<tokio::sync::Mutex<std::collections::HashSet<u64>>>,
 }
 
 impl RpcClient {
-    /// Kernel-reported owner of the connected pipe, not a self-reported PID.
+    /// 返回操作系统报告的管道服务端进程 ID。
+    ///
+    /// 该值来自已连接管道的内核信息，而非服务端在协议中自报的进程 ID。
     pub fn server_pid(&self) -> u32 {
         self.server_pid
     }
-    pub async fn identify_service(&self) -> Result<crate::message::ServiceIdentity, RpcError> {
-        match self
-            .request(Payload::IdentifyService(crate::message::IdentifyService {}))
-            .await?
-            .payload
-        {
-            Some(Payload::ServiceIdentity(identity)) => Ok(identity),
-            _ => Err(RpcError::UnexpectedResponse),
-        }
-    }
-    /// Connect to a Named Pipe and start the background reader/writer tasks.
+    /// 连接指定的 Named Pipe，并启动后台读写任务。
+    ///
+    /// 以未指定的本端角色完成握手；需要声明角色时使用 [`Self::connect_as`]。
     pub async fn connect(pipe_name: impl AsRef<str>) -> Result<Self, RpcError> {
         Self::connect_as(pipe_name, crate::message::PeerRole::Unspecified).await
     }
 
-    /// Retry only transient instance exhaustion. The timeout covers all attempts;
-    /// callers should include the subsequent request in their own operation deadline.
+    /// 在总超时期限内连接，并仅对管道实例暂时繁忙的错误重试。
+    ///
+    /// 超时只覆盖连接尝试；后续 RPC 请求应由调用方纳入自己的操作期限。
     pub async fn connect_as_with_timeout(
         pipe_name: impl AsRef<str>,
         role: crate::message::PeerRole,
@@ -148,7 +69,7 @@ impl RpcClient {
                         if error.raw_os_error()
                             == Some(crate::bindings::ERROR_PIPE_BUSY as i32) =>
                     {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        tokio::time::sleep(runtime::CONNECT_RETRY_DELAY).await;
                     }
                     result => return result,
                 }
@@ -158,6 +79,7 @@ impl RpcClient {
         .map_err(|_| RpcError::Timeout)?
     }
 
+    /// 以指定的本端协议角色连接 Named Pipe，并启动后台读写任务。
     pub async fn connect_as(
         pipe_name: impl AsRef<str>,
         role: crate::message::PeerRole,
@@ -174,216 +96,64 @@ impl RpcClient {
                 &mut server_pid,
             );
         }
-        let (mut reader, mut writer) = tokio::io::split(pipe);
-        let (outbound, mut outbound_rx) = mpsc::channel(32);
-        let (layout, mut layout_rx) = watch::channel::<Option<LayoutUpdate>>(None);
-        let pending: Pending = Arc::new(Mutex::new(Some(HashMap::new())));
-        let (closed, mut writer_closed) = watch::channel(false);
-        let mut reader_closed = closed.subscribe();
-        let (events, _) = broadcast::channel(32);
-        let (render_snapshots, _) = broadcast::channel(32);
-        let (renderer_events, _) = broadcast::channel(32);
-        let (key_updates, _) = broadcast::channel(32);
-        let (key_responses, _) = broadcast::channel(64);
-        let reader_key_responses = key_responses.clone();
-        let reader_key_updates = key_updates.clone();
-
-        let writer_pending = pending.clone();
-        let writer_signal = closed.clone();
-        let writer_task = tokio::spawn(async move {
-            tokio::select! {
-            _ = writer_closed.changed() => {},
-            _ = async {
-            if wire::write_hello(&mut writer, role, std::process::id() as u64).await.is_err() { return; }
-            loop {
-                let envelope = tokio::select! {
-                    biased;
-                    envelope = outbound_rx.recv() => match envelope { Some(v) => v, None => break },
-                    changed = layout_rx.changed() => {
-                        if changed.is_err() { break; }
-                        let latest = layout_rx.borrow_and_update().clone();
-                        let Some(update) = latest else { continue };
-                        Envelope { request_id: 0, payload: Some(Payload::LayoutUpdate(update)) }
-                    }
-                };
-                if !matches!(tokio::time::timeout(std::time::Duration::from_secs(2), write_frame(&mut writer, &envelope)).await, Ok(Ok(()))) {
-                    break;
-                }
-            }
-            } => {}
-            }
-            close_connection(&writer_pending, &writer_signal).await;
-        });
-
-        let reader_pending = Arc::clone(&pending);
-        let reader_events = events.clone();
-        let reader_render_snapshots = render_snapshots.clone();
-        let reader_renderer_events = renderer_events.clone();
-        let reader_signal = closed.clone();
-        let reader_task = tokio::spawn(async move {
-            tokio::select! {
-            _ = reader_closed.changed() => {},
-            _ = async {
-            if wire::read_hello(&mut reader).await.is_err() { return; }
-            loop {
-                let frame = match read_frame(&mut reader).await {
-                    Ok(Some(frame)) => frame,
-                    Ok(None) | Err(_) => break,
-                };
-                let envelope = match wire::decode(&frame).and_then(|frame| {
-                    if matches!(frame.body, Some(crate::message::rpc_frame::Body::Request(_))) {
-                        return Err(RpcError::Protocol("server sent a request on a client endpoint".into()));
-                    }
-                    wire::unpack(frame)
-                }) {
-                    Ok(envelope) => envelope,
-                    Err(_) => break,
-                };
-
-                // A single ordered stream for TIP document edits. Mixing direct
-                // replies and unsolicited commits on different paths reorders them.
-                if let Some(Payload::KeyEventResponse(response)) = envelope.payload.as_ref() {
-                    let _ = reader_key_responses.send(response.clone());
-                }
-                if envelope.request_id == 0
-                    && let Some(Payload::KeyEventResponse(response)) = envelope.payload.as_ref() {
-                        let _ = reader_key_updates.send(response.clone());
-                        continue;
-                    }
-                if let Some(Payload::LogEvent(event)) = envelope.payload.as_ref() {
-                    let _ = reader_events.send(event.clone());
-                    continue;
-                }
-                if let Some(Payload::RenderSnapshot(snapshot)) = envelope.payload.as_ref() {
-                    let _ = reader_render_snapshots.send(snapshot.clone());
-                    continue;
-                }
-                if let Some(Payload::RendererEvent(event)) = envelope.payload.as_ref() {
-                    let _ = reader_renderer_events.send(*event);
-                    continue;
-                }
-
-                if let Some(sender) = reader_pending.lock().unwrap_or_else(|p| p.into_inner()).as_mut().and_then(|requests| requests.remove(&envelope.request_id)) {
-                    let _ = sender.send(Ok(envelope));
-                }
-            }
-            } => {}
-            }
-            close_connection(&reader_pending, &reader_signal).await;
-        });
+        let pending = PendingRequests::default();
+        let connection = connection::spawn(pipe, role, pending.clone());
 
         Ok(Self {
             server_pid,
-            layout,
-            outbound,
+            outbound: connection.outbound,
             pending,
-            closed,
-            events,
-            render_snapshots,
-            renderer_events,
-            key_updates,
-            key_responses,
-            next_request_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            tasks: Arc::new(ClientTasks(Mutex::new(vec![reader_task, writer_task]))),
-            input_open: Arc::default(),
+            closed: connection.closed,
+            incoming: connection.incoming,
+            next_request_id: Arc::new(std::sync::atomic::AtomicU64::new(
+                protocol::FIRST_REQUEST_ID,
+            )),
+            tasks: connection.tasks,
         })
     }
 
+    /// 等待连接关闭；若连接已经关闭则立即返回。
     pub async fn disconnected(&self) {
         let mut closed = self.closed.subscribe();
         let _ = closed.wait_for(|closed| *closed).await;
     }
 
+    /// 检查客户端是否仍将连接视为可用。
     pub fn is_connected(&self) -> bool {
         !*self.closed.borrow()
     }
 
-    pub fn subscribe_key_updates(&self) -> broadcast::Receiver<KeyEventResponse> {
-        self.key_updates.subscribe()
+    /// 订阅对端发来的完整消息流。
+    ///
+    /// 请求响应和主动事件均按管道接收顺序发布；调用方负责按业务载荷过滤。响应会先发布到
+    /// 此流，再唤醒对应的 [`Self::request`]，因此需要统一顺序的消费者不会发生重排。
+    pub fn subscribe(&self) -> broadcast::Receiver<Envelope> {
+        self.incoming.subscribe()
     }
 
-    pub fn subscribe_key_responses(&self) -> broadcast::Receiver<KeyEventResponse> {
-        self.key_responses.subscribe()
-    }
-
-    /// Cancel outstanding calls and release both halves of the pipe.
+    /// 关闭连接、取消未完成请求并终止后台读写任务。
+    ///
+    /// 对所有共享此连接的客户端克隆生效；重复调用是安全的。
     pub async fn disconnect(&self) {
-        close_connection(&self.pending, &self.closed).await;
-        let tasks = std::mem::take(&mut *self.tasks.0.lock().unwrap_or_else(|p| p.into_inner()));
-        for task in tasks {
-            task.abort();
-            let _ = task.await;
-        }
+        self.pending.close();
+        self.closed.send_replace(true);
+        self.tasks.abort_all().await;
     }
 
-    /// Subscribe to server-to-client log events.
-    pub fn subscribe_events(&self) -> broadcast::Receiver<LogEvent> {
-        self.events.subscribe()
-    }
-
-    pub fn subscribe_render_snapshots(&self) -> broadcast::Receiver<RenderSnapshot> {
-        self.render_snapshots.subscribe()
-    }
-
-    pub fn subscribe_renderer_events(&self) -> broadcast::Receiver<RendererEvent> {
-        self.renderer_events.subscribe()
-    }
-
-    pub async fn send_render_snapshot(&self, snapshot: RenderSnapshot) -> Result<(), RpcError> {
+    /// 发布无需响应的事件。
+    ///
+    /// 载荷以请求 ID 0 排入有界 FIFO。队列已满时关闭连接，避免调用方继续在已丢失顺序的
+    /// 通道上发送业务消息。
+    pub fn publish(&self, payload: Payload) -> Result<(), RpcError> {
         if !self.is_connected() {
             return Err(RpcError::Disconnected);
         }
         self.outbound
             .try_send(Envelope {
-                request_id: 0,
-                payload: Some(Payload::RenderSnapshot(snapshot)),
+                request_id: protocol::EVENT_REQUEST_ID,
+                payload: Some(payload),
             })
             .map_err(|error| self.queue_error(error))
-    }
-
-    pub async fn send_renderer_event(&self, event: RendererEvent) -> Result<(), RpcError> {
-        if !self.is_connected() {
-            return Err(RpcError::Disconnected);
-        }
-        self.outbound
-            .try_send(Envelope {
-                request_id: 0,
-                payload: Some(Payload::RendererEvent(event)),
-            })
-            .map_err(|error| self.queue_error(error))
-    }
-
-    pub async fn send_layout_update(&self, update: LayoutUpdate) -> Result<(), RpcError> {
-        if !self.is_connected() {
-            return Err(RpcError::Disconnected);
-        }
-        // Geometry is replaceable state, not an ordered input operation.
-        // A busy pipe retains the final position without filling the key FIFO.
-        self.layout.send_replace(Some(update));
-        Ok(())
-    }
-
-    /// Send a best-effort diagnostic event to the server.
-    pub async fn send_log_event(
-        &self,
-        level: impl Into<String>,
-        text: impl Into<String>,
-    ) -> Result<(), RpcError> {
-        if !self.is_connected() {
-            return Err(RpcError::Disconnected);
-        }
-        self.outbound
-            .try_send(Envelope {
-                request_id: 0,
-                payload: Some(Payload::LogEvent(LogEvent {
-                    level: level.into(),
-                    text: text.into(),
-                })),
-            })
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => RpcError::Overloaded,
-                mpsc::error::TrySendError::Closed(_) => RpcError::Disconnected,
-            })
     }
 
     fn queue_error(&self, error: mpsc::error::TrySendError<Envelope>) -> RpcError {
@@ -396,189 +166,25 @@ impl RpcClient {
         }
     }
 
-    /// Read the broker's configuration. `refresh` requests a one-shot re-read
-    /// from disk for this call (the preview uses it to see a just-edited setup).
-    pub async fn query_config(
-        &self,
-        path: &str,
-        refresh: bool,
-    ) -> Result<Option<serde_json::Value>, RpcError> {
-        let response = self
-            .request(Payload::QueryConfig(crate::message::QueryConfig {
-                refresh,
-                path: path.into(),
-            }))
-            .await?;
-        match response.payload {
-            Some(Payload::ConfigValue(value)) => value
-                .json
-                .map(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| RpcError::Protocol(format!("invalid configuration JSON: {e}")))
-                })
-                .transpose(),
-            _ => Err(RpcError::UnexpectedResponse),
-        }
-    }
-
-    /// Check service readiness on a control connection, without creating input state.
-    pub async fn ping(&self, text: impl Into<String>) -> Result<Pong, RpcError> {
-        let response = self
-            .request(Payload::Ping(Ping { text: text.into() }))
-            .await?;
-        match response.payload {
-            Some(Payload::Pong(response)) => Ok(response),
-            _ => Err(RpcError::UnexpectedResponse),
-        }
-    }
-
-    pub async fn process_translated_key(
-        &self,
-        event: KeyEvent,
-    ) -> Result<KeyEventResponse, RpcError> {
-        self.ensure_input_session(event.token).await?;
-        self.request_key_response(Payload::KeyEvent(event)).await
-    }
-
-    pub async fn context_command(
-        &self,
-        command: crate::message::ContextCommand,
-    ) -> Result<KeyEventResponse, RpcError> {
-        let destroy = command.action == crate::message::ContextAction::Destroy as i32;
-        let id = command.token.as_ref().map(|t| t.context_id).unwrap_or(0);
-        if destroy && !self.input_open.lock().await.contains(&id) {
-            return Ok(KeyEventResponse::default());
-        }
-        self.ensure_input_session(command.token).await?;
-        let response = self
-            .request_key_response(Payload::ContextCommand(command))
-            .await;
-        if destroy && response.is_ok() {
-            self.input_open.lock().await.remove(&id);
-        }
-        response
-    }
-
-    async fn request_key_response(&self, payload: Payload) -> Result<KeyEventResponse, RpcError> {
-        let response = self.request(payload).await?;
-        match response.payload {
-            Some(Payload::KeyEventResponse(response)) => Ok(response),
-            _ => Err(RpcError::UnexpectedResponse),
-        }
-    }
-
-    async fn ensure_input_session(
-        &self,
-        token: Option<crate::message::ContextToken>,
-    ) -> Result<(), RpcError> {
-        self.prepare_input_session(token, None).await
-    }
-
-    /// Open once and restore an optional remembered mode before allowing input.
-    /// Assignment and acknowledgement are part of the caller's existing deadline.
-    pub async fn prepare_input_session(
-        &self,
-        token: Option<crate::message::ContextToken>,
-        initial_ascii_mode: Option<bool>,
-    ) -> Result<(), RpcError> {
-        if !self.is_connected() {
-            return Err(RpcError::Disconnected);
-        }
-        let mut opened = self.input_open.lock().await;
-        let id = token
-            .as_ref()
-            .ok_or_else(|| RpcError::Protocol("input token required".into()))?
-            .context_id;
-        if opened.contains(&id) {
-            return Ok(());
-        }
-        let reply = self
-            .request(Payload::OpenInput(crate::message::OpenInput { token }))
-            .await?;
-        match reply.payload {
-            Some(Payload::InputOpened(v)) if v.token == token => {
-                if let Some(ascii_mode) = initial_ascii_mode {
-                    let response = self
-                        .request_key_response(Payload::ContextCommand(
-                            crate::message::ContextCommand {
-                                token,
-                                action: crate::message::ContextAction::SetAscii as i32,
-                                ascii_mode: Some(ascii_mode),
-                            },
-                        ))
-                        .await?;
-                    if response.token != token || response.ascii_mode != Some(ascii_mode) {
-                        return Err(RpcError::Protocol(
-                            "input mode restoration was not confirmed".into(),
-                        ));
-                    }
-                }
-                opened.insert(id);
-                Ok(())
-            }
-            _ => Err(RpcError::UnexpectedResponse),
-        }
-    }
-
-    /// Ask the server to finish its current work and shut down gracefully.
-    pub async fn shutdown(&self, reason: impl Into<String>) -> Result<ShutdownResponse, RpcError> {
-        let response = self
-            .request(Payload::Shutdown(Shutdown {
-                reason: reason.into(),
-            }))
-            .await?;
-        match response.payload {
-            Some(Payload::ShutdownResponse(response)) => Ok(response),
-            _ => Err(RpcError::UnexpectedResponse),
-        }
-    }
-    /// Ask broker to record a problem and notify the user under its lifecycle policy.
-    /// Acknowledgement means recorded, not that the OS displayed a notification.
-    pub async fn notify_user(
-        &self,
-        notification: crate::message::UserNotification,
-    ) -> Result<(), RpcError> {
-        match self
-            .request(Payload::UserNotification(notification))
-            .await?
-            .payload
-        {
-            Some(Payload::Pong(_)) => Ok(()),
-            _ => Err(RpcError::UnexpectedResponse),
-        }
-    }
-
-    async fn request(&self, payload: Payload) -> Result<Envelope, RpcError> {
+    /// 发送请求并等待具有相同请求编号的响应。
+    ///
+    /// 此层只负责编号、关联、期限和远端失败；响应载荷的业务类型由调用组件解释。
+    pub async fn request(&self, payload: Payload) -> Result<Envelope, RpcError> {
         if !self.is_connected() {
             return Err(RpcError::Disconnected);
         }
         // Validate before queueing: a caller error must not poison a live connection.
-        wire::encode(&Envelope {
-            request_id: 1,
-            payload: Some(payload.clone()),
-        })?;
+        codec::validate_request(&payload)?;
         let id = self
             .next_request_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if id == 0 {
+        if id == protocol::EVENT_REQUEST_ID {
             self.disconnect().await;
             return Err(RpcError::Protocol("request ID exhausted".into()));
         }
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
-            let requests = pending.as_mut().ok_or(RpcError::Disconnected)?;
-            if requests.len() >= 64 {
-                return Err(RpcError::Overloaded);
-            }
-            requests.insert(id, tx);
-        }
-        let _call = PendingCall {
-            pending: self.pending.clone(),
-            id,
-        };
+        let (rx, _call) = self.pending.register(id)?;
         // Cancelling this future drops the registration, even during queueing.
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::time::timeout(runtime::REQUEST_TIMEOUT, async {
             self.outbound
                 .send(Envelope {
                     request_id: id,

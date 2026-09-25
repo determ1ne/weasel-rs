@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+mod support;
+use support::{ClientProtocol as _, ConnectionProtocol as _};
+
 use weasel_common::{
     message::envelope::Payload,
     rpc::{RpcClient, RpcError, RpcServer},
@@ -8,7 +11,7 @@ use weasel_common::{
 #[tokio::test(flavor = "current_thread")]
 async fn key_replies_push_commits_and_context_commands_share_wire_order() {
     use weasel_common::message::{
-        ContextAction, ContextCommand, ContextToken, KeyEvent, KeyEventResponse,
+        ContextAction, ContextCommand, ContextToken, InputKey, KeyEventResponse,
     };
     tokio::time::timeout(Duration::from_secs(3), async {
         let name = format!(r"\\.\pipe\weaselrs-ordered-context-{}", std::process::id());
@@ -74,13 +77,13 @@ async fn key_replies_push_commits_and_context_commands_share_wire_order() {
                 .unwrap();
             connection
         });
-        let mut ordered = client.subscribe_key_responses();
-        let mut unsolicited = client.subscribe_key_updates();
+        let mut ordered = client.subscribe();
+        let mut unsolicited = client.subscribe();
         assert!(
             client
-                .process_translated_key(KeyEvent {
+                .process_translated_key(InputKey {
                     token: Some(token),
-                    keycode: Some(97),
+                    keycode: 97,
                     ..Default::default()
                 })
                 .await
@@ -98,13 +101,12 @@ async fn key_replies_push_commits_and_context_commands_share_wire_order() {
             })
             .await
             .unwrap();
-        let first = ordered.recv().await.unwrap();
+        let first = support::recv_key(&mut ordered, false).await;
         assert_eq!(first.commit_text, "提交");
         assert_eq!(first.revision, 1);
-        assert_eq!(ordered.recv().await.unwrap().revision, 2);
-        assert_eq!(ordered.recv().await.unwrap().revision, 3);
-        assert_eq!(unsolicited.recv().await.unwrap().revision, 1);
-        assert!(unsolicited.try_recv().is_err());
+        assert_eq!(support::recv_key(&mut ordered, false).await.revision, 2);
+        assert_eq!(support::recv_key(&mut ordered, false).await.revision, 3);
+        assert_eq!(support::recv_key(&mut unsolicited, true).await.revision, 1);
         drop(serve.await.unwrap());
     })
     .await
@@ -129,8 +131,8 @@ async fn disconnected_client_rejects_new_requests_and_reconnects() {
         ));
         assert!(matches!(
             client
-                .process_translated_key(weasel_common::message::KeyEvent {
-                    keycode: Some(97),
+                .process_translated_key(weasel_common::message::InputKey {
+                    keycode: 97,
                     ..Default::default()
                 })
                 .await,
@@ -248,7 +250,7 @@ async fn unsolicited_candidate_result_is_delivered_without_a_key_request() {
         let server = RpcServer::new(&name);
         let accept = tokio::spawn(async move { (server.accept().await.unwrap(), server) });
         let client = connect_with_retry(&name).await.unwrap();
-        let mut updates = client.subscribe_key_updates();
+        let mut updates = client.subscribe();
         let (connection, _server) = accept.await.unwrap();
         connection
             .send_key_event_response(
@@ -261,7 +263,10 @@ async fn unsolicited_candidate_result_is_delivered_without_a_key_request() {
             )
             .await
             .unwrap();
-        assert_eq!(updates.recv().await.unwrap().commit_text, "候选提交");
+        assert_eq!(
+            support::recv_key(&mut updates, true).await.commit_text,
+            "候选提交"
+        );
         connection
             .send_key_event_response(
                 0,
@@ -272,7 +277,7 @@ async fn unsolicited_candidate_result_is_delivered_without_a_key_request() {
             )
             .await
             .unwrap();
-        assert!(updates.recv().await.unwrap().open_emoji_panel);
+        assert!(support::recv_key(&mut updates, true).await.open_emoji_panel);
     })
     .await
     .expect("unsolicited responses must not be discarded");
@@ -304,9 +309,8 @@ async fn named_pipe_ping_round_trip_and_events() {
         match envelope.payload {
             Some(Payload::KeyEvent(key_event)) => {
                 assert_eq!(key_event.virtual_key, 0x41);
-                assert_eq!(key_event.lparam, 0x1234);
-                assert!(!key_event.key_up);
-                assert!(!key_event.test);
+                assert_eq!(key_event.native_lparam, 0x1234);
+                assert!(!key_event.released);
                 connection
                     .send_key_event_response(
                         envelope.request_id,
@@ -350,7 +354,7 @@ async fn named_pipe_ping_round_trip_and_events() {
         .await
         .expect("connecting to the test Named Pipe timed out")
         .expect("the test Named Pipe client failed to connect");
-    let mut events = client.subscribe_events();
+    let mut events = client.subscribe();
 
     let response = tokio::time::timeout(Duration::from_secs(2), client.ping("integration ping"))
         .await
@@ -360,10 +364,10 @@ async fn named_pipe_ping_round_trip_and_events() {
 
     let response = tokio::time::timeout(
         Duration::from_secs(2),
-        client.process_translated_key(weasel_common::message::KeyEvent {
+        client.process_translated_key(weasel_common::message::InputKey {
             virtual_key: 0x41,
-            lparam: 0x1234,
-            keycode: Some(97),
+            native_lparam: 0x1234,
+            keycode: 97,
             token: Some(weasel_common::message::ContextToken {
                 context_id: 1,
                 connection_epoch: 1,
@@ -379,10 +383,9 @@ async fn named_pipe_ping_round_trip_and_events() {
     assert_eq!(response.composition, "a");
     assert_eq!(response.candidates[0].text, "啊");
 
-    let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+    let event = tokio::time::timeout(Duration::from_secs(2), support::recv_log(&mut events))
         .await
-        .expect("waiting for the server event timed out")
-        .expect("the server event channel closed");
+        .expect("waiting for the server event timed out");
     assert_eq!(event.level, "info");
     assert_eq!(event.text, "test server connected");
 

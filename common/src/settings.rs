@@ -1,91 +1,144 @@
-//! Read-only configuration queries. Transport is asynchronous; snapshots are local.
+//! 配置快照的本地解析、查询和默认值合并。
+//!
+//! [`ConfigSnapshot`] 持有不可变 JSON 配置，查询结果借用快照中的值；合并主题默认值
+//! 会创建新快照，不修改原快照。配置从何处取得由各个消费组件决定。
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::sync::Arc;
 
+/// 可廉价克隆的不可变配置快照。
+///
+/// 内部 JSON 通过引用计数共享；查询不会修改配置。调用
+/// [`with_theme_defaults`](Self::with_theme_defaults) 会返回独立快照，并保留原快照不变。
 #[derive(Clone, Debug)]
 pub struct ConfigSnapshot(Arc<Value>);
 
 impl ConfigSnapshot {
+    /// 将 JSON 值封装为共享的只读快照。
     pub fn new(value: Value) -> Self {
         Self(Arc::new(value))
     }
+    /// 解析 JSON 根对象并构造配置快照。
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        let value: Value = serde_json::from_str(json).map_err(|error| error.to_string())?;
+        if !value.is_object() {
+            return Err("configuration root must be an object".into());
+        }
+        Ok(Self::new(value))
+    }
+    /// 按受限的 jq 风格路径查询配置值。
+    ///
+    /// 返回的引用与快照具有相同生命周期；路径不存在时返回 `Ok(None)`。
+    ///
+    /// # Errors
+    ///
+    /// 路径语法无效或超过长度限制时返回描述错误的字符串。
     pub fn query(&self, path: &str) -> Result<Option<&Value>, String> {
         query(&self.0, path)
     }
+    /// 查询并反序列化指定配置项。
+    ///
+    /// 路径不存在时返回 `Ok(None)`；存在但类型不匹配或值无法反序列化时返回错误。
     pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<Option<T>, String> {
         self.query(path)?
             .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
             .transpose()
     }
-    pub fn theme(&self) -> Result<String, String> {
-        Ok(self.get(".theme")?.unwrap_or_else(|| "eleven".into()))
+    /// 查询并反序列化必需配置项。
+    ///
+    /// # Errors
+    ///
+    /// 路径不存在、语法无效或值不能反序列化为目标类型时返回错误。
+    pub fn required<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+        self.get(path)?
+            .ok_or_else(|| format!("missing required configuration value {path}"))
     }
 
-    pub fn app_ascii_mode(&self, executable: &str) -> Option<bool> {
-        self.app_bool(executable, "ascii_mode")
-    }
-
-    /// 应用未指定时继承全局值，不能在应用层填默认值而固定继承结果。
-    pub fn app_bool(&self, executable: &str, option: &str) -> Option<bool> {
-        self.application_bool(executable, option)
-            .or_else(|| self.0.get(option).and_then(Value::as_bool))
-    }
-
-    pub fn inline_preedit(&self) -> bool {
-        self.0
-            .get("inline_preedit")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-    }
-
-    /// 安全输入区域默认不离开宿主进程；只有用户明确选择后才交给 Rime。
-    pub fn allow_rime_in_secure_fields(&self) -> bool {
-        self.0
-            .get("allow_rime_in_secure_fields")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    }
-
-    pub fn app_inline_preedit(&self, executable: &str) -> bool {
-        self.app_bool(executable, "inline_preedit")
-            .unwrap_or_else(|| self.inline_preedit())
-    }
-
-    /// Negotiate renderer capabilities early if any application can need them.
-    pub fn needs_external_preedit(&self) -> bool {
-        !self.inline_preedit()
-            || self
-                .0
-                .get("app_options")
-                .and_then(Value::as_object)
-                .is_some_and(|apps| {
-                    apps.values().any(|options| {
-                        options.get("inline_preedit").and_then(Value::as_bool) == Some(false)
-                    })
-                })
-    }
-
-    fn application_bool(&self, executable: &str, option: &str) -> Option<bool> {
-        let apps = self.0.get("app_options")?.as_object()?;
-        apps.get(executable)
-            .or_else(|| {
-                apps.iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(executable))
-                    .map(|(_, value)| value)
-            })?
-            .get(option)?
+    /// 查询应用布尔选项；应用未指定时继承同名全局选项。
+    ///
+    /// 应用名比较不区分 ASCII 大小写。配置合并阶段保证全局选项存在，因此缺失或
+    /// 类型不正确表示配置快照违反内部不变量。
+    pub fn app_bool(&self, executable: &str, option: &str) -> Result<bool, String> {
+        let value = self
+            .application_value(executable, option)?
+            .or_else(|| self.0.get(option))
+            .ok_or_else(|| format!("missing required configuration value .{option}"))?;
+        value
             .as_bool()
-    }
-    pub fn theme_settings<T: DeserializeOwned + Default>(&self, name: &str) -> Result<T, String> {
-        let key = serde_json::to_string(name).map_err(|e| e.to_string())?;
-        Ok(self
-            .get(&format!(".themeSettings[{key}]"))?
-            .unwrap_or_default())
+            .ok_or_else(|| format!("configuration value {option} must be a boolean"))
     }
 
-    /// Add one factory's defaults without changing the broker snapshot or other
-    /// themes. The already-merged installation/user object has final precedence.
+    /// 判断是否有任何应用需要外置 preedit 能力。
+    ///
+    /// 除全局设置外，也检查所有 `app_options` 覆盖；只要任一应用显式关闭
+    /// `inline_preedit`，就必须提前协商该能力。
+    pub fn needs_external_preedit(&self) -> Result<bool, String> {
+        if !self.required::<bool>(".inline_preedit")? {
+            return Ok(true);
+        }
+        let apps = self
+            .0
+            .get("app_options")
+            .and_then(Value::as_object)
+            .ok_or("app_options must be an object")?;
+        for (name, options) in apps {
+            let options = options
+                .as_object()
+                .ok_or_else(|| format!("app_options.{name} must be an object"))?;
+            let Some(value) = options.get("inline_preedit") else {
+                continue;
+            };
+            let enabled = value
+                .as_bool()
+                .ok_or_else(|| format!("app_options.{name}.inline_preedit must be a boolean"))?;
+            if !enabled {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn application_value(&self, executable: &str, option: &str) -> Result<Option<&Value>, String> {
+        let apps = self
+            .0
+            .get("app_options")
+            .and_then(Value::as_object)
+            .ok_or("app_options must be an object")?;
+        let application = apps.get(executable).or_else(|| {
+            apps.iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(executable))
+                .map(|(_, value)| value)
+        });
+        match application {
+            Some(value) => value
+                .as_object()
+                .ok_or_else(|| format!("app_options.{executable} must be an object"))
+                .map(|options| options.get(option)),
+            None => Ok(None),
+        }
+    }
+
+    /// 读取指定主题的设置。
+    ///
+    /// 设置值按 `Deserialize` 反序列化。调用前应已通过
+    /// [`with_theme_defaults`](Self::with_theme_defaults) 合并主题默认值。
+    ///
+    /// # Errors
+    ///
+    /// 配置路径无效，或现有值无法反序列化为 `T` 时返回错误。
+    pub fn theme_settings<T: DeserializeOwned>(&self, name: &str) -> Result<T, String> {
+        let key = serde_json::to_string(name).map_err(|e| e.to_string())?;
+        self.required(&format!(".themeSettings[{key}]"))
+    }
+
+    /// 为指定主题叠加默认设置，并返回新的配置快照。
+    ///
+    /// 默认对象作为基础，现有 `themeSettings.<name>` 作为覆盖值；递归合并规则由
+    /// [`merge`] 定义。输入快照保持不变。
+    ///
+    /// # Errors
+    ///
+    /// 默认值、配置根或对应主题设置不是 JSON 对象时返回错误。
     pub fn with_theme_defaults(&self, name: &str, mut defaults: Value) -> Result<Self, String> {
         if !defaults.is_object() {
             return Err(format!("theme {name} defaults must be an object"));
@@ -110,7 +163,9 @@ impl ConfigSnapshot {
     }
 }
 
-/// Objects merge recursively; arrays, scalars and explicit null replace values.
+/// 将 JSON 覆盖值合并到基础值中。
+///
+/// 两侧均为对象时递归合并；数组、标量和显式 `null` 均由覆盖值整体替换基础值。
 pub fn merge(base: &mut Value, patch: Value) {
     match (base, patch) {
         (Value::Object(base), Value::Object(patch)) => {
@@ -122,8 +177,16 @@ pub fn merge(base: &mut Value, patch: Value) {
     }
 }
 
-// Deliberately only jq-like paths, not an expression language. Validate the
-// entire path even after a missing key, so malformed queries are never accepted.
+/// 使用受限的 jq 风格路径查询 JSON 值。
+///
+/// 支持对象属性（`.name`）、带引号的对象键（`["a.b"]`）和数组下标（`[0]`），不支持
+/// 过滤器或其他表达式。即使中途遇到缺失属性，也会继续验证路径语法。
+///
+/// `.` 表示根值；空路径无效。返回引用借用 `root`。
+///
+/// # Errors
+///
+/// 路径超过 4096 字节或语法不合法时返回错误。
 pub fn query<'a>(root: &'a Value, path: &str) -> Result<Option<&'a Value>, String> {
     if path.len() > 4096 {
         return Err("configuration path exceeds 4096 bytes".into());
@@ -173,31 +236,6 @@ pub fn query<'a>(root: &'a Value, path: &str) -> Result<Option<&'a Value>, Strin
     Ok(current)
 }
 
-pub async fn fetch(
-    role: crate::message::PeerRole,
-    refresh: bool,
-) -> Result<ConfigSnapshot, String> {
-    use crate::rpc::{RpcClient, try_default_broker_pipe_name};
-    use std::time::Duration;
-    tokio::time::timeout(Duration::from_secs(2), async {
-        let pipe = try_default_broker_pipe_name().map_err(|e| e.to_string())?;
-        let client = RpcClient::connect_as_with_timeout(pipe, role, Duration::from_secs(2))
-            .await
-            .map_err(|e| e.to_string())?;
-        let root = client
-            .query_config(".", refresh)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or("broker returned no configuration root")?;
-        if !root.is_object() {
-            return Err("configuration root must be an object".into());
-        }
-        Ok(ConfigSnapshot::new(root))
-    })
-    .await
-    .map_err(|_| "configuration query timed out".to_owned())?
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -211,31 +249,40 @@ mod tests {
                     "other.exe": {"ascii_mode": true}
                 }
             }));
-            assert!(!config.app_inline_preedit("CMD.EXE"));
-            assert!(config.app_inline_preedit("editor.exe"));
-            assert_eq!(config.app_inline_preedit("other.exe"), global);
-            assert_eq!(config.app_inline_preedit("unknown.exe"), global);
-            assert!(config.needs_external_preedit());
+            assert!(!config.app_bool("CMD.EXE", "inline_preedit").unwrap());
+            assert!(config.app_bool("editor.exe", "inline_preedit").unwrap());
+            assert_eq!(
+                config.app_bool("other.exe", "inline_preedit").unwrap(),
+                global
+            );
+            assert_eq!(
+                config.app_bool("unknown.exe", "inline_preedit").unwrap(),
+                global
+            );
+            assert!(config.needs_external_preedit().unwrap());
         }
-        let defaults = super::ConfigSnapshot::new(serde_json::json!({}));
-        assert!(defaults.app_inline_preedit("cmd.exe"));
-        assert!(!defaults.needs_external_preedit());
+        let defaults = super::ConfigSnapshot::new(serde_json::json!({
+            "inline_preedit": true,
+            "app_options": {}
+        }));
+        assert!(defaults.app_bool("cmd.exe", "inline_preedit").unwrap());
+        assert!(!defaults.needs_external_preedit().unwrap());
     }
     #[test]
     fn application_defaults_distinguish_false_from_missing() {
         let config = super::ConfigSnapshot::new(serde_json::json!({
             "app_options": {"cmd.exe": {"ascii_mode": true}, "editor.exe": {"ascii_mode": false}}
         }));
-        assert_eq!(config.app_ascii_mode("CMD.EXE"), Some(true));
-        assert_eq!(config.app_ascii_mode("editor.exe"), Some(false));
-        assert_eq!(config.app_ascii_mode("unknown.exe"), None);
+        assert!(config.app_bool("CMD.EXE", "ascii_mode").unwrap());
+        assert!(!config.app_bool("editor.exe", "ascii_mode").unwrap());
+        assert!(config.app_bool("unknown.exe", "ascii_mode").is_err());
         let config = super::ConfigSnapshot::new(serde_json::json!({
             "ascii_mode": true, "inline_preedit": false,
             "app_options": {"editor.exe": {"ascii_mode": false}}
         }));
-        assert_eq!(config.app_ascii_mode("unknown.exe"), Some(true));
-        assert_eq!(config.app_ascii_mode("EDITOR.EXE"), Some(false));
-        assert!(!config.inline_preedit());
+        assert!(config.app_bool("unknown.exe", "ascii_mode").unwrap());
+        assert!(!config.app_bool("EDITOR.EXE", "ascii_mode").unwrap());
+        assert!(!config.required::<bool>(".inline_preedit").unwrap());
         for global in [false, true] {
             let config = super::ConfigSnapshot::new(serde_json::json!({
                 "ascii_mode": global, "inline_preedit": global,
@@ -243,10 +290,13 @@ mod tests {
                     "ascii_mode": false, "inline_preedit": false
                 }}
             }));
-            assert_eq!(config.app_ascii_mode("EMPTY.EXE"), Some(global));
-            assert_eq!(config.app_inline_preedit("EMPTY.EXE"), global);
-            assert_eq!(config.app_ascii_mode("explicit.exe"), Some(false));
-            assert!(!config.app_inline_preedit("explicit.exe"));
+            assert_eq!(config.app_bool("EMPTY.EXE", "ascii_mode").unwrap(), global);
+            assert_eq!(
+                config.app_bool("EMPTY.EXE", "inline_preedit").unwrap(),
+                global
+            );
+            assert!(!config.app_bool("explicit.exe", "ascii_mode").unwrap());
+            assert!(!config.app_bool("explicit.exe", "inline_preedit").unwrap());
         }
     }
     use super::*;

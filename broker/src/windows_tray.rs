@@ -1,7 +1,6 @@
 use std::{
     cell::RefCell,
     os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
-    path::PathBuf,
     process::Stdio,
     sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex, OnceLock},
@@ -17,13 +16,12 @@ use crate::managed_children::Child;
 use weasel_common::{
     logging::ComponentLogger,
     message::PeerRole,
-    process::SingleInstance,
+    process::{RuntimePaths, SingleInstance},
     rpc::{RpcClient, default_pipe_name, default_renderer_pipe_name},
-    runtime_paths::RuntimePaths,
 };
 use windows_strings::{HSTRING, PCWSTR, w};
 
-use weasel_common::broker_menu;
+use weasel_common::command_menu;
 const TRAY_CALLBACK_MESSAGE: u32 = WM_APP as u32 + 1;
 const DEPLOY_COMPLETE: u32 = WM_APP as u32 + 2;
 static DEPLOYING: AtomicBool = AtomicBool::new(false);
@@ -54,7 +52,7 @@ fn wake_monitor() {
 struct BrokerState {
     settings: crate::settings_rpc::SettingsStore,
     notifications: crate::notifications::NotificationCenter,
-    directory: PathBuf,
+    paths: RuntimePaths,
     server: Option<Child>,
     renderer: Option<Child>,
     server_retry: RestartBackoff,
@@ -102,7 +100,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     _settings_service
         .notifications()
         .report_settings_errors(&settings_warnings);
-    let directory = paths.executable_directory;
+    let directory = paths.executable_directory.clone();
     crate::managed_children::initialize()?;
     crate::managed_children::clear_stale(&directory, "weasel-server.exe")?;
     crate::managed_children::clear_stale(&directory, "weasel-renderer.exe")?;
@@ -125,7 +123,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(Mutex::new(BrokerState {
         settings: _settings_service.settings(),
         notifications: _settings_service.notifications(),
-        directory: directory.clone(),
+        paths,
         server: Some(server),
         renderer: Some(renderer),
         server_retry: RestartBackoff::new(Instant::now()),
@@ -192,7 +190,7 @@ fn shutdown_broker(state: &Mutex<BrokerState>) {
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
         state.operation = Operation::Shutdown;
         (
-            state.directory.clone(),
+            state.paths.executable_directory.clone(),
             state.server.take(),
             state.renderer.take(),
         )
@@ -302,14 +300,17 @@ fn monitor_child(shared: &Arc<Mutex<BrokerState>>, server: bool) {
             }
             Ok(Some(status)) => {
                 retry.healthy(now);
-                deployment_diagnostic(&state.directory, &format!("{executable} exited: {status}"));
+                deployment_diagnostic(
+                    &state.paths.executable_directory,
+                    &format!("{executable} exited: {status}"),
+                );
                 *slot = None;
                 retry.failed(now);
             }
             Err(error) => {
                 if retry.ready(now) {
                     deployment_diagnostic(
-                        &state.directory,
+                        &state.paths.executable_directory,
                         &format!("Cannot inspect {executable}: {error}"),
                     );
                     retry.failed(now);
@@ -325,12 +326,12 @@ fn monitor_child(shared: &Arc<Mutex<BrokerState>>, server: bool) {
     if server && SingleInstance::acquire("server").is_err() {
         retry.failed(now);
         deployment_diagnostic(
-            &state.directory,
+            &state.paths.executable_directory,
             "Server restart deferred: server instance lock unavailable",
         );
         return;
     }
-    let directory = state.directory.clone();
+    let directory = state.paths.executable_directory.clone();
     drop(guard);
     // Readiness can take seconds. Never hold the tray/operation state lock.
     let started = start_child(&directory, executable, &[]);
@@ -353,7 +354,7 @@ fn monitor_child(shared: &Arc<Mutex<BrokerState>>, server: bool) {
     match started {
         Ok(child) => {
             deployment_diagnostic(
-                &state.directory,
+                &state.paths.executable_directory,
                 &format!("monitor restarted {executable} pid={}", child.id()),
             );
             *slot = Some(child);
@@ -362,7 +363,7 @@ fn monitor_child(shared: &Arc<Mutex<BrokerState>>, server: bool) {
         Err(error) => {
             retry.failed(now);
             deployment_diagnostic(
-                &state.directory,
+                &state.paths.executable_directory,
                 &format!("Failed to restart {executable}: {error}"),
             );
         }
@@ -396,8 +397,7 @@ fn shutdown_component(child: &mut Option<Child>, pipe: String, reason: &str) -> 
                 .await
                 .map_err(|error| error.to_string())?;
             server.verify(&client).await?;
-            client
-                .shutdown(reason)
+            crate::service_rpc::shutdown(&client, reason)
                 .await
                 .map_err(|error| error.to_string())
         })
@@ -477,77 +477,41 @@ fn deploy(state: &mut BrokerState) -> (String, u32) {
             .map_err(|e| e.to_string())?;
         runtime.block_on(async {
             use std::io::Write;
-            use tokio::io::AsyncReadExt;
             use weasel_common::deploy_protocol::wait_for_completion;
-            let paths =
-                RuntimePaths::for_directory(state.directory.clone()).map_err(|e| e.to_string())?;
-            let development = paths.development;
-            let log = Arc::new(Mutex::new(
-                ComponentLogger::for_paths(&paths, "broker-deploy").map_err(|e| e.to_string())?,
-            ));
-            let mut child = tokio::process::Command::new(state.directory.join("weasel-server.exe"))
-                .arg("--deploy-ui")
-                .current_dir(&state.directory)
-                .creation_flags(CREATE_NO_WINDOW as u32)
-                .kill_on_drop(false)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(if development {
-                    Stdio::piped()
-                } else {
-                    Stdio::null()
-                })
-                .spawn()
-                .map_err(|e| format!("could not start deployment UI: {e}"))?;
-            let _ = writeln!(
-                log.lock().unwrap(),
-                "[broker] deployment UI started pid={:?}",
-                child.id()
-            );
+            let mut log = ComponentLogger::for_paths(&state.paths, "broker-deploy")
+                .map_err(|e| e.to_string())?;
+            let mut child = tokio::process::Command::new(
+                state.paths.executable_directory.join("weasel-server.exe"),
+            )
+            .arg("--deploy-ui")
+            .current_dir(&state.paths.executable_directory)
+            .creation_flags(CREATE_NO_WINDOW as u32)
+            .kill_on_drop(false)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("could not start deployment UI: {e}"))?;
+            let _ = writeln!(log, "[broker] deployment UI started pid={:?}", child.id());
             let mut stdout = child.stdout.take().unwrap();
-            let stderr = child.stderr.take();
-            let stderr_log = log.clone();
-            let errors = tokio::spawn(async move {
-                let Some(mut stderr) = stderr else {
-                    return;
-                };
-                let mut bytes = [0; 8192];
-                while let Ok(count) = stderr.read(&mut bytes).await {
-                    if count == 0 {
-                        break;
-                    }
-                    let _ = stderr_log.lock().unwrap().write_all(&bytes[..count]);
-                }
-            });
             let result = bounded_operation(
                 async {
-                    let done = wait_for_completion(&mut stdout, |message| {
-                        if development {
-                            log.lock().unwrap().write_all(message.text.as_bytes())
-                        } else {
-                            Ok(())
-                        }
-                    })
-                    .await
-                    .map_err(|e| e.to_string())?;
+                    let done = wait_for_completion(&mut stdout, |_| Ok(()))
+                        .await
+                        .map_err(|e| e.to_string())?;
                     let _ = writeln!(
-                        log.lock().unwrap(),
+                        log,
                         "\n[broker] received Complete success={} exit_code={:?}; detaching UI",
-                        done.success,
-                        done.exit_code
+                        done.success, done.exit_code
                     );
-                    log.lock()
-                        .unwrap()
-                        .write_all(format!("\n{}\n", done.message).as_bytes())
+                    log.write_all(format!("\n{}\n", done.message).as_bytes())
                         .map_err(|e| e.to_string())?;
                     completion_result(done.success, done.exit_code, &done.message)
                 },
                 Duration::from_secs(300),
             )
             .await;
-            errors.abort();
-            let _ = errors.await;
-            let _ = log.lock().unwrap().flush();
+            let _ = log.flush();
             // Explicitly detach: do not wait for the user's OK button.
             drop(child);
             result
@@ -576,7 +540,7 @@ fn deploy(state: &mut BrokerState) -> (String, u32) {
                                 ),
                             )
                             .unwrap_err();
-                            deployment_diagnostic(&state.directory, &error);
+                            deployment_diagnostic(&state.paths.executable_directory, &error);
                             return (error, MB_ICONERROR as u32);
                         }
                         thread::sleep(Duration::from_millis(100))
@@ -587,7 +551,7 @@ fn deploy(state: &mut BrokerState) -> (String, u32) {
                             Err(format!("无法确认部署进程已释放数据：{lock_error}")),
                         )
                         .unwrap_err();
-                        deployment_diagnostic(&state.directory, &error);
+                        deployment_diagnostic(&state.paths.executable_directory, &error);
                         return (error, MB_ICONERROR as u32);
                     }
                 }
@@ -597,23 +561,23 @@ fn deploy(state: &mut BrokerState) -> (String, u32) {
             let error =
                 workflow_result(result, Err("restoration skipped: broker is exiting".into()))
                     .unwrap_err();
-            deployment_diagnostic(&state.directory, &error);
+            deployment_diagnostic(&state.paths.executable_directory, &error);
             return (error, MB_ICONERROR as u32);
         }
-        match start_child(&state.directory, "weasel-server.exe", &[]) {
+        match start_child(&state.paths.executable_directory, "weasel-server.exe", &[]) {
             Ok(mut child) => {
                 deployment_diagnostic(
-                    &state.directory,
+                    &state.paths.executable_directory,
                     &format!("ordinary server spawned pid={}", child.id()),
                 );
                 state.server_retry.started(Instant::now());
                 match wait_for_server(&mut child) {
                     Ok(()) => deployment_diagnostic(
-                        &state.directory,
+                        &state.paths.executable_directory,
                         "ordinary server answered readiness ping",
                     ),
                     Err(restart) => {
-                        deployment_diagnostic(&state.directory, &restart);
+                        deployment_diagnostic(&state.paths.executable_directory, &restart);
                         restoration = Err(restart);
                     }
                 }
@@ -627,7 +591,7 @@ fn deploy(state: &mut BrokerState) -> (String, u32) {
     match workflow_result(result, restoration) {
         Err(error) => {
             deployment_diagnostic(
-                &state.directory,
+                &state.paths.executable_directory,
                 &format!("deployment workflow failed: {error}"),
             );
             (format!("部署流程异常：\n{error}"), MB_ICONERROR as u32)
@@ -637,15 +601,6 @@ fn deploy(state: &mut BrokerState) -> (String, u32) {
 }
 
 fn restart_components(state: &mut BrokerState) -> (String, u32) {
-    let paths = match RuntimePaths::for_directory(state.directory.clone()) {
-        Ok(paths) => paths,
-        Err(error) => {
-            return (
-                format!("无法确定配置目录，已取消重启：{error}"),
-                MB_ICONERROR as u32,
-            );
-        }
-    };
     let mut errors = Vec::new();
     if let Err(error) = shutdown_component(
         &mut state.server,
@@ -671,8 +626,8 @@ fn restart_components(state: &mut BrokerState) -> (String, u32) {
     // Publish synchronously before renderer can query its startup theme.
     state.notifications.reset();
     let mut settings_warnings = Vec::new();
-    let settings = crate::settings::load(&paths, |warning| {
-        deployment_diagnostic(&state.directory, &warning);
+    let settings = crate::settings::load(&state.paths, |warning| {
+        deployment_diagnostic(&state.paths.executable_directory, &warning);
         settings_warnings.push(warning);
     });
     state.settings.replace(settings);
@@ -681,7 +636,11 @@ fn restart_components(state: &mut BrokerState) -> (String, u32) {
         .report_settings_errors(&settings_warnings);
     // Restore each component that actually stopped, even on partial failure.
     if state.renderer.is_none() && !STOPPING.load(Ordering::Acquire) {
-        match start_child(&state.directory, "weasel-renderer.exe", &[]) {
+        match start_child(
+            &state.paths.executable_directory,
+            "weasel-renderer.exe",
+            &[],
+        ) {
             Ok(child) => {
                 state.renderer = Some(child);
                 state.renderer_retry.started(Instant::now());
@@ -690,7 +649,7 @@ fn restart_components(state: &mut BrokerState) -> (String, u32) {
         }
     }
     if errors.is_empty() && state.server.is_none() && !STOPPING.load(Ordering::Acquire) {
-        match start_child(&state.directory, "weasel-server.exe", &[]) {
+        match start_child(&state.paths.executable_directory, "weasel-server.exe", &[]) {
             Ok(mut child) => {
                 if let Err(error) = wait_for_server(&mut child) {
                     errors.push(error);
@@ -744,7 +703,7 @@ fn begin_deploy(window: HWND, operation: Operation) {
                 BrokerState {
                     settings: shared.settings.clone(),
                     notifications: shared.notifications.clone(),
-                    directory: shared.directory.clone(),
+                    paths: shared.paths.clone(),
                     server: shared.server.take(),
                     renderer: if operation == Operation::Restart {
                         shared.renderer.take()
@@ -768,7 +727,7 @@ fn begin_deploy(window: HWND, operation: Operation) {
                     )
                 });
             if !result.0.is_empty() {
-                deployment_diagnostic(&owned.directory, &result.0);
+                deployment_diagnostic(&owned.paths.executable_directory, &result.0);
             }
             {
                 let mut shared = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -842,7 +801,7 @@ fn create_tray() -> Result<TrayIcon, Box<dyn std::error::Error>> {
         return Err("RegisterWindowMessageW(TaskbarCreated) failed".into());
     }
     TASKBAR_CREATED.store(taskbar, Ordering::Release);
-    let class_name = HSTRING::from(broker_menu::WINDOW_CLASS);
+    let class_name = HSTRING::from(command_menu::BROKER_WINDOW_CLASS);
     let title = w!("weasel-rs");
     let hinstance = unsafe { GetModuleHandleW(None) };
     let window_class = WNDCLASSW {
@@ -957,8 +916,8 @@ fn show_menu(window: HWND) {
     let menu = unsafe { CreatePopupMenu() };
     let busy = DEPLOYING.load(Ordering::Acquire);
     unsafe {
-        for (id, label) in broker_menu::items(weasel_common::about::shift_pressed()) {
-            let disabled = busy && matches!(id, broker_menu::DEPLOY | broker_menu::RESTART);
+        for (id, label) in command_menu::items(weasel_common::about::shift_pressed()) {
+            let disabled = busy && matches!(id, command_menu::DEPLOY | command_menu::RESTART);
             let flags = if id == 0 {
                 MF_SEPARATOR as u32
             } else {
@@ -994,20 +953,20 @@ fn show_menu(window: HWND) {
 
 fn handle_command(window: HWND, command: u32) {
     match command {
-        broker_menu::ABOUT => {
+        command_menu::ABOUT => {
             weasel_common::about::show(&weasel_common::about::information("broker"))
         }
-        broker_menu::DIAGNOSTICS => {
+        command_menu::DIAGNOSTICS => {
             let mut info = weasel_common::about::information("broker");
             info.push_str(&format!(
-                "\n\n正在部署/重启：{}\n正在退出：{}\n路径：{:?}",
+                "\n\n正在部署/重启：{}\n正在退出：{}",
                 DEPLOYING.load(Ordering::Acquire),
-                STOPPING.load(Ordering::Acquire),
-                RuntimePaths::discover()
+                STOPPING.load(Ordering::Acquire)
             ));
             if let Some(state) = BROKER_STATE.get().and_then(|state| state.try_lock().ok()) {
                 info.push_str(&format!(
-                    "\n托管 server PID：{:?}\n托管 renderer PID：{:?}",
+                    "\n路径：{:?}\n托管 server PID：{:?}\n托管 renderer PID：{:?}",
+                    state.paths,
                     state.server.as_ref().map(Child::id),
                     state.renderer.as_ref().map(Child::id)
                 ));
@@ -1017,9 +976,9 @@ fn handle_command(window: HWND, command: u32) {
             info.push_str("\n\nTIP 故障请在对应宿主的语言栏使用 Shift＋右键 → 诊断信息。\nCtrl+C 可复制此对话框。");
             weasel_common::about::show(&info);
         }
-        broker_menu::DEPLOY => begin_deploy(window, Operation::Deploy),
-        broker_menu::RESTART => begin_deploy(window, Operation::Restart),
-        broker_menu::CHECK_UPDATES => UPDATER.with(|cell| {
+        command_menu::DEPLOY => begin_deploy(window, Operation::Deploy),
+        command_menu::RESTART => begin_deploy(window, Operation::Restart),
+        command_menu::CHECK_UPDATES => UPDATER.with(|cell| {
             if let Some(updater) = cell.borrow().as_ref() {
                 updater.check_with_ui();
             } else {
@@ -1033,11 +992,11 @@ fn handle_command(window: HWND, command: u32) {
                 }
             }
         }),
-        broker_menu::EXIT => {
+        command_menu::EXIT => {
             STOPPING.store(true, Ordering::Release);
             unsafe { PostQuitMessage(0) };
         }
-        id if broker_menu::is_command(id) => crate::menu_actions::open(id),
+        id if command_menu::is_command(id) => crate::menu_actions::open(id),
         _ => {}
     }
 }

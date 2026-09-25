@@ -3,9 +3,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use weasel_common::{
-    logging::ComponentLogger, message::UserNotification, runtime_paths::RuntimePaths,
-};
+use weasel_common::{logging::ComponentLogger, message::UserNotification, process::RuntimePaths};
 
 #[derive(Clone)]
 pub struct NotificationCenter(Arc<State>);

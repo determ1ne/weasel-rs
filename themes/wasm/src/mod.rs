@@ -122,8 +122,8 @@ impl ThemeFactory for Factory {
                     ));
                 }
             };
-            let paths = weasel_common::runtime_paths::RuntimePaths::discover()
-                .map_err(|e| e.to_string())?;
+            let paths =
+                weasel_common::process::RuntimePaths::discover().map_err(|e| e.to_string())?;
             let candidates = module_paths(
                 theme,
                 explicit,
@@ -148,12 +148,11 @@ impl ThemeFactory for Factory {
             state.options = options;
             // Expose only supported presentation settings, separate from guest config.
             state.settings = serde_json::json!({
-                "preedit_type": settings.query(".preedit_type")?.cloned()
-                    .unwrap_or_else(|| serde_json::json!("composition")),
+                "preedit_type": settings.required::<serde_json::Value>(".preedit_type")?,
             });
             let mut runtime = WasmRuntime::with_state(&bytes, state)
                 .map_err(|e| format!("failed to instantiate WASM theme: {e}"))?;
-            runtime.configure(settings.needs_external_preedit())?;
+            runtime.configure(settings.needs_external_preedit()?)?;
             // Fail during factory creation so renderer can select a fallback.
             runtime.init(
                 if mode == UiMode::Live {

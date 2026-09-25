@@ -4,8 +4,8 @@ use std::{
     time::Duration,
 };
 use weasel_common::{
-    message::{PeerRole, UserNotification, UserNotificationSeverity},
-    rpc::{RpcClient, try_default_broker_pipe_name},
+    message::{PeerRole, UserNotification, UserNotificationSeverity, envelope::Payload},
+    rpc::{RpcClient, RpcError, try_default_broker_pipe_name},
 };
 
 pub fn report(theme: &str, notice: crate::theme_api::ThemeNotice) {
@@ -54,7 +54,14 @@ pub fn report(theme: &str, notice: crate::theme_api::ThemeNotice) {
                         tokio::time::timeout(Duration::from_secs(3), async {
                             let pipe = try_default_broker_pipe_name()?;
                             let client = RpcClient::connect_as(pipe, PeerRole::Renderer).await?;
-                            let result = client.notify_user(report).await;
+                            let result = match client
+                                .request(Payload::UserNotification(report))
+                                .await?
+                                .payload
+                            {
+                                Some(Payload::Pong(_)) => Ok(()),
+                                _ => Err(RpcError::UnexpectedResponse),
+                            };
                             client.disconnect().await;
                             result
                         })

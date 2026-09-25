@@ -12,7 +12,7 @@ const SINK_COOKIE: u32 = 1;
 
 // Like Mozc's toggle button, keep left-click mode switching and create a
 // native right-click menu. Never hold service locks across the modal menu.
-fn show_broker_menu(point: &POINT) -> Result<()> {
+fn show_command_menu(point: &POINT) -> Result<()> {
     struct Menu(HMENU);
     impl Drop for Menu {
         fn drop(&mut self) {
@@ -25,7 +25,7 @@ fn show_broker_menu(point: &POINT) -> Result<()> {
     if menu.0.0.is_null() {
         return Err(Error::from_thread());
     }
-    for (id, label) in weasel_common::broker_menu::items(weasel_common::about::shift_pressed()) {
+    for (id, label) in weasel_common::command_menu::items(weasel_common::about::shift_pressed()) {
         let label = HSTRING::from(label);
         let flags = if id == 0 { MF_SEPARATOR } else { MF_STRING };
         if !unsafe { AppendMenuW(menu.0, flags as u32, id as usize, PCWSTR(label.as_ptr())) }
@@ -50,23 +50,23 @@ fn show_broker_menu(point: &POINT) -> Result<()> {
         )
     };
     if command.0 != 0 {
-        send_broker_command(command.0 as u32)?;
+        dispatch_menu_command(command.0 as u32)?;
     }
     Ok(())
 }
 
-fn send_broker_command(command: u32) -> Result<()> {
+fn dispatch_menu_command(command: u32) -> Result<()> {
     if matches!(
         command,
-        weasel_common::broker_menu::ABOUT | weasel_common::broker_menu::DIAGNOSTICS
+        weasel_common::command_menu::ABOUT | weasel_common::command_menu::DIAGNOSTICS
     ) {
-        crate::diagnostics::show_dialog(command == weasel_common::broker_menu::DIAGNOSTICS);
+        crate::diagnostics::show_dialog(command == weasel_common::command_menu::DIAGNOSTICS);
         return Ok(());
     }
-    if !weasel_common::broker_menu::is_command(command) {
+    if !weasel_common::command_menu::is_command(command) {
         return Err(Error::from_hresult(E_INVALIDARG));
     }
-    let class = HSTRING::from(weasel_common::broker_menu::WINDOW_CLASS);
+    let class = HSTRING::from(weasel_common::command_menu::BROKER_WINDOW_CLASS);
     let broker = unsafe { FindWindowW(PCWSTR(class.as_ptr()), None) };
     // Broker absence must not start processes or block the host.
     if broker.0.is_null() {
@@ -306,7 +306,7 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
     fn OnClick(&self, click: TfLBIClick, point: &POINT, _area: *const RECT) -> Result<()> {
         boundary::guard(None, || {
             if click == TF_LBI_CLK_RIGHT {
-                return show_broker_menu(point);
+                return show_command_menu(point);
             }
             if click != TF_LBI_CLK_LEFT
                 || !self.available.load(Ordering::Acquire)
@@ -347,7 +347,7 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
         boundary::guard(None, || Ok(()))
     }
     fn OnMenuSelect(&self, id: u32) -> Result<()> {
-        boundary::guard(None, || send_broker_command(id))
+        boundary::guard(None, || dispatch_menu_command(id))
     }
     fn GetText(&self) -> Result<BSTR> {
         boundary::guard(None, || Ok(BSTR::from(self.text())))
@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn rejects_unknown_broker_commands_without_sending_messages() {
         for id in [0, u32::MAX, 999] {
-            assert_eq!(send_broker_command(id).unwrap_err().code(), E_INVALIDARG);
+            assert_eq!(dispatch_menu_command(id).unwrap_err().code(), E_INVALIDARG);
         }
     }
 

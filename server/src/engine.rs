@@ -1,4 +1,5 @@
 //! Engine state and sessions are confined to the worker OS thread.
+use crate::client_connection::ClientConnection;
 use crate::{
     librime,
     renderer_bridge::{RendererPublisher, render_snapshot},
@@ -17,8 +18,7 @@ use weasel_common::{
     message::{
         Envelope, KeyEventResponse, RenderRect, RenderSnapshot, RendererEvent, envelope::Payload,
     },
-    rpc::RpcConnection,
-    runtime_paths::RuntimePaths,
+    process::RuntimePaths,
 };
 
 pub(crate) const QUEUE_CAPACITY: usize = 128;
@@ -26,7 +26,7 @@ pub(crate) const QUEUE_CAPACITY: usize = 128;
 pub(crate) enum Work {
     Message {
         client_id: u64,
-        connection: Arc<RpcConnection>,
+        connection: Arc<ClientConnection>,
         alive: Arc<AtomicBool>,
         envelope: Envelope,
         _request: weasel_common::rpc::RequestLease,
@@ -37,7 +37,7 @@ pub(crate) enum Work {
 struct ClientSession {
     inline_preedit: bool,
     connection_id: u64,
-    connection: Arc<RpcConnection>,
+    connection: Arc<ClientConnection>,
     alive: Arc<AtomicBool>,
     session: librime::RimeSession,
     revision: u64,
@@ -172,7 +172,7 @@ mod preedit_tests {
 }
 
 fn reply(
-    connection: &RpcConnection,
+    connection: &ClientConnection,
     request_id: u64,
     mut response: KeyEventResponse,
     allow_rime_in_secure_fields: bool,
@@ -186,7 +186,7 @@ fn reply(
     }
 }
 
-fn failure(connection: &RpcConnection, request_id: u64, code: FailureCode, message: &str) {
+fn failure(connection: &ClientConnection, request_id: u64, code: FailureCode, message: &str) {
     let _ = connection.enqueue(Envelope {
         request_id,
         payload: Some(Payload::Failure(Failure {
@@ -210,19 +210,21 @@ impl Engine {
     ) -> Result<Self, String> {
         let data_lock = crate::data_lock::DataLock::acquire(&paths.user_data)?;
         crate::init_logging(&paths, "server")?;
-        let rime = librime::Librime::load(&paths.executable_directory)?;
+        let rime = librime::Librime::load(&paths.executable_directory, &paths.user_data)?;
         tracing::info!("librime initialized on engine thread");
+        let (global_ascii, allow_rime_in_secure_fields) = match settings.as_ref() {
+            Some(settings) => (
+                settings
+                    .required::<bool>(".global_ascii_status")?
+                    .then(|| settings.required::<bool>(".ascii_mode"))
+                    .transpose()?,
+                settings.required::<bool>(".allow_rime_in_secure_fields")?,
+            ),
+            None => (None, false),
+        };
         Ok(Self {
-            global_ascii: settings.as_ref().and_then(|s| {
-                s.get::<bool>(".global_ascii_status")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(false)
-                    .then(|| s.get::<bool>(".ascii_mode").ok().flatten().unwrap_or(false))
-            }),
-            allow_rime_in_secure_fields: settings
-                .as_ref()
-                .is_some_and(|settings| settings.allow_rime_in_secure_fields()),
+            global_ascii,
+            allow_rime_in_secure_fields,
             settings,
             clients: HashMap::new(),
             rime,
@@ -236,7 +238,7 @@ impl Engine {
     fn message(
         &mut self,
         client_id: u64,
-        connection: Arc<RpcConnection>,
+        connection: Arc<ClientConnection>,
         alive: Arc<AtomicBool>,
         envelope: Envelope,
     ) {
@@ -388,7 +390,13 @@ impl Engine {
                 };
                 if let Some(ascii) = self.global_ascii.or_else(|| {
                     self.settings.as_ref().and_then(|settings| {
-                        settings.app_ascii_mode(connection.client_executable().unwrap_or(""))
+                        settings
+                            .app_bool(connection.client_executable().unwrap_or(""), "ascii_mode")
+                            .map_err(|error| {
+                                tracing::error!(%error, "invalid application setting");
+                                error
+                            })
+                            .ok()
                     })
                 }) {
                     session.set_ascii_mode(ascii);
@@ -398,7 +406,14 @@ impl Engine {
                     ClientSession {
                         inline_preedit: self.settings.as_ref().is_none_or(|settings| {
                             settings
-                                .app_inline_preedit(connection.client_executable().unwrap_or(""))
+                                .app_bool(
+                                    connection.client_executable().unwrap_or(""),
+                                    "inline_preedit",
+                                )
+                                .unwrap_or_else(|error| {
+                                    tracing::error!(%error, "invalid application setting");
+                                    true
+                                })
                         }),
                         connection_id,
                         connection: connection.clone(),
@@ -439,18 +454,7 @@ impl Engine {
             return;
         }
         let token = match envelope.payload.as_ref() {
-            Some(Payload::KeyEvent(key)) => {
-                if key.test || key.keycode.is_none() {
-                    failure(
-                        &connection,
-                        envelope.request_id,
-                        FailureCode::InvalidArgument,
-                        "translated non-test key required",
-                    );
-                    return;
-                }
-                Some(key.token.as_ref())
-            }
+            Some(Payload::KeyEvent(key)) => Some(key.token.as_ref()),
             Some(Payload::ContextCommand(command)) => Some(command.token.as_ref()),
             _ => None,
         };

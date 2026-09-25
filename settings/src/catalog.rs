@@ -1,7 +1,7 @@
 //! 主题配置目录。只读 JSON 和 WASM custom section，不加载 DLL、不实例化 WASM。
 use crate::{config::Document, metadata::Metadata};
 use std::{collections::BTreeSet, fs, io::Read, path::Path};
-use weasel_common::runtime_paths::RuntimePaths;
+use weasel_common::process::RuntimePaths;
 
 pub struct Section {
     pub title: String,

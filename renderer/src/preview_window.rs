@@ -37,7 +37,7 @@ fn worker(hwnd: usize, commands: mpsc::Receiver<Command>, results: mpsc::Sender<
             }
             let result = (|| {
                 let settings = runtime.block_on(crate::rpc::load_theme(true))?;
-                let requested = settings.theme()?;
+                let requested = settings.required::<String>(".theme")?;
                 let mut next = UiHandle::start(&requested, UiMode::Preview, &settings)?;
                 next.events.close();
                 let selected = next.theme;

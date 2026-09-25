@@ -192,10 +192,9 @@ impl TextService {
                 return Ok(BOOL(1));
             }
         }
-        let mut event = keyboard::translate(wparam.0 as u32, lparam.0 as i64, key_up);
-        if event.keycode.is_none() {
+        let Some(mut event) = keyboard::translate(wparam.0 as u32, lparam.0 as i64, key_up) else {
             return Ok(BOOL(0));
-        }
+        };
         event.token = Some(token);
         let response = self.lock(&state.rpc)?.process_key_event(event);
         let Some(response) = response else {

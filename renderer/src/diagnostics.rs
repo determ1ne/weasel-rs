@@ -2,7 +2,7 @@
 use std::{fmt, sync::OnceLock};
 use weasel_common::{
     logging::{ComponentLogger, Level},
-    runtime_paths::RuntimePaths,
+    process::RuntimePaths,
 };
 static LOGGER: OnceLock<ComponentLogger> = OnceLock::new();
 pub fn initialize() {

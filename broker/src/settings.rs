@@ -6,7 +6,7 @@ use std::{
     path::Path,
 };
 use weasel_common::{
-    runtime_paths::RuntimePaths,
+    process::RuntimePaths,
     settings::{ConfigSnapshot, merge},
 };
 
@@ -55,7 +55,7 @@ fn overlay(base: &mut Value, bytes: &[u8]) -> Result<(), String> {
     let mut next = base.clone();
     merge(&mut next, patch);
     // Leave room for protobuf fields when two individually valid files merge.
-    if next.to_string().len() > weasel_common::framing::MAX_FRAME_SIZE - 4096 {
+    if next.to_string().len() > weasel_common::data_frame::MAX_FRAME_SIZE - 4096 {
         return Err("merged configuration exceeds RPC size limit".into());
     }
     if !matches!(
@@ -170,27 +170,40 @@ mod tests {
         std::fs::create_dir(&directory).unwrap();
         let paths = RuntimePaths {
             executable_directory: directory.clone(),
-            development: true,
             user_data: directory.join("user-data"),
             logs: directory.join("logs"),
         };
         paths.ensure().unwrap();
         let mut warnings = Vec::new();
         assert_eq!(
-            load(&paths, |w| warnings.push(w)).theme().unwrap(),
+            load(&paths, |w| warnings.push(w))
+                .required::<String>(".theme")
+                .unwrap(),
             "eleven"
         );
         std::fs::write(directory.join("weasel.json"), br#"{"theme":"ten"}"#).unwrap();
-        assert_eq!(load(&paths, |w| warnings.push(w)).theme().unwrap(), "ten");
+        assert_eq!(
+            load(&paths, |w| warnings.push(w))
+                .required::<String>(".theme")
+                .unwrap(),
+            "ten"
+        );
         let custom = paths.user_data.join("weasel.custom.json");
         std::fs::write(&custom, br#"{"theme":"eleven"}"#).unwrap();
         assert_eq!(
-            load(&paths, |w| warnings.push(w)).theme().unwrap(),
+            load(&paths, |w| warnings.push(w))
+                .required::<String>(".theme")
+                .unwrap(),
             "eleven"
         );
         assert!(warnings.is_empty());
         std::fs::write(&custom, b"invalid").unwrap();
-        assert_eq!(load(&paths, |w| warnings.push(w)).theme().unwrap(), "ten");
+        assert_eq!(
+            load(&paths, |w| warnings.push(w))
+                .required::<String>(".theme")
+                .unwrap(),
+            "ten"
+        );
         assert_eq!(warnings.len(), 1);
         std::fs::write(&custom, vec![b' '; MAX_CONFIG_BYTES as usize + 1]).unwrap();
         assert!(overlay_file(&mut serde_json::json!({"theme":"ten"}), &custom).is_err());

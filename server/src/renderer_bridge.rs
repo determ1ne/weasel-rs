@@ -9,9 +9,22 @@ use std::{
 };
 use tokio::sync::watch;
 use weasel_common::{
-    message::{RenderItem, RenderRect, RenderSnapshot},
-    rpc::{RpcClient, default_renderer_pipe_name},
+    message::{QueryConfig, RenderItem, RenderRect, RenderSnapshot, envelope::Payload},
+    rpc::{RpcClient, RpcError, default_renderer_pipe_name},
 };
+
+async fn query_preedit_capability(client: &RpcClient) -> Result<bool, RpcError> {
+    let response = client
+        .request(Payload::QueryConfig(QueryConfig {
+            refresh: false,
+            path: ".capabilities.preedit".into(),
+        }))
+        .await?;
+    match response.payload {
+        Some(Payload::ConfigValue(value)) => Ok(value.json.as_deref() == Some("true")),
+        _ => Err(RpcError::UnexpectedResponse),
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct RendererPublisher {
@@ -80,16 +93,16 @@ pub(crate) fn spawn(
             };
             let supported = match tokio::time::timeout(
                 Duration::from_secs(2),
-                client.query_config(".capabilities.preedit", false),
+                query_preedit_capability(&client),
             )
             .await
             {
-                Ok(Ok(Some(value))) => value.as_bool().unwrap_or(false),
+                Ok(Ok(value)) => value,
                 _ => false,
             };
             publisher.preedit.store(supported, Ordering::Release);
             (engine.notifier())();
-            let mut events = client.subscribe_renderer_events();
+            let mut events = client.subscribe();
             let mut dirty = true;
             // One connection/task owns both directions; reconnect drops its subscription.
             loop {
@@ -100,21 +113,18 @@ pub(crate) fn spawn(
                 };
                 dirty = false;
                 if let Some(snapshot) = latest {
-                    if !matches!(
-                        tokio::time::timeout(
-                            Duration::from_millis(250),
-                            client.send_render_snapshot(snapshot)
-                        )
-                        .await,
-                        Ok(Ok(()))
-                    ) {
+                    if client.publish(Payload::RenderSnapshot(snapshot)).is_err() {
                         break;
                     }
                 }
                 tokio::select! {
                     changed = snapshots.changed() => { if changed.is_err() { client.disconnect().await; return; } dirty = true; }
                     event = events.recv() => match event {
-                        Ok(event) => { let _ = engine.try_send(Work::Renderer(event)); }
+                        Ok(envelope) => {
+                            if let Some(Payload::RendererEvent(event)) = envelope.payload {
+                                let _ = engine.try_send(Work::Renderer(event));
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => (),
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },

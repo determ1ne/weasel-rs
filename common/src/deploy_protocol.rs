@@ -1,16 +1,27 @@
-//! Length-prefixed protobuf telemetry for deployment UI processes.
+//! 部署进程与部署界面之间的 Protobuf 事件流。
+//!
+//! 消息使用 [`crate::data_frame`] 的长度前缀格式。日志事件可连续发送，完成事件表示部署结果；
+//! 收到完成事件后，界面仍可保持运行以展示结果。
+/// 部署事件、日志、完成结果及事件负载类型。
 pub use crate::message::{DeployComplete, DeployEvent, DeployLog, deploy_event::Payload};
 use prost::Message;
 use std::io::{self, Write};
 use tokio::io::AsyncRead;
 
+/// 将一个部署事件编码并写入输出流。
+///
+/// 写入完整帧后会刷新输出。无效或超限消息、底层写入及刷新失败均以 [`io::Error`] 返回。
 pub fn write_event(output: &mut impl Write, event: &DeployEvent) -> io::Result<()> {
-    output.write_all(&crate::framing::encode(event)?)?;
+    output.write_all(&crate::data_frame::encode(event)?)?;
     output.flush()
 }
 
+/// 从异步输入流读取并解码一个部署事件。
+///
+/// 在帧边界遇到 EOF 时返回 `Ok(None)`；截断帧、非法 Protobuf 或缺少事件负载时返回错误。
+/// 读取器由调用方持有，因此可继续读取后续事件。
 pub async fn read_event(input: &mut (impl AsyncRead + Unpin)) -> io::Result<Option<DeployEvent>> {
-    let Some(bytes) = crate::framing::read(input).await? else {
+    let Some(bytes) = crate::data_frame::read(input).await? else {
         return Ok(None);
     };
     let event = DeployEvent::decode(bytes.as_slice())
@@ -24,7 +35,11 @@ pub async fn read_event(input: &mut (impl AsyncRead + Unpin)) -> io::Result<Opti
     Ok(Some(event))
 }
 
-/// Return at Complete, not EOF: the UI is intentionally still alive.
+/// 消费日志事件，直到取得部署完成结果。
+///
+/// 每个日志事件交给 `log` 回调；回调错误会立即向上传递。收到 `Complete` 后立即返回，
+/// 不等待输入流关闭，因为部署界面通常还要继续显示结果。若流在完成事件前结束，返回
+/// [`io::ErrorKind::UnexpectedEof`]。
 pub async fn wait_for_completion(
     input: &mut (impl AsyncRead + Unpin),
     mut log: impl FnMut(&DeployLog) -> io::Result<()>,
@@ -57,7 +72,7 @@ mod tests {
         };
         let mut bytes = Vec::new();
         write_event(&mut bytes, &event).unwrap();
-        assert_eq!(bytes, crate::framing::encode(&event).unwrap());
+        assert_eq!(bytes, crate::data_frame::encode(&event).unwrap());
         bytes.clear();
         assert_eq!(
             write_event(&mut bytes, &DeployEvent::default())
@@ -68,7 +83,7 @@ mod tests {
         assert!(bytes.is_empty());
         event.payload = Some(Payload::Log(DeployLog {
             stream: String::new(),
-            text: "x".repeat(crate::framing::MAX_FRAME_SIZE),
+            text: "x".repeat(crate::data_frame::MAX_FRAME_SIZE),
         }));
         assert_eq!(
             write_event(&mut bytes, &event).unwrap_err().kind(),
@@ -164,7 +179,7 @@ mod tests {
             write_event(&mut sink, &event).unwrap_err().kind(),
             io::ErrorKind::BrokenPipe
         );
-        assert_eq!(sink.bytes, crate::framing::encode(&event).unwrap());
+        assert_eq!(sink.bytes, crate::data_frame::encode(&event).unwrap());
         assert_eq!(sink.flushes, 1);
     }
     #[tokio::test]

@@ -1,12 +1,12 @@
 //! Shell actions run outside the tray message loop and never inside the TIP.
 use crate::bindings::*;
-use weasel_common::{broker_menu::*, runtime_paths};
+use weasel_common::{command_menu::*, process::RuntimePaths};
 use windows_strings::{HSTRING, PCWSTR, w};
 
 fn target(command: u32) -> Result<HSTRING, String> {
     match command {
         SETTINGS => {
-            let paths = runtime_paths::RuntimePaths::discover().map_err(|e| e.to_string())?;
+            let paths = RuntimePaths::discover().map_err(|e| e.to_string())?;
             let executable = paths.executable_directory.join("weasel-settings.exe");
             if !executable.is_file() {
                 return target(USER_DIRECTORY);
@@ -16,7 +16,7 @@ fn target(command: u32) -> Result<HSTRING, String> {
         HELP => Ok(HSTRING::from("https://rime.im/docs/")),
         FORUM => Ok(HSTRING::from("https://rime.im/discuss/")),
         USER_DIRECTORY | PROGRAM_DIRECTORY | LOG_DIRECTORY => {
-            let paths = runtime_paths::RuntimePaths::discover().map_err(|e| e.to_string())?;
+            let paths = RuntimePaths::discover().map_err(|e| e.to_string())?;
             let path = match command {
                 USER_DIRECTORY => paths.user_data,
                 LOG_DIRECTORY => paths.logs,

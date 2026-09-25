@@ -1,10 +1,13 @@
-//! Build identity and text-only local diagnostic dialogs. No network or RPC.
+//! “关于”对话框相关功能的实现
+
 use windows_strings::{HSTRING, PCWSTR, w};
 
+/// 判断调用线程最近取得的键盘状态中 Shift 是否处于按下状态。
 pub fn shift_pressed() -> bool {
     unsafe { crate::bindings::GetKeyState(crate::bindings::VK_SHIFT as i32) < 0 }
 }
 
+/// 生成指定组件的本地构建与运行环境摘要。
 pub fn information(component: &str) -> String {
     let os = windows_version::OsVersion::current();
     format!(
@@ -24,7 +27,7 @@ pub fn information(component: &str) -> String {
     )
 }
 
-/// Call without any application state locks. TIP invokes this on its diagnostic worker.
+/// 使用Windows 消息框显示“关于”信息。
 pub fn show(text: &str) {
     let text = HSTRING::from(text.replace('\n', "\r\n"));
     unsafe {

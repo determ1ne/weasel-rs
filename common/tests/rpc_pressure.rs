@@ -1,4 +1,6 @@
 use std::time::Duration;
+mod support;
+use support::{ClientProtocol as _, ConnectionProtocol as _};
 use weasel_common::{
     message::{Envelope, LogEvent, envelope::Payload},
     rpc::{RpcClient, RpcError, RpcServer},

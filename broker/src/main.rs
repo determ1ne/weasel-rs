@@ -1,11 +1,12 @@
 //! The per-user broker: owns the tray icon and the server/renderer children.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod child_process;
 mod installer;
 mod lifecycle;
 mod managed_children;
-mod child_process;
 mod notifications;
+mod service_rpc;
 mod settings;
 mod settings_rpc;
 #[cfg(windows)]
@@ -61,11 +62,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if command.is_some() {
         return Err("unknown broker option".into());
-    }
-    if weasel_common::runtime_paths::is_development() {
-        unsafe {
-            let _ = bindings::AllocConsole();
-        }
     }
     if let Err(error) = windows_tray::run() {
         eprintln!("weasel-broker: {error}");

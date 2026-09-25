@@ -17,7 +17,6 @@ fn main() {
         .output(out.join("bindings.rs"))
         .filters([
             "Windows.Win32.CREATE_NO_WINDOW",
-            "Windows.Win32.AllocConsole",
             "Windows.Win32.LoadLibraryExW",
             "Windows.Win32.LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR",
             "Windows.Win32.LOAD_LIBRARY_SEARCH_SYSTEM32",

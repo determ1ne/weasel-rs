@@ -10,7 +10,7 @@ use std::{
 };
 
 use weasel_common::message::{
-    Candidate, KeyEvent, KeyEventResponse, RendererEvent, RendererEventAction,
+    Candidate, InputKey, KeyEventResponse, RendererEvent, RendererEventAction,
 };
 
 use self::loader::RimeLibrary;
@@ -46,10 +46,8 @@ fn candidate_count(count: i32) -> Option<usize> {
         .filter(|&count| count <= MAX_CANDIDATES)
 }
 
-fn user_data_directory(base_dir: &Path) -> Result<CString, String> {
-    let directory = weasel_common::runtime_paths::ensure_user_data_directory(base_dir)
-        .map_err(|error| format!("could not prepare user data directory: {error}"))?;
-    CString::new(directory.to_string_lossy().as_bytes())
+fn path_string(path: &Path) -> Result<CString, String> {
+    CString::new(path.to_string_lossy().as_bytes())
         .map_err(|error| format!("invalid user data directory path: {error}"))
 }
 
@@ -79,13 +77,13 @@ struct RimeLibraryApi {
 }
 
 impl Librime {
-    pub fn load(base_dir: &Path) -> Result<Self, String> {
+    pub fn load(base_dir: &Path, user_data_dir: &Path) -> Result<Self, String> {
         let library = RimeLibrary::load(&base_dir.join("rime.dll"))?;
         let api = unsafe { RimeLibraryApi::load(library.api().as_ptr(), false)? };
         let app_name = CString::new("rime.weasel-rs").expect("static app name has no NUL");
         let shared_data_dir = CString::new(base_dir.join("rime-data").to_string_lossy().as_bytes())
             .map_err(|error| format!("invalid shared data directory path: {error}"))?;
-        let user_data_dir = user_data_directory(base_dir)?;
+        let user_data_dir = path_string(user_data_dir)?;
         let mut traits: raw::RimeTraits = unsafe { std::mem::zeroed() };
         traits.data_size = struct_data_size::<raw::RimeTraits>();
         traits.shared_data_dir = shared_data_dir.as_ptr().cast();
@@ -108,13 +106,13 @@ impl Librime {
         })
     }
 
-    pub fn deploy(base_dir: &Path) -> Result<(), String> {
+    pub fn deploy(base_dir: &Path, user_data_dir: &Path) -> Result<(), String> {
         let library = RimeLibrary::load(&base_dir.join("rime.dll"))?;
         let api = unsafe { RimeLibraryApi::load(library.api().as_ptr(), true)? };
         let app_name = CString::new("rime.weasel-rs").expect("static app name has no NUL");
         let shared_data_dir = CString::new(base_dir.join("rime-data").to_string_lossy().as_bytes())
             .map_err(|error| format!("invalid shared data directory path: {error}"))?;
-        let user_data_dir = user_data_directory(base_dir)?;
+        let user_data_dir = path_string(user_data_dir)?;
         let log_dir = CString::new("").expect("empty string has no NUL");
         let mut traits: raw::RimeTraits = unsafe { std::mem::zeroed() };
         traits.data_size = struct_data_size::<raw::RimeTraits>();
@@ -237,19 +235,12 @@ impl RimeSession {
         }
     }
 
-    pub fn process_key(&mut self, event: &KeyEvent) -> KeyEventResponse {
-        if event.test {
-            return KeyEventResponse::default();
-        }
-
-        let Some(keycode) = event.keycode else {
-            return KeyEventResponse::default();
-        };
+    pub fn process_key(&mut self, event: &InputKey) -> KeyEventResponse {
         let mask = event.modifiers;
         let eaten = unsafe {
             self.api
                 .required("process_key", (*self.api.api).process_key)
-                .and_then(|process| Ok(process(self.id, keycode, mask) == RIME_TRUE))
+                .and_then(|process| Ok(process(self.id, event.keycode, mask) == RIME_TRUE))
                 .unwrap_or(false)
         };
         self.read_response(eaten, String::new())
@@ -570,7 +561,7 @@ mod input_mode_tests {
     }
 
     #[test]
-    fn untranslated_and_test_keys_never_enter_librime() {
+    fn translated_keys_enter_librime() {
         STATE.with(|state| *state.borrow_mut() = (false, Vec::new()));
         unsafe extern "C" fn process(_: raw::RimeSessionId, _: i32, _: i32) -> i32 {
             STATE.with(|state| state.borrow_mut().1.push("key"));
@@ -580,27 +571,9 @@ mod input_mode_tests {
         table.process_key = Some(process);
         let mut session = fake_engine(table).new_session().unwrap();
         assert!(
-            !session
-                .process_key(&KeyEvent {
-                    virtual_key: 0x41,
-                    ..Default::default()
-                })
-                .eaten
-        );
-        assert!(
-            !session
-                .process_key(&KeyEvent {
-                    keycode: Some(97),
-                    test: true,
-                    ..Default::default()
-                })
-                .eaten
-        );
-        STATE.with(|state| assert!(state.borrow().1.is_empty()));
-        assert!(
             session
-                .process_key(&KeyEvent {
-                    keycode: Some(97),
+                .process_key(&InputKey {
+                    keycode: 97,
                     ..Default::default()
                 })
                 .eaten

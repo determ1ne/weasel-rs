@@ -11,8 +11,8 @@ use tokio::{
 };
 use weasel_common::{
     message::{Envelope, PeerRole, envelope::Payload},
+    process::RuntimePaths,
     rpc::{RpcConnection, RpcError, RpcServer, try_default_broker_pipe_name},
-    runtime_paths::RuntimePaths,
     settings::ConfigSnapshot as Settings,
 };
 
@@ -137,7 +137,12 @@ async fn serve(
             let notice = notice.clone();
             read_on_worker(disk_reads.clone(), move || center.report(notice)).await?;
             connection
-                .send_pong(request.request_id, "notification recorded")
+                .send(&Envelope {
+                    request_id: request.request_id,
+                    payload: Some(Payload::Pong(weasel_common::message::Pong {
+                        text: "notification recorded".into(),
+                    })),
+                })
                 .await?;
             continue;
         }
@@ -209,10 +214,70 @@ async fn read_on_worker<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use weasel_common::rpc::RpcClient;
+    use weasel_common::{
+        message::{QueryConfig, Shutdown, UserNotification, envelope::Payload},
+        rpc::RpcClient,
+    };
 
-    async fn connect(pipe: &str, role: PeerRole) -> Result<RpcClient, RpcError> {
-        RpcClient::connect_as_with_timeout(pipe, role, Duration::from_secs(1)).await
+    struct TestClient(RpcClient);
+
+    impl TestClient {
+        async fn query_config(
+            &self,
+            path: &str,
+            refresh: bool,
+        ) -> Result<Option<serde_json::Value>, RpcError> {
+            match self
+                .0
+                .request(Payload::QueryConfig(QueryConfig {
+                    refresh,
+                    path: path.into(),
+                }))
+                .await?
+                .payload
+            {
+                Some(Payload::ConfigValue(value)) => value
+                    .json
+                    .map(|json| {
+                        serde_json::from_str(&json)
+                            .map_err(|error| RpcError::Protocol(error.to_string()))
+                    })
+                    .transpose(),
+                _ => Err(RpcError::UnexpectedResponse),
+            }
+        }
+
+        async fn notify_user(&self, notice: UserNotification) -> Result<(), RpcError> {
+            match self
+                .0
+                .request(Payload::UserNotification(notice))
+                .await?
+                .payload
+            {
+                Some(Payload::Pong(_)) => Ok(()),
+                _ => Err(RpcError::UnexpectedResponse),
+            }
+        }
+
+        async fn shutdown(&self, reason: &str) -> Result<(), RpcError> {
+            match self
+                .0
+                .request(Payload::Shutdown(Shutdown {
+                    reason: reason.into(),
+                }))
+                .await?
+                .payload
+            {
+                Some(Payload::ShutdownResponse(_)) => Ok(()),
+                _ => Err(RpcError::UnexpectedResponse),
+            }
+        }
+    }
+
+    async fn connect(pipe: &str, role: PeerRole) -> Result<TestClient, RpcError> {
+        RpcClient::connect_as_with_timeout(pipe, role, Duration::from_secs(1))
+            .await
+            .map(TestClient)
     }
 
     #[test]
@@ -252,7 +317,6 @@ mod tests {
         let root = std::env::temp_dir().join(&base);
         RuntimePaths {
             executable_directory: root.clone(),
-            development: true,
             user_data: root.join("user-data"),
             logs: root.join("logs"),
         }
@@ -260,7 +324,7 @@ mod tests {
 
     #[test]
     fn concurrent_queries_and_role_restrictions() {
-        let pipe = weasel_common::platform::RuntimeIdentity::current()
+        let pipe = weasel_common::windows_security::RuntimeIdentity::current()
             .unwrap()
             .pipe_name(&format!("settings-test-{}", std::process::id()))
             .unwrap();
@@ -345,7 +409,7 @@ mod tests {
 
     #[test]
     fn refresh_reloads_from_disk_without_publishing() {
-        let pipe = weasel_common::platform::RuntimeIdentity::current()
+        let pipe = weasel_common::windows_security::RuntimeIdentity::current()
             .unwrap()
             .pipe_name(&format!("settings-refresh-test-{}", std::process::id()))
             .unwrap();

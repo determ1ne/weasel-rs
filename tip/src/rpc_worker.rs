@@ -17,9 +17,10 @@ use std::{
 
 use crate::rpc_diagnostics::report;
 use weasel_common::message::{
-    ContextAction, ContextCommand, KeyEvent, KeyEventResponse, LayoutUpdate, PeerRole,
+    ContextAction, ContextCommand, InputKey, KeyEventResponse, LayoutUpdate, LogEvent, OpenInput,
+    PeerRole, Ping, envelope::Payload,
 };
-use weasel_common::rpc::{RpcClient, try_default_pipe_name};
+use weasel_common::rpc::{RpcClient, RpcError, try_default_pipe_name};
 
 static NEXT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 const COMMAND_TIMEOUT: Duration = Duration::from_millis(80);
@@ -38,7 +39,7 @@ enum RpcCommand {
         text: String,
     },
     KeyEvent {
-        event: KeyEvent,
+        event: InputKey,
         response: Sender<Option<KeyEventResponse>>,
         deadline: Instant,
     },
@@ -144,6 +145,7 @@ fn enqueue_update(target: &PushTarget, epoch: u64, response: KeyEventResponse) -
 
 struct Connection {
     client: RpcClient,
+    opened: tokio::sync::Mutex<std::collections::HashSet<u64>>,
     updates: tokio::task::JoinHandle<()>,
 }
 
@@ -154,6 +156,84 @@ impl Connection {
         self.client.disconnect().await;
         // Drop also aborts on cancellation of close(). Runtime destruction is
         // the final fallback, and completes before the worker is joined.
+    }
+
+    fn publish(&self, payload: Payload) -> Result<(), RpcError> {
+        self.client.publish(payload)
+    }
+
+    async fn key_request(&self, payload: Payload) -> Result<KeyEventResponse, RpcError> {
+        match self.client.request(payload).await?.payload {
+            Some(Payload::KeyEventResponse(response)) => Ok(response),
+            _ => Err(RpcError::UnexpectedResponse),
+        }
+    }
+
+    async fn prepare_input_session(
+        &self,
+        token: Option<weasel_common::message::ContextToken>,
+        initial_ascii_mode: Option<bool>,
+    ) -> Result<(), RpcError> {
+        let id = token
+            .as_ref()
+            .ok_or_else(|| RpcError::Protocol("input token required".into()))?
+            .context_id;
+        let mut opened = self.opened.lock().await;
+        if opened.contains(&id) {
+            return Ok(());
+        }
+        let reply = self
+            .client
+            .request(Payload::OpenInput(OpenInput {
+                token: token.clone(),
+            }))
+            .await?;
+        match reply.payload {
+            Some(Payload::InputOpened(value)) if value.token == token => {
+                if let Some(ascii_mode) = initial_ascii_mode {
+                    let response = self
+                        .key_request(Payload::ContextCommand(ContextCommand {
+                            token: token.clone(),
+                            action: ContextAction::SetAscii as i32,
+                            ascii_mode: Some(ascii_mode),
+                        }))
+                        .await?;
+                    if response.token != token || response.ascii_mode != Some(ascii_mode) {
+                        return Err(RpcError::Protocol(
+                            "input mode restoration was not confirmed".into(),
+                        ));
+                    }
+                }
+                opened.insert(id);
+                Ok(())
+            }
+            _ => Err(RpcError::UnexpectedResponse),
+        }
+    }
+
+    async fn process_translated_key(&self, event: InputKey) -> Result<KeyEventResponse, RpcError> {
+        self.prepare_input_session(event.token.clone(), None)
+            .await?;
+        self.key_request(Payload::KeyEvent(event)).await
+    }
+
+    async fn context_command(&self, command: ContextCommand) -> Result<KeyEventResponse, RpcError> {
+        let destroy = command.action == ContextAction::Destroy as i32;
+        let id = command
+            .token
+            .as_ref()
+            .map(|token| token.context_id)
+            .unwrap_or(0);
+        if destroy && !self.opened.lock().await.contains(&id) {
+            return Ok(KeyEventResponse::default());
+        }
+        self.prepare_input_session(command.token.clone(), None)
+            .await?;
+        let response = self.key_request(Payload::ContextCommand(command)).await;
+        if destroy && response.is_ok() {
+            self.opened.lock().await.remove(&id);
+        }
+        response
     }
 }
 
@@ -178,16 +258,26 @@ async fn connect_client(pipe_name: &str, target: &Arc<PushTarget>) -> Option<Con
         .await
         .inspect_err(|error| report("pipe-connect", Some(pipe_name), error))
         .ok()?;
-    let mut updates = client.subscribe_key_responses();
+    let mut updates = client.subscribe();
 
     // Treat the handshake as part of connection establishment.  A pipe can
     // be opened just before the server exits, so connect() alone is not
     // enough to consider the server usable.
-    client
-        .ping("tip activated")
+    match client
+        .request(Payload::Ping(Ping {
+            text: "tip activated".into(),
+        }))
         .await
-        .inspect_err(|error| report("handshake-ping", Some(pipe_name), error))
-        .ok()?;
+        .and_then(|envelope| match envelope.payload {
+            Some(Payload::Pong(_)) => Ok(()),
+            _ => Err(RpcError::UnexpectedResponse),
+        }) {
+        Ok(()) => {}
+        Err(error) => {
+            report("handshake-ping", Some(pipe_name), error);
+            return None;
+        }
+    }
     if target.cancellation.load(Ordering::Acquire) != generation {
         report(
             "handshake-cancelled",
@@ -212,7 +302,7 @@ async fn connect_client(pipe_name: &str, target: &Arc<PushTarget>) -> Option<Con
     let push_client = client.clone();
     let updates = tokio::spawn(async move {
         loop {
-            let response = match tokio::select! {
+            let envelope = match tokio::select! {
                 _ = push_client.disconnected() => {
                     if target.current_epoch() == epoch { target.invalidate(); }
                     break;
@@ -231,6 +321,9 @@ async fn connect_client(pipe_name: &str, target: &Arc<PushTarget>) -> Option<Con
                     break;
                 }
             };
+            let Some(Payload::KeyEventResponse(response)) = envelope.payload else {
+                continue;
+            };
             if !enqueue_update(&target, epoch, response) {
                 report(
                     "server-events",
@@ -246,7 +339,11 @@ async fn connect_client(pipe_name: &str, target: &Arc<PushTarget>) -> Option<Con
             }
         }
     });
-    Some(Connection { client, updates })
+    Some(Connection {
+        client,
+        opened: tokio::sync::Mutex::new(std::collections::HashSet::new()),
+        updates,
+    })
 }
 
 impl RpcCommand {
@@ -382,13 +479,13 @@ impl WorkerState {
         let Some(current) = self.client.as_ref() else {
             return;
         };
-        if let Err(error) = current.send_log_event(level, text).await {
+        if let Err(error) = current.publish(Payload::LogEvent(LogEvent { level, text })) {
             report("send-diagnostic", Some(&self.pipe_name), error);
             self.disconnect_invalidated_client().await;
         }
     }
 
-    async fn handle_key_event(&mut self, mut event: KeyEvent) -> Option<KeyEventResponse> {
+    async fn handle_key_event(&mut self, mut event: InputKey) -> Option<KeyEventResponse> {
         self.ensure_connected().await;
         if let Some(token) = event.token.as_mut() {
             token.connection_epoch = self.push.current_epoch();
@@ -466,7 +563,7 @@ impl WorkerState {
         let Some(current) = self.client.as_ref() else {
             return;
         };
-        if let Err(error) = current.send_layout_update(update).await {
+        if let Err(error) = current.publish(Payload::LayoutUpdate(update)) {
             report("layout-send", Some(&self.pipe_name), error);
             self.disconnect_invalidated_client().await;
         }
@@ -564,7 +661,7 @@ impl RpcWorker {
         self.thread = thread;
     }
 
-    pub fn process_key_event(&self, event: KeyEvent) -> Option<KeyEventResponse> {
+    pub fn process_key_event(&self, event: InputKey) -> Option<KeyEventResponse> {
         if self.push.failed.load(Ordering::Acquire) {
             return None;
         }
@@ -768,7 +865,42 @@ impl Drop for RpcWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use weasel_common::rpc::RpcServer;
+    use weasel_common::{
+        message::{Envelope, Pong, envelope::Payload},
+        rpc::{RpcConnection, RpcServer},
+    };
+
+    #[allow(async_fn_in_trait)]
+    trait TestConnectionProtocol {
+        async fn send_pong(&self, request_id: u64, text: &str) -> Result<(), RpcError>;
+        async fn send_key_event_response(
+            &self,
+            request_id: u64,
+            response: KeyEventResponse,
+        ) -> Result<(), RpcError>;
+    }
+
+    impl TestConnectionProtocol for RpcConnection {
+        async fn send_pong(&self, request_id: u64, text: &str) -> Result<(), RpcError> {
+            self.send(&Envelope {
+                request_id,
+                payload: Some(Payload::Pong(Pong { text: text.into() })),
+            })
+            .await
+        }
+
+        async fn send_key_event_response(
+            &self,
+            request_id: u64,
+            response: KeyEventResponse,
+        ) -> Result<(), RpcError> {
+            self.send(&Envelope {
+                request_id,
+                payload: Some(Payload::KeyEventResponse(response)),
+            })
+            .await
+        }
+    }
 
     #[test]
     fn shared_worker_preserves_other_context_replies() {
@@ -830,11 +962,10 @@ mod tests {
         assert!(changes.borrow_and_update().is_none());
     }
 
-    fn translated_key() -> KeyEvent {
-        KeyEvent {
-            keycode: Some(b'a' as i32),
+    fn translated_key() -> InputKey {
+        InputKey {
+            keycode: b'a' as i32,
             virtual_key: 0x41,
-            test: false,
             token: Some(weasel_common::message::ContextToken {
                 context_id: 1,
                 connection_epoch: 1,

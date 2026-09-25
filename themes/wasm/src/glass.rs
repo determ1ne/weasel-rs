@@ -11,7 +11,7 @@ use windows_core::{GUID, HSTRING, Interface, PCWSTR, Result, implement};
 
 pub(crate) fn record(level: weasel_common::logging::Level, message: std::fmt::Arguments<'_>) {
     use std::sync::OnceLock;
-    use weasel_common::{logging::ComponentLogger, runtime_paths::RuntimePaths};
+    use weasel_common::{logging::ComponentLogger, process::RuntimePaths};
     static LOGGER: OnceLock<ComponentLogger> = OnceLock::new();
     LOGGER
         .get_or_init(|| match RuntimePaths::discover() {

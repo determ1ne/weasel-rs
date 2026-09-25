@@ -14,7 +14,7 @@ mod updater;
 mod wasm_modules;
 use slint::{ComponentHandle, Model, VecModel};
 use std::{cell::RefCell, collections::HashSet, rc::Rc};
-use weasel_common::runtime_paths::RuntimePaths;
+use weasel_common::process::RuntimePaths;
 slint::include_modules!();
 
 struct State {
@@ -61,7 +61,7 @@ impl State {
             ] {
                 let checked = snapshot
                     .app_bool(name, key)
-                    .ok_or_else(|| format!("{name}.{key} 必须为布尔值"))?;
+                    .map_err(|error| format!("{name}.{key}: {error}"))?;
                 options.push(AppOption {
                     key: key.into(),
                     title: title.into(),

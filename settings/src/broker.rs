@@ -1,9 +1,9 @@
 //! 复用语言栏菜单的 broker 命令入口；只投递消息，不等待服务重启阻塞 UI。
 use crate::bindings::*;
-use weasel_common::broker_menu;
+use weasel_common::command_menu;
 
 pub fn request_restart() -> Result<(), String> {
-    let class = windows_strings::HSTRING::from(broker_menu::WINDOW_CLASS);
+    let class = windows_strings::HSTRING::from(command_menu::BROKER_WINDOW_CLASS);
     unsafe {
         let broker = FindWindowW(windows_core::PCWSTR(class.as_ptr()), None);
         if broker.0.is_null() {
@@ -12,7 +12,7 @@ pub fn request_restart() -> Result<(), String> {
         if !PostMessageW(
             Some(broker),
             WM_COMMAND as u32,
-            WPARAM(broker_menu::RESTART as usize),
+            WPARAM(command_menu::RESTART as usize),
             LPARAM(0),
         )
         .as_bool()
