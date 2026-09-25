@@ -56,11 +56,21 @@ fn main() {
     let protoc = protoc_bin_vendored::protoc_bin_path().expect("protoc is available");
     unsafe { std::env::set_var("PROTOC", protoc) };
 
-    println!("cargo:rerun-if-changed=proto/message.proto");
+    println!("cargo:rerun-if-changed=proto/broker.proto");
+    println!("cargo:rerun-if-changed=proto/common.proto");
+    println!("cargo:rerun-if-changed=proto/deploy.proto");
+    println!("cargo:rerun-if-changed=proto/renderer.proto");
     println!("cargo:rerun-if-changed=proto/rpc.proto");
     println!("cargo:rerun-if-changed=proto/tip.proto");
     prost_build::compile_protos(
-        &["proto/tip.proto", "proto/message.proto", "proto/rpc.proto"],
+        &[
+            "proto/broker.proto",
+            "proto/common.proto",
+            "proto/deploy.proto",
+            "proto/renderer.proto",
+            "proto/rpc.proto",
+            "proto/tip.proto",
+        ],
         &["proto"],
     )
     .expect("protobuf definitions compile");

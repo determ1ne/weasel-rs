@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package weasel.message;
+
+// weasel-server --deploy 通过 stdout 发送的部署事件。
+// 每帧格式为“小端序 u32 长度 + DeployEvent”，不经过 Named Pipe RPC。
+message DeployEvent {
+  oneof payload {
+    // 部署期间产生的日志片段。
+    DeployLog log = 1;
+    // 部署结束时唯一的完成结果。
+    DeployComplete complete = 2;
+  }
+}
+
+// 部署子进程转发的 stdout/stderr 文本。
+message DeployLog {
+  string stream = 1;
+  string text = 2;
+}
+
+// 部署任务的最终结果。
+message DeployComplete {
+  bool success = 1;
+  // 子进程没有提供退出码时保持为空。
+  optional int32 exit_code = 2;
+  string message = 3;
+}

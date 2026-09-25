@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package weasel.message;
+
+import "tip.proto";
+
+// 候选窗中的一个可渲染项目
+message RenderItem {
+  // 候选文字
+  string primary_text = 1;
+  // 注释、编码提示等次要文字
+  string secondary_text = 2;
+  // 是否允许用户选择该项目
+  bool enabled = 3;
+  // 项目类别；当前通常为 candidate，为后续扩展保留。
+  string kind = 4;
+}
+
+// Server 发给 Renderer 的完整展示快照
+// 单个快照里包括展示候选界面的全部内容
+message RenderSnapshot {
+  // Server 连接中的输入会话
+  uint64 session_id = 1;
+  // TIP 对应输入状态的版本
+  uint64 revision = 2;
+  // 是否应该显示候选窗
+  bool visible = 3;
+  // 候选窗在屏幕坐标中的锚点
+  RenderRect anchor = 4;
+  // 候选项
+  repeated RenderItem items = 5;
+  // 当前页内的高亮项目索引
+  uint32 selected_index = 6;
+  // 当前页第一个候选项在完整候选序列中的索引
+  uint32 page_start = 7;
+  // 总候选项数量，当前始终为 None
+  optional uint32 total_item_count = 8;
+  // 是否可以翻到上一页
+  bool can_page_previous = 9;
+  // 是否可以翻到下一页
+  bool can_page_next = 10;
+  // 快照所属的 TIP 输入上下文
+  // Renderer 需要交互时，需在响应中携带该 token
+  ContextToken token = 11;
+  // Server/Renderer 交互状态的版本
+  uint64 sequence = 12;
+  // 仅在 preedit 显示于候选窗而非宿主应用时存在
+  RenderPreedit preedit = 13;
+  // 当前输入会话是否拥有展示权。没有候选项时也会发送，供常驻主题显示状态
+  bool active = 14;
+  // 当前中英文模式
+  optional bool ascii_mode = 15;
+}
+
+// 显示在候选窗中的 preedit 文本
+message RenderPreedit {
+  string text = 1;
+  // UTF-16 code unit 光标位置 
+  uint32 cursor_utf16 = 2;
+}
+
+// Renderer 中的鼠标或主题交互动作
+enum RendererEventAction {
+  RENDERER_EVENT_ACTION_UNSPECIFIED = 0;
+  RENDERER_EVENT_ACTION_ITEM_INVOKED = 1;
+  RENDERER_EVENT_ACTION_NAVIGATE_PREVIOUS = 2;
+  RENDERER_EVENT_ACTION_NAVIGATE_NEXT = 3;
+  RENDERER_EVENT_ACTION_DISMISS = 4;
+  RENDERER_EVENT_ACTION_OPEN_EMOJI_PANEL = 5;
+}
+
+// Renderer 返回给 Server 的用户交互
+message RendererEvent {
+  uint64 session_id = 1;
+  RendererEventAction action = 2;
+  // ITEM_INVOKED 使用的当前页项目索引；其他动作忽略
+  uint32 item_index = 3;
+  // 与展示快照一同返回，用于拒绝过期窗口产生的操作
+  ContextToken token = 4;
+  // snapshot 对应的输入状态版本
+  uint64 revision = 5;
+}

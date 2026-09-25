@@ -30,7 +30,7 @@ async fn layout_flood_bypasses_input_fifo_and_preserves_final_and_future_geometr
                         left: x,
                         ..Default::default()
                     }),
-                    applied_revision: Some(2),
+                    revision: Some(2),
                 })
                 .await
                 .unwrap();
@@ -50,7 +50,7 @@ async fn layout_flood_bypasses_input_fifo_and_preserves_final_and_future_geometr
         assert!(connection.take_layout_for(Some(&old)).is_none());
         loop {
             if let Some(update) = connection.take_layout_for(Some(&token)) {
-                assert_eq!(update.applied_revision, Some(2));
+                assert_eq!(update.revision, Some(2));
                 assert_eq!(update.anchor.unwrap().left, 9999);
                 break;
             }

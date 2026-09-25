@@ -85,13 +85,13 @@ fn reset_anchor_for_new_composition(
 }
 
 fn layout_matches_pending(
-    applied_revision: Option<u64>,
+    revision: Option<u64>,
     waiting_for_layout: Option<u64>,
     latest_layout_revision: Option<u64>,
 ) -> bool {
     // Older TIPs omit the revision and retain the token-only behavior. A new
     // TIP must not let an in-flight probe from a previous edit unlock this one.
-    applied_revision.is_none_or(|revision| {
+    revision.is_none_or(|revision| {
         waiting_for_layout.is_none_or(|required| revision >= required)
             && latest_layout_revision.is_none_or(|accepted| revision >= accepted)
     })
@@ -789,12 +789,12 @@ impl Processor<Work> for Engine {
                 .take_layout_for(client.route.token.as_ref())
         {
             let matching = layout_matches_pending(
-                update.applied_revision,
+                update.revision,
                 client.waiting_for_layout,
                 client.latest_layout_revision,
             );
             if matching {
-                if let Some(revision) = update.applied_revision {
+                if let Some(revision) = update.revision {
                     client.latest_layout_revision = Some(revision);
                 }
                 let anchor = update.anchor.unwrap_or_default();

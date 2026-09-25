@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package weasel.message;
+
+// 多条 RPC 链路共用的基础消息。
+
+// 存活检查请求；text 会由对端原样返回，便于核对请求与响应。
+message Ping {
+  string text = 1;
+}
+
+// 存活检查响应。
+message Pong {
+  string text = 1;
+}
+
+// RPC 请求失败的稳定错误分类。
+enum FailureCode {
+  FAILURE_CODE_UNSPECIFIED = 0;
+  FAILURE_CODE_INVALID_ARGUMENT = 1;
+  FAILURE_CODE_NOT_READY = 2;
+  FAILURE_CODE_OVERLOADED = 3;
+  FAILURE_CODE_STALE_CONTEXT = 4;
+  FAILURE_CODE_INTERNAL = 5;
+}
+
+// 可以安全返回给远端的请求失败信息。
+message Failure {
+  FailureCode code = 1;
+  string message = 2;
+}

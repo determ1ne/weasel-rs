@@ -1,11 +1,17 @@
 syntax = "proto3";
+
 package weasel.message;
-import "message.proto";
+
+import "broker.proto";
+import "common.proto";
+import "renderer.proto";
 import "tip.proto";
 
-// This is the only Named Pipe wire envelope. Peers require matching versions.
+// Named Pipe 上唯一允许传输的顶层消息
+// 建立连接后必须先交换 Hello，后续每帧都必须使用双方一致的协议版本
 message RpcFrame {
   uint32 protocol_version = 1;
+
   oneof body {
     Hello hello = 20;
     Request request = 21;
@@ -13,16 +19,60 @@ message RpcFrame {
     Event event = 23;
   }
 }
-enum PeerRole { PEER_ROLE_UNSPECIFIED = 0; PEER_ROLE_TIP = 1; PEER_ROLE_BROKER = 2; PEER_ROLE_SERVER = 3; PEER_ROLE_RENDERER = 4; }
-message Hello { PeerRole role = 1; uint64 instance_id = 2; }
+
+// 连接两端的进程角色
+enum PeerRole {
+  PEER_ROLE_UNSPECIFIED = 0;
+  PEER_ROLE_TIP = 1;
+  PEER_ROLE_BROKER = 2;
+  PEER_ROLE_SERVER = 3;
+  PEER_ROLE_RENDERER = 4;
+}
+
+// 每条连接的第一帧，用于角色校验和连接实例识别
+message Hello {
+  PeerRole role = 1;
+  uint64 instance_id = 2;
+}
+
+// 需要对端返回 Response 的调用。id 必须非零，响应必须沿用同一个 id
 message Request {
   uint64 id = 1;
-  oneof operation { Ping ping = 10; InputKey key = 11; ContextCommand context = 12; Shutdown shutdown = 13; OpenInput open_input = 14; QueryConfig query_config = 15; UserNotification user_notification = 16; IdentifyService identify_service = 17; }
+
+  oneof operation {
+    Ping ping = 10;
+    InputKey key = 11;
+    ContextCommand context = 12;
+    Shutdown shutdown = 13;
+    OpenInput open_input = 14;
+    QueryConfig query_config = 15;
+    UserNotification user_notification = 16;
+    IdentifyService identify_service = 17;
+  }
 }
+
+// 对 Request 的结果。id 与对应请求相同且必须非零
 message Response {
   uint64 id = 1;
-  oneof result { Pong pong = 10; InputResult input = 11; ShutdownResponse shutdown = 12; Failure failure = 13; InputOpened input_opened = 14; ConfigValue config_value = 15; ServiceIdentity service_identity = 17; }
+
+  oneof result {
+    Pong pong = 10;
+    InputResult input = 11;
+    ShutdownResponse shutdown = 12;
+    Failure failure = 13;
+    InputOpened input_opened = 14;
+    ConfigValue config_value = 15;
+    ServiceIdentity service_identity = 17;
+  }
 }
+
+// 不要求逐条响应的单向事件；在进程内适配为 request_id = 0
 message Event {
-  oneof notification { LogEvent diagnostic = 10; InputResult input = 11; RenderSnapshot render = 12; RendererEvent interaction = 13; LayoutUpdate layout = 14; }
+  oneof notification {
+    LogEvent diagnostic = 10;
+    InputResult input = 11;
+    RenderSnapshot render = 12;
+    RendererEvent interaction = 13;
+    LayoutUpdate layout = 14;
+  }
 }

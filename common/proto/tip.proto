@@ -1,108 +1,131 @@
 syntax = "proto3";
+
 package weasel.message;
 
-// TIP/server payload contract. Keep field numbers and enum values compatible
-// with deployed TIP DLLs. Shared transport envelopes remain in rpc.proto;
-// broker/renderer configuration changes do not change this input contract.
+// TIP 与 Server 之间的输入协议
+// 必须保持字段编号和枚举值与已经部署的 TIP DLL 兼容
+// 防止输入法更新后出现不兼容问题
 
-message Ping {
-  string text = 1;
-}
-
+// TIP 发给 Server 的诊断信息
 message LogEvent {
   string level = 1;
   string text = 2;
 }
 
-// Input context identity, pipe connection epoch and document-state generation.
+// 宿主输入上下文
 message ContextToken {
+  // TextService 内部的上下文编号
   uint64 context_id = 1;
+  // 每次重新连接 Server 时更新，防止接受旧连接的响应
   uint64 connection_epoch = 2;
+  // 上下文取消、失焦等失效操作后更新，防止接受旧文档状态
   uint64 generation = 3;
 }
 
+// TIP 通知 Server 输入上下文发生的生命周期或模式操作
 enum ContextAction {
   CONTEXT_ACTION_UNSPECIFIED = 0;
   CONTEXT_ACTION_FOCUS = 1;
   CONTEXT_ACTION_BLUR = 2;
   CONTEXT_ACTION_CANCEL = 3;
   CONTEXT_ACTION_SUBMIT = 4;
-  // Host already owns the finalized text; do not insert an engine commit again.
+  // 宿主已经接管最终文本，Server 不应再次提交引擎结果
   CONTEXT_ACTION_HOST_TERMINATED = 5;
   CONTEXT_ACTION_TOGGLE_ASCII = 6;
-  // Release one context without closing the shared TextService connection.
+  // 释放单个上下文，但保留 TextService 共享的 RPC 连接
   CONTEXT_ACTION_DESTROY = 7;
-  // Idempotent assignment; existing actions retain their original semantics.
+  // 幂等设置中英文状态，重连和重试时不会反复翻转
   CONTEXT_ACTION_SET_ASCII = 8;
 }
 
+// 对指定输入上下文执行操作
 message ContextCommand {
   ContextToken token = 1;
   ContextAction action = 2;
-  // Required for SET_ASCII; absent on commands sent by older TIPs.
   optional bool ascii_mode = 3;
 }
 
+// Rime 返回的一个候选项
 message Candidate {
   string text = 1;
   string comment = 2;
 }
 
+// 屏幕坐标中的矩形
 message RenderRect {
   int32 left = 1;
   int32 top = 2;
   int32 right = 3;
   int32 bottom = 4;
+  // valid=false 表示当前没有可靠坐标
   bool valid = 5;
 }
 
+// TIP 将宿主插入点位置发送给 Server
 message LayoutUpdate {
   uint64 session_id = 1;
   RenderRect anchor = 2;
   ContextToken token = 3;
-  // The host composition revision whose edit has completed before this probe.
-  optional uint64 applied_revision = 4;
+  // 该布局是在对应输入 revision 已应用到宿主 composition 后测得的
+  optional uint64 revision = 4;
 }
 
-message OpenInput { ContextToken token = 1; }
-message InputOpened { ContextToken token = 1; }
+// 创建一个输入上下文
+message OpenInput {
+  ContextToken token = 1;
+}
+
+// Server 确认输入上下文已经创建
+message InputOpened {
+  ContextToken token = 1;
+}
+
+// TIP 已经翻译、准备交给 Rime 处理的按键
 message InputKey {
   ContextToken token = 1;
+  // Rime/X11 风格键值
   int32 keycode = 2;
   int32 modifiers = 3;
   bool released = 4;
+  // 原始 Win32 元数据
   uint32 virtual_key = 5;
   int64 native_lparam = 6;
 }
 
-message Pong { string text = 1; }
-enum FailureCode { FAILURE_CODE_UNSPECIFIED = 0; FAILURE_CODE_INVALID_ARGUMENT = 1; FAILURE_CODE_NOT_READY = 2; FAILURE_CODE_OVERLOADED = 3; FAILURE_CODE_STALE_CONTEXT = 4; FAILURE_CODE_INTERNAL = 5; }
-message Failure { FailureCode code = 1; string message = 2; }
-
-// State is optional: an unhandled key acknowledgement must not clear preedit.
-// Effects are one-shot and must be applied once in token/revision wire order.
+// Server 对按键或上下文操作产生的输入结果
+// state 为空时不能清除现有 preedit；effects 是必须按 token/revision 顺序执行一次的副作用
 message InputResult {
   ContextToken token = 1;
   uint64 revision = 2;
+  // 是否阻止宿主继续处理该按键
   bool handled = 3;
   InputState state = 4;
   EditEffects effects = 5;
   optional bool ascii_mode = 6;
-  // Safe default is false when talking to an older server.
   optional bool allow_rime_in_secure_fields = 7;
 }
+
+// 某个 revision 对应的完整输入状态
 message InputState {
   string preedit = 1;
+  // UTF-16 code unit 偏移，与 TSF 使用的字符串坐标一致
   uint32 cursor_utf16 = 2;
   bool composing = 3;
   repeated Candidate candidates = 4;
+  // 当前页内的高亮候选项索引
   uint32 selected = 5;
+  // 当前页第一个候选项在完整候选序列中的索引
   uint32 page_start = 6;
   bool has_previous = 7;
   bool has_next = 8;
-  // Unformatted engine input, independent of inline/external/preview display.
+  // 未格式化的引擎输入，不受 inline/external/preview 展示方式影响
   optional string raw_input = 9;
 }
-// Commit finalizes the active preedit (or inserts when none exists); a provided
-// state may then start the next preedit. Emoji invocation cancels preedit first.
-message EditEffects { string commit = 1; bool open_emoji_panel = 2; }
+
+// 必须在宿主编辑会话中执行一次的副作用
+message EditEffects {
+  // commit 结束当前 preedit；同一个结果中的 state 随后可以开始下一次 preedit
+  string commit = 1;
+  // 打开 Emoji 面板前需要先取消现有 preedit
+  bool open_emoji_panel = 2;
+}

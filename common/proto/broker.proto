@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package weasel.message;
+
+// Broker 的 RPC 消息定义
+// 包含 Server、Renderer 与 Broker 的通信
+
+// 配置查询请求
+message QueryConfig {
+  // refresh 总是重新读取硬盘上的新配置文件，当前用于预览主题
+  bool refresh = 1;
+  // JSON 路径，类似于 jq
+  string path = 2;
+}
+
+// 配置值查询响应
+message ConfigValue {
+  optional string json = 1;
+}
+
+enum UserNotificationSeverity {
+  USER_NOTIFICATION_SEVERITY_UNSPECIFIED = 0;
+  USER_NOTIFICATION_SEVERITY_INFO = 1;
+  USER_NOTIFICATION_SEVERITY_WARNING = 2;
+  USER_NOTIFICATION_SEVERITY_ERROR = 3;
+}
+
+// 组件发给Broker的用户通知
+// 当前由 Toast/Message 显示
+message UserNotification {
+  string source = 1;
+  string code = 2;
+  UserNotificationSeverity severity = 3;
+  string title = 4;
+  string message = 5;
+  string details = 6;
+}
+
+// Broker 请求确认管道服务的身份
+message IdentifyService {}
+
+// Server 或 Renderer 返回的服务身份，用于 Broker 验证子进程所有权
+message ServiceIdentity {
+  // 管道服务所属进程
+  uint32 pid = 1;
+  // 当前为 server 或 renderer
+  string component = 2;
+  // Broker 启动子进程时注入的所有权令牌
+  string owner_token = 3;
+  // 区分同一进程组件的不同运行实例
+  string instance = 4;
+  // 服务是否已经完成初始化并可以接受业务请求
+  bool ready = 5;
+}
+
+// Broker 请求 Server 或 Renderer 优雅退出
+message Shutdown {
+  string reason = 1;
+}
+
+// 服务对优雅退出请求的确认
+message ShutdownResponse {
+  bool accepted = 1;
+  string message = 2;
+}

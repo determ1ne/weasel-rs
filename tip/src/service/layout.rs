@@ -171,7 +171,7 @@ impl ITfEditSession_Impl for LayoutProbe_Impl {
                     token: Some(token),
                     // Some(0) means this TIP has not applied the host edit yet;
                     // None is reserved for older TIPs without this field.
-                    applied_revision: Some(applied_revision),
+                    revision: Some(applied_revision),
                     anchor: Some(RenderRect {
                         left: rect.left,
                         top: rect.top,
