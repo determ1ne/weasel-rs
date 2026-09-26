@@ -2,6 +2,10 @@
 use crate::bindings::*;
 use weasel_common::command_menu;
 
+/// 向已运行的 broker 投递重启服务命令，不等待重启完成。
+///
+/// 找不到 broker 窗口或 Windows 拒绝投递时返回错误；成功仅表示消息已入队，
+/// 不代表配置已应用或服务已重启。
 pub fn request_restart() -> Result<(), String> {
     let class = windows_strings::HSTRING::from(command_menu::BROKER_WINDOW_CLASS);
     unsafe {

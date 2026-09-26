@@ -1,18 +1,24 @@
-//! Loader and host-side adapters. Successful DLL loads are intentionally pinned
-//! until process exit: registered window procedures and XAML callbacks may
-//! outlive a backend. Instances still close on their creating UI apartment.
+//! 加载主题 DLL
+
 use crate::d2d_bindings::*;
 use crate::theme_api::*;
 use std::{ffi::c_void, path::Path};
 use weasel_theme_api::plugin::{self, Buffer, Create, Description, Operation, PluginApi, Reply};
 use windows_strings::{PCSTR, PCWSTR};
 
+/// 已验证的主题插件入口、能力描述和默认设置。
+///
+/// `api` 指向 DLL 中的静态表，因此工厂要求对应模块在进程剩余时间内保持加载。
 pub struct Factory {
+    /// 与注册表对应的稳定主题名称。
     name: &'static str,
+    /// 插件 DLL 导出的静态 ABI 函数表。
     api: &'static PluginApi,
+    /// 加载时验证过的能力和主题默认设置。
     description: Description,
 }
 
+/// 确保插件拥有的响应缓冲区恰好交还给同一插件 API。
 struct BufferGuard<'a>(&'a PluginApi, Buffer);
 impl Drop for BufferGuard<'_> {
     fn drop(&mut self) {
@@ -29,6 +35,7 @@ impl Drop for BufferGuard<'_> {
     }
 }
 
+/// 校验插件缓冲区边界并反序列化 JSON；所有返回路径都会释放输入缓冲区。
 fn read<T: serde::de::DeserializeOwned>(api: &PluginApi, buffer: Buffer) -> Result<T, String> {
     let buffer = BufferGuard(api, buffer);
     if buffer.1.data.is_null() || buffer.1.len == 0 || buffer.1.len > plugin::MAX_BYTES {
@@ -39,6 +46,10 @@ fn read<T: serde::de::DeserializeOwned>(api: &PluginApi, buffer: Buffer) -> Resu
 }
 
 impl Factory {
+    /// 从指定路径加载并验证主题 DLL 的 ABI 与元数据。
+    ///
+    /// 仅允许从 DLL 所在目录和系统目录解析依赖。验证失败会释放模块；加载成功
+    /// 后模块故意不卸载，以保证仍存活的原生回调地址有效。
     pub fn load(name: &'static str, path: &Path) -> Result<Self, String> {
         use std::os::windows::ffi::OsStrExt;
         let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -83,6 +94,10 @@ impl Factory {
 }
 
 impl ThemeFactory for Factory {
+    /// 返回注册名、能力、默认设置，并在插件侧创建主题实例。
+    ///
+    /// 设置按 JSON 编码且受插件 ABI 的最大载荷限制。创建过程失败时返回错误，
+    /// 不会向调用方暴露半初始化后端；后端创建和后续调用应由 UI apartment 执行。
     fn name(&self) -> &'static str {
         self.name
     }
@@ -137,14 +152,24 @@ impl ThemeFactory for Factory {
 }
 
 struct Backend {
+    /// 指向进程驻留 DLL 中的函数表。
     api: &'static PluginApi,
+    /// 插件实例句柄；非空时由 `destroy` 恰好销毁一次。
     handle: *mut c_void,
+    /// 当前内容代号及其事件接收端，用于过滤插件返回的过期动作。
     events: Option<(u64, EventSink)>,
+    /// 等待渲染器统一排出的插件通知。
     notices: Vec<ThemeNotice>,
+    /// 隐藏阶段遇到错误后缓存的故障，阻止后续插件调用。
     failure: Option<String>,
 }
 
 impl Backend {
+    /// 编码并执行一次有界插件操作，收集通知并转发当前内容的事件。
+    ///
+    /// 插件调用是同步的，可能在 UI 线程上执行；操作载荷超限、ABI 响应无效、
+    /// 插件报告错误或后端已进入故障状态时返回错误。事件只转发与当前内容代号
+    /// 相同的结果，避免迟到响应触发旧界面动作。
     fn call(&mut self, operation: Operation) -> Result<(), String> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
@@ -172,28 +197,34 @@ impl Backend {
 }
 
 impl ThemeBackend for Backend {
+    /// 取出当前累积的通知，避免重复报告。
     fn take_notices(&mut self) -> Vec<ThemeNotice> {
         std::mem::take(&mut self.notices)
     }
+    /// 设置事件接收端后提交当前视图。
     fn render(&mut self, view: &CandidateView, events: &EventSink) -> Result<(), String> {
         self.events = Some((view.content_id, events.clone()));
         self.call(Operation::Render(view.clone()))
     }
+    /// 清除事件接收端并请求插件隐藏；失败会被记为后端故障。
     fn hide(&mut self) {
         self.events = None;
         if let Err(error) = self.call(Operation::Hide) {
             self.failure = Some(error);
         }
     }
+    /// 通知插件系统外观可能已改变。
     fn refresh_appearance(&mut self) -> Result<(), String> {
         self.call(Operation::Refresh)
     }
+    /// 查询插件健康状态；错误交由运行时结束当前后端。
     fn check_health(&mut self) -> Result<(), String> {
         self.call(Operation::Health)
     }
 }
 
 impl Drop for Backend {
+    /// 通过插件 ABI 销毁实例；调用方必须在创建实例的 UI apartment 上析构。
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe {

@@ -1,8 +1,15 @@
-//! The only translation between wire snapshots/events and the theme contract.
+//! 在 IPC 快照、渲染器事件和主题接口之间执行唯一的转换。
+//!
+//! 这里保留主题回调创建时的所有者、会话、上下文令牌和修订号，并在入队前
+//! 校验动作是否符合该快照，避免主题实现直接接触 IPC 类型或绕过运行时约束。
 use crate::state::Owner;
 use crate::theme_api::{Anchor, CandidateItem, CandidateView, EventSink, UiAction};
 use weasel_common::message::{RenderSnapshot, RendererEvent, RendererEventAction};
 
+/// 将传输层快照复制为主题视图，并附加用于淘汰过期回调的内容代号。
+///
+/// 文本和候选项会被克隆，因此调用后视图不依赖快照的借用生命周期；调用方
+/// 应避免对未变化内容重复转换，以控制分配开销。
 pub fn view(snapshot: &RenderSnapshot, content_id: u64) -> CandidateView {
     CandidateView {
         preedit: snapshot
@@ -40,6 +47,10 @@ pub fn view(snapshot: &RenderSnapshot, content_id: u64) -> CandidateView {
     }
 }
 
+/// 为一个快照创建带身份的主题事件接收端。
+///
+/// 禁用候选、不可用的翻页动作和未知动作会被丢弃。发送使用有界 Tokio 队列的
+/// 非阻塞 `try_send`；队列满或接收端关闭时事件丢弃，不阻塞 UI 回调线程。
 pub fn events(
     owner: Owner,
     snapshot: &RenderSnapshot,

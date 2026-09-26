@@ -1,7 +1,8 @@
-//! Orbit（月轨）：透明绘制范围、静态文字与原生装饰动画的完整示例。
+//! Orbit（月轨）：将候选布局、透明面板和原生图层动画组合成可复用主题。
 //!
-//! 翻页使用保留图层的原生动画；宿主统一处理变换命中，不逐帧重绘候选。
-//! 候选翻页短暂保留退场页；新页绘制与命中共用位移，旧页不接受点击。
+//! `View` 与外观事件负责读取快照、布局并提交主帧；指针事件只更新悬停或发送动作，
+//! 动画事件则续接宿主合成器中的图层时间线。翻页时短暂保留旧页，新页与命中区域共用
+//! 位移，旧页不可交互；装饰动画按可见时间推进，隐藏期间冻结。
 mod page;
 mod style;
 mod text;
@@ -33,6 +34,10 @@ const MAX_ROW: f32 = 540.0;
 const PERIOD: f64 = 2200.0;
 const MOTION_STEP: f64 = 100.0;
 
+/// 跨事件保存主题资源、当前候选页和动画时间线。
+///
+/// 候选文字与装饰图层分开管理：普通快照可替换候选内容而不重启装饰动画；翻页只额外
+/// 保留一个旧页，直到过渡截止后释放。`motion_time` 记录累计可见时长，隐藏时暂停相位。
 struct State {
     style: Style,
     moon: Image,
@@ -51,15 +56,18 @@ struct State {
 }
 thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
 
+/// 返回此主题实现的宿主 ABI 版本。
 #[unsafe(no_mangle)]
 pub extern "C" fn theme_abi_version() -> u32 {
     ABI_VERSION as u32
 }
+/// 声明主题使用的能力位，供宿主在创建前协商。
 #[unsafe(no_mangle)]
 pub extern "C" fn theme_capabilities() -> u32 {
     Capability::Preedit as u32
 }
 
+/// 初始化字体、配置和首个候选页；失败时返回对应错误码。
 #[unsafe(no_mangle)]
 pub extern "C" fn theme_create(_mode: i32, dark: i32) -> i32 {
     let Ok(moon) = Image::from_png(include_bytes!(concat!(env!("OUT_DIR"), "/moon.png"))) else {
@@ -93,6 +101,7 @@ pub extern "C" fn theme_create(_mode: i32, dark: i32) -> i32 {
 }
 
 impl State {
+    /// 停止唤醒、移除图层并提交透明空帧，使宿主清除旧内容和命中区域。
     fn hide(&mut self, now: f64) {
         cancel_wakeup();
         // 主动隐藏也显式移除，避免依赖宿主随后一定会发送 Hide。
@@ -118,6 +127,7 @@ impl State {
         fill_rect(0.0, 0.0, 1.0, 1.0, 0);
     }
 
+    /// 返回从本轮显示开始累计的周期相位；隐藏时保存的相位会在再次显示时续播。
     fn phase_time(&self, now: f64) -> f64 {
         (self.motion_time + (now - self.motion_started).max(0.0)) % (2.0 * PERIOD)
     }
@@ -127,6 +137,9 @@ impl State {
         (3.0 + 2.0 * wave, 0.625 - 0.275 * wave)
     }
 
+    /// 为月球和星点各续接一小段原生动画，并登记最近的下一次唤醒。
+    ///
+    /// 这里只更新图层属性，不重绘候选文字；延迟唤醒也只安排一段新动画，不追赶漏掉的帧。
     fn animate(&mut self, now: f64) -> bool {
         if !self.shown || !self.style.animations {
             return false;
@@ -155,6 +168,10 @@ impl State {
         changed
     }
 
+    /// 读取最新快照并绘制面板、候选页和装饰层；必要时启动或回收翻页过渡。
+    ///
+    /// 页面变化时先保留旧页，再按新布局确定整行位移并启动两层动画。后续普通快照仅更新
+    /// 两页内容，不重置动画起点；过渡结束后旧页释放，新的当前页恢复静止位置。
     fn render(&mut self, now: f64) -> Result<(), i32> {
         let Some(view) = View::read() else {
             self.hide(now);
@@ -388,6 +405,11 @@ impl State {
     }
 }
 
+/// 按宿主事件推进主题状态，并返回是否提交帧或保留现有画面。
+///
+/// `View`/外观事件重绘最新快照，指针事件处理命中与动作，动画事件续约装饰唤醒或清理已
+/// 到期的退场页；隐藏事件则清除图层和画面。只有需要更新主画面或命中快照时才返回
+/// `Present`，纯图层续播返回 `Keep`。
 #[unsafe(no_mangle)]
 pub extern "C" fn theme_event(kind: i32, detail: i32, _x: f32, _y: f32, now: f64) -> i32 {
     STATE.with(|slot| {
@@ -470,6 +492,7 @@ pub extern "C" fn theme_event(kind: i32, detail: i32, _x: f32, _y: f32, now: f64
     })
 }
 
+/// 释放主题状态及其缓存资源。
 #[unsafe(no_mangle)]
 pub extern "C" fn theme_destroy() {
     STATE.with(|state| *state.borrow_mut() = None);

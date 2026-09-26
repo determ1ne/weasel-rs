@@ -1,4 +1,5 @@
-//! Native preview controller. Disk/RPC/theme startup never runs in its window proc.
+//! 原生外观预览控制器。
+
 use crate::{d2d_bindings::*, theme_api::UiMode, ui_runtime::UiHandle};
 use std::{cell::Cell, sync::mpsc, thread};
 use windows_strings::{HSTRING, w};
@@ -6,24 +7,49 @@ use windows_strings::{HSTRING, w};
 const COMPLETE: u32 = WM_APP as u32 + 40;
 const REFRESH: usize = 1;
 const CLOSE: usize = 2;
+
+/// 由窗口线程发送给主题工作线程的串行命令。
 enum Command {
+    /// 重新读取配置并尝试加载当前指定的主题。
     Refresh,
+    /// 停止接收后续刷新，并释放工作线程持有的主题资源。
     Close,
 }
+
+/// 工作线程发回窗口线程的操作结果。
 enum Completion {
+    /// 一次刷新结束；错误不会替换当前正在显示的主题。
     Refreshed(Result<String, String>),
+    /// 工作线程已退出，且其主题资源已释放。
     Closed,
 }
+
+/// 窗口线程拥有的控制状态；跨线程通信只通过命令和完成通道进行。
+///
+/// `Cell` 中的窗口句柄及状态仅由创建窗口的 UI 线程访问。`busy` 防止同时排队多个
+/// 刷新，`closing` 则阻止关闭流程开始后再接受新的刷新请求。
 struct Controller {
+    /// 向唯一工作线程发送命令；接收端断开表示工作线程已不可用。
     commands: mpsc::Sender<Command>,
+    /// 接收工作线程结果，由窗口过程在完成消息中排空。
     results: mpsc::Receiver<Completion>,
+    /// 刷新按钮的窗口句柄。
     refresh: Cell<HWND>,
+    /// 关闭按钮的窗口句柄。
     close: Cell<HWND>,
+    /// 显示加载状态或当前主题名称的静态文本句柄。
     status: Cell<HWND>,
+    /// 是否已有刷新命令正在执行或排队。
     busy: Cell<bool>,
+    /// 是否已进入关闭流程。
     closing: Cell<bool>,
 }
 
+/// 在专用线程中串行处理主题加载，并在资源释放及操作完成时通知窗口线程。
+///
+/// 每次刷新先构造新的 `UiHandle`，仅在构造成功后替换旧句柄，因此失败不会破坏现有
+/// 预览。线程入口捕获 panic，避免异常越过线程边界；RPC、配置或主题初始化错误通过
+/// 完成通道返回。关闭时先退出命令循环并丢弃当前句柄，再发送 `Closed`。
 fn worker(hwnd: usize, commands: mpsc::Receiver<Command>, results: mpsc::Sender<Completion>) {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -67,6 +93,9 @@ fn worker(hwnd: usize, commands: mpsc::Receiver<Command>, results: mpsc::Sender<
 }
 
 impl Controller {
+    /// 若控制器仍开放且当前空闲，则排入一次刷新并立即更新界面状态。
+    ///
+    /// 重复点击会被忽略；命令通道断开时向消息循环投递非零退出码。
     fn refresh(&self) {
         if self.closing.get() || self.busy.replace(true) {
             return;
@@ -81,6 +110,9 @@ impl Controller {
             }
         }
     }
+    /// 开始关闭流程，禁用操作按钮并通知工作线程停止。
+    ///
+    /// 重复关闭请求无效。实际窗口循环在收到工作线程的 `Closed` 完成项后退出。
     fn close(&self) {
         if self.closing.replace(true) {
             return;
@@ -96,6 +128,9 @@ impl Controller {
             }
         }
     }
+    /// 按当前窗口 DPI 调整状态文本和操作按钮的位置。
+    ///
+    /// 子窗口尚未创建时对应句柄为空，此时跳过该控件；尺寸至少保持一个像素。
     unsafe fn layout(&self, hwnd: HWND) {
         unsafe {
             let dpi = GetDpiForWindow(hwnd).max(96) as i32;
@@ -121,6 +156,11 @@ impl Controller {
     }
 }
 
+/// 原生窗口消息入口；只在 UI 线程操作控件，并通过通道与工作线程协调。
+///
+/// `WM_NCCREATE` 将控制器指针存入窗口用户数据，窗口销毁时清除。完成消息会排空结果
+/// 队列，因为工作线程可能在 UI 线程处理消息前连续发送多个结果。panic 被捕获并转为
+/// 消息循环失败，避免 unwind 穿过系统 ABI 边界。
 unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         if message == WM_NCCREATE as u32 {
@@ -216,6 +256,15 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: 
     })
 }
 
+/// 创建并运行独立的预览控制窗口，直到用户关闭或消息循环结束。
+///
+/// 初次刷新在消息循环启动后异步执行。窗口线程负责所有窗口操作，唯一工作线程负责
+/// 配置/RPC 和主题资源；正常关闭会等待 `Closed` 消息确认资源已释放。若消息循环异常
+/// 结束，仅当工作线程已退出时才等待并回收线程句柄，避免 UI 线程被卡住。
+///
+/// # 错误
+///
+/// 窗口类注册、窗口或子控件创建、工作线程创建失败时返回系统或线程错误文本。
 pub fn run() -> Result<(), String> {
     let (commands, receiver) = mpsc::channel();
     let (sender, results) = mpsc::channel();
@@ -263,6 +312,7 @@ pub fn run() -> Result<(), String> {
         }
         struct Window(HWND);
         impl Drop for Window {
+            /// 在所有退出路径上销毁原生窗口。
             fn drop(&mut self) {
                 unsafe {
                     let _ = DestroyWindow(self.0);

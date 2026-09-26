@@ -1,16 +1,24 @@
-//! Standalone skin preview.
+//! 独立的外观预览入口与示例渲染数据。
 //!
-//! `weasel-renderer.exe --preview` renders the configured skin from a synthetic
-//! snapshot into a window that is visible in the task bar and manually closable.
-//! It reads settings from broker, but never connects to server or listens on the
-//! live renderer pipe. Candidate interactions are visual only.
+//! 使用 `weasel-renderer.exe --preview` 时，程序从合成的候选快照渲染当前配置的主题，
+//! 并在任务栏显示可手动关闭的预览窗口。主题设置仍从 broker 读取，但此模式不连接
+//! server，也不监听实时 renderer 管道；候选项仅用于展示，不会触发真实输入交互。
 use crate::theme_api::UiMode;
 use weasel_common::message::{RenderItem, RenderRect, RenderSnapshot};
 
-/// Synthetic connection owner and presentation sequence for the preview strip.
+/// 合成预览条带使用的连接所有者编号。
+///
+/// 该固定编号用于构造有效的演示快照，不对应真实输入会话。
 pub(crate) const PREVIEW_OWNER: u64 = 1;
 
-/// Theme selection comes from broker; preview has no input-mode overrides.
+/// 将命令行参数解析为 renderer 的运行模式。
+///
+/// 不带参数时使用实时模式；仅接受单个 `--preview` 参数进入预览模式。预览主题仍由
+/// broker 配置决定，此解析过程不提供主题或输入模式覆盖。
+///
+/// # 错误
+///
+/// 参数组合不受支持时返回用法提示。
 pub fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<UiMode, String> {
     let args: Vec<_> = args.into_iter().collect();
     match args.as_slice() {
@@ -20,9 +28,11 @@ pub fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<
     }
 }
 
-/// A representative candidate strip so the whole skin is visible: candidate rows
-/// with comments plus the paging/emoji quick-action panel (both paging flags are
-/// set and the strip is not on its first page).
+/// 构造用于展示主题各部分的合成候选快照。
+///
+/// 快照包含带注释的候选行，并模拟非首页且前后均可翻页的状态，以便主题同时呈现翻页
+/// 控件和表情快捷操作面板。锚点仅提供满足可见性校验的有效矩形；预览窗口自行定位，
+/// 不依赖该坐标。调用方可将结果交给常规快照校验及展示适配逻辑。
 pub fn synthetic_snapshot() -> RenderSnapshot {
     let samples = [
         ("你好", "nihao"),
@@ -66,6 +76,13 @@ pub fn synthetic_snapshot() -> RenderSnapshot {
     }
 }
 
+/// 启动独立预览窗口。
+///
+/// `_mode` 为统一 renderer 入口保留；预览窗口自身负责从 broker 加载主题设置。
+///
+/// # 错误
+///
+/// 窗口类、窗口控件或工作线程初始化失败时返回错误文本。
 pub fn run(_mode: UiMode) -> Result<(), String> {
     crate::preview_window::run()
 }

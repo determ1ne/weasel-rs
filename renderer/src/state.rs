@@ -1,23 +1,37 @@
+//! 管理渲染连接的所有权、待呈现快照及其输入边界。
+
 use weasel_common::message::RenderSnapshot;
 
+/// 渲染连接的单调递增所有者编号。
 pub type Owner = u64;
 // Matches common InputState's candidate limit; retain separate text/geometry bounds.
 const MAX_ITEMS: usize = 256;
 
-/// A newer connection may take ownership; a superseded connection cannot reclaim it.
+/// 在线程间协调渲染连接与 UI 呈现的最新状态。
+///
+/// 新连接以更大的 `Owner` 接管邮箱后，旧连接不能重新取得所有权。`pending` 是
+/// 单槽邮箱，新快照会替换尚未消费的快照；`wake_pending` 将多次唤醒合并为一次。
+/// 断开连接会发布隐藏状态，关闭后则不再接受新快照。
 #[derive(Default)]
 pub struct Mailbox {
+    /// 当前仍连接并拥有呈现状态的客户端；断开时清空。
     pub owner: Option<Owner>,
+    /// 已获准发布状态的最大所有者编号，断开当前所有者后仍保留。
     newest_owner: Owner,
+    /// 等待 UI 消费的最新状态；内层 `None` 表示应隐藏当前呈现。
     pub pending: Option<(Owner, Option<RenderSnapshot>)>,
+    /// 是否已有一次唤醒等待 UI 处理，用于合并重复唤醒。
     pub wake_pending: bool,
+    /// 终止标记；为真时拒绝快照并忽略断开请求。
     pub closed: bool,
-    // Server presentation order spans every session, token, show and hide.
-    // Retain this after consuming pending; reset only on a newer owner.
+    /// 当前所有者已接受的最大服务端序号，消费待处理快照后仍保留。
+    ///
+    /// 序号跨会话、令牌、显示和隐藏操作统一递增；只有更新的所有者接管时才重置。
     latest_sequence: u64,
 }
 
 impl Mailbox {
+    /// 请求一次 UI 唤醒；若已有唤醒待处理则返回 `false`，避免重复排队。
     pub fn schedule_wake(&mut self) -> bool {
         if self.wake_pending {
             return false;
@@ -26,10 +40,18 @@ impl Mailbox {
         true
     }
 
+    /// 取出最新待处理状态并清除唤醒标记。
+    ///
+    /// 即使邮箱为空也会清除标记，使后续新状态能够再次安排唤醒。
     pub fn take_pending(&mut self) -> Option<(Owner, Option<RenderSnapshot>)> {
         self.wake_pending = false;
         self.pending.take()
     }
+
+    /// 接受当前或更新所有者发布的快照，并替换邮箱中的待处理状态。
+    ///
+    /// 返回 `false` 表示邮箱已关闭、所有者已过期、序号为零，或当前所有者的
+    /// 序号没有严格递增。更大的所有者接管时可从任意非零序号开始。
     pub fn render(&mut self, owner: Owner, snapshot: RenderSnapshot) -> bool {
         if self.closed
             || owner < self.newest_owner
@@ -46,6 +68,9 @@ impl Mailbox {
         true
     }
 
+    /// 仅当调用者仍是当前所有者时，发布该连接的隐藏状态。
+    ///
+    /// 保留最近所有者和序号水位，防止断开后旧连接通过重放重新显示内容。
     pub fn disconnect(&mut self, owner: Owner) -> bool {
         if self.closed || self.owner != Some(owner) {
             return false;
@@ -56,6 +81,10 @@ impl Mailbox {
     }
 }
 
+/// 校验待呈现快照的文本、候选数量、分页索引和锚点范围。
+///
+/// 超出传输与渲染边界时返回说明原因的错误；限制文本字节数和候选数量，避免
+/// 不可信快照占用过多内存或造成不受控的渲染工作量。
 pub fn validate(snapshot: &RenderSnapshot) -> Result<(), String> {
     if let Some(preedit) = &snapshot.preedit {
         crate::theme_api::Preedit {
@@ -108,6 +137,10 @@ pub fn validate(snapshot: &RenderSnapshot) -> Result<(), String> {
     Ok(())
 }
 
+/// 比较两个快照的呈现内容，忽略序号和锚点等布局更新字段。
+///
+/// 该判断用于区分内容变化与仅影响布局的更新；会话、令牌、修订号或候选内容
+/// 任一变化都视为内容不同。
 pub fn same_content(a: &RenderSnapshot, b: &RenderSnapshot) -> bool {
     a.session_id == b.session_id
         && a.active == b.active

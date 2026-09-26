@@ -1,13 +1,23 @@
+//! 在前台 TSF 输入线程上解释按键，并按用户显式操作请求系统表情面板。
+//!
+//! 按键布局翻译必须在输入线程、跨入 RPC 工作线程之前执行，以读取正确的键盘状态和布局；
+//! 注入的表情快捷键带专用标记，便于服务识别并避免将自身合成输入当作用户按键。
 use crate::bindings::{GetKeyboardLayout, GetKeyboardState, ToUnicodeEx};
 use weasel_common::message::InputKey;
 
 const EMOJI_SHORTCUT_TAG: usize = 0x57525345;
 
+/// 判断当前 Win32 消息是否带有本服务的表情面板注入标记。
+///
+/// 标记来自 `SendInput` 的 `dwExtraInfo`，用于忽略服务自身发出的快捷键事件。
 pub fn is_emoji_shortcut() -> bool {
     unsafe { crate::bindings::GetMessageExtraInfo().0 as usize == EMOJI_SHORTCUT_TAG }
 }
 
-/// Invoked only for the user's emoji action, on the foreground TSF thread.
+/// 在前台 TSF 线程为用户显式请求打开 Windows 表情面板。
+///
+/// 通过 `SendInput` 注入 Win+句点序列，并在每个输入事件上附加私有标记；部分注入失败只
+/// 记录诊断信息，不把错误传播到 TSF 输入回调。
 pub fn open_emoji_panel() {
     use crate::bindings::{
         INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_LWIN,
@@ -42,7 +52,10 @@ pub fn open_emoji_panel() {
     }
 }
 
-/// Translate on the TSF input thread, before crossing into the RPC worker.
+/// 在 TSF 输入线程把虚拟键及原生 `lParam` 转为引擎协议按键。
+///
+/// 读取当前线程键盘状态和布局；可打印字符翻译会临时屏蔽修饰键状态，但保留其协议位。
+/// 状态读取失败、死键或多字符输出均返回 `None`，且不把 Windows 键盘 API 调用移至 RPC 线程。
 pub fn translate(vk: u32, lparam: i64, key_up: bool) -> Option<InputKey> {
     let mut event = InputKey {
         virtual_key: vk,
@@ -87,6 +100,7 @@ pub fn translate(vk: u32, lparam: i64, key_up: bool) -> Option<InputKey> {
     Some(event)
 }
 
+/// 将 Windows 特殊虚拟键和扩展键编码映射为协议使用的 X11 keysym 值。
 fn special_key(vk: u32, lparam: i64) -> Option<i32> {
     let extended = lparam & (1 << 24) != 0;
     match vk {
@@ -119,6 +133,7 @@ fn special_key(vk: u32, lparam: i64) -> Option<i32> {
     }
 }
 
+/// 仅接受恰好一个 Unicode 标量的 UTF-16 输出；拒绝死键状态和多字符结果。
 fn decode_character(text: &[u16], count: i32) -> Option<i32> {
     if count <= 0 {
         return None;

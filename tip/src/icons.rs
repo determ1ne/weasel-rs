@@ -1,6 +1,11 @@
-//! Icon colors refer to the glyph, so a dark taskbar needs a light icon.
+//! 提供任务栏主题判断和 TIP 配置文件所用图标资源索引。
+//!
+//! 配置文件图标标识保持固定；只有独立的中英文按钮图标随系统主题变化。
 use crate::bindings::{COLOR_WINDOWTEXT, GetSysColor};
 
+/// 判断 Windows 当前是否使用浅色系统主题；注册表不可用时按窗口文字颜色推断。
+///
+/// 查询失败会回退到系统颜色，不把个性化设置读取错误传播到 TSF 调用链。
 pub(crate) fn taskbar_is_light() -> bool {
     windows_registry::CURRENT_USER
         .open(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
@@ -13,8 +18,8 @@ pub(crate) fn taskbar_is_light() -> bool {
         })
 }
 
-// Zero-based GROUP_ICON index in icons.rc, not an individual image resource ID.
-// The profile identity stays fixed; only the separate EN/ZH button follows theme.
+/// `icons.rc` 中 `GROUP_ICON` 的从零开始索引，而非单张图像的资源 ID。
+/// 配置文件身份图标固定使用此索引，不随主题切换。
 pub(crate) const PROFILE_ICON_INDEX: u32 = 0;
 
 #[cfg(test)]

@@ -1,8 +1,13 @@
-//! Reconcile host-owned edits without asking for a write lock from OnEndEdit.
+//! 协调宿主直接对文本存储所做的编辑，并维护本 TIP 的组合状态。
+//!
+//! `OnEndEdit` 期间只检查宿主变化、失效旧响应并投递本地任务；需要写入或结束
+//! 组合的操作留到后续 TSF 写编辑会话，避免在宿主回调中再次请求写锁。
 use super::*;
 use weasel_common::message::ContextAction;
 
 impl TextService {
+    /// 处理宿主编辑通知：刷新选区相关安全状态，识别宿主删除预编辑文本，
+    /// 并把组合外点击转换为稍后执行的本地收尾任务。
     pub(super) fn on_host_edit(
         &self,
         context: Ref<'_, ITfContext>,
@@ -125,8 +130,8 @@ impl TextService {
         Ok(())
     }
 
-    // Called with a write cookie, either from our local edit task or the host's
-    // termination callback. Never insert at the current (possibly new) caret.
+    /// 在写 cookie 下结束原始组合，可由本地任务或宿主终止回调调用。
+    /// 恢复文本时始终使用原组合范围，不在可能已移动的当前插入点重新插入。
     pub(super) fn finish_raw_composition(
         &self,
         state: &ContextState,
@@ -179,8 +184,8 @@ impl TextService {
         Ok(())
     }
 
-    // Recheck under the actual write lock: a click can happen after a reply
-    // was queued. It must win over that reply's SetText/SetSelection.
+    /// 在真正应用服务器响应前、持有写 cookie 时重新检查选区。
+    /// 若排队后用户已点击到组合外，则先结束组合并取消响应，点击优先于旧回复。
     pub(super) fn reconcile_before_edit(
         &self,
         state: &ContextState,
@@ -220,6 +225,7 @@ impl TextService {
     }
 }
 
+/// 仅当原本非空的内联预编辑范围被宿主清空时，才视为宿主删除了预编辑文本。
 fn host_deleted_preedit(range_empty: bool, expected_empty: bool) -> bool {
     range_empty && !expected_empty
 }

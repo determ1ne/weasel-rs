@@ -1,3 +1,6 @@
+//! 提供 Rime 部署的原生 Windows/XAML 进度窗口，并在界面初始化失败时回退到无界面部署。
+//!
+//! 窗口及 XAML 对象由调用线程创建和销毁；部署工作线程通过有界邮箱回传日志与最终状态。
 #![allow(unsafe_op_in_unsafe_fn)]
 use crate::ui_bindings::Windows::{
     UI::{
@@ -24,28 +27,29 @@ use std::{
     },
     thread,
 };
-use weasel_common::deploy_protocol::DeployComplete;
-use weasel_common::process::SingleInstance;
+use weasel_common::{
+    comrt::WinRtApartment, deploy_protocol::DeployComplete, process::SingleInstance,
+};
 use windows_core::Interface;
 use windows_strings::{HSTRING, w};
 
 pub const WM_DEPLOY_FINISHED: u32 = WM_APP as u32 + 31;
 use crate::deploy_job::{PREVIEW_LIMIT, UiMailbox, diagnostic};
 
+/// 标记部署工作线程已报告完成，使窗口过程此后允许响应关闭请求。
 static FINISHED: AtomicBool = AtomicBool::new(false);
 
+/// 启动部署界面；界面初始化失败时，仅在部署锁仍由本线程持有的情况下启动无界面部署。
+///
+/// 界面流程正常结束时返回 `Ok(())`；锁获取、界面启动失败且无法回退，或无界面部署失败时返回错误。
 pub fn run() -> Result<(), String> {
     let result = (|| {
         let guard = SingleInstance::acquire("deploy-ui-active").map_err(|e| e.to_string())?;
         with_fallback(
             guard,
             |guard| unsafe {
-                RoInitialize(RO_INIT_SINGLETHREADED)
-                    .ok()
-                    .map_err(|e| e.to_string())?;
-                let result = run_initialized(guard);
-                RoUninitialize();
-                result
+                let _apartment = WinRtApartment::initialize_sta().map_err(|e| e.to_string())?;
+                run_initialized(guard)
             },
             |guard| {
                 thread::Builder::new()
@@ -73,8 +77,11 @@ pub fn run() -> Result<(), String> {
     }
 }
 
-/// The UI transfers its guard only when starting the worker. Keeping it here
-/// permits initialization fallback, but never a second deployment after start.
+/// 在界面初始化失败时复用部署锁启动无界面任务。
+///
+/// `ui` 只有在工作线程开始部署时才应从 `guard` 中取走锁；若界面返回错误且锁仍在，
+/// `headless` 会被调用一次。锁已被取走时表示部署可能已经开始，此时必须原样返回界面错误，
+/// 以免并发启动第二次部署。无界面任务的完成结果与初始化错误分别通过 `Some` 和 `Err` 表示。
 fn with_fallback<G>(
     guard: G,
     ui: impl FnOnce(&mut Option<G>) -> Result<(), String>,
@@ -95,13 +102,16 @@ fn with_fallback<G>(
     }
 }
 
+/// 原生部署窗口的独占句柄；销毁时同时清理窗口定时器。
 struct Window(HWND);
+/// 绑定到当前线程的 Windows XAML 管理器，负责在释放时关闭线程级 XAML 环境。
 struct XamlManager(WindowsXamlManager);
 impl Drop for XamlManager {
     fn drop(&mut self) {
         let _ = self.0.Close();
     }
 }
+/// 桌面 XAML Island 的所有权包装，确保其内容和原生资源按作用域关闭。
 struct XamlSource(DesktopWindowXamlSource);
 impl Drop for XamlSource {
     fn drop(&mut self) {
@@ -117,14 +127,24 @@ impl Drop for Window {
     }
 }
 
+/// 原生父窗口与 XAML 子窗口间的尺寸同步及拖动输入布局。
 struct Layout {
+    /// 承载 Island 的顶层窗口。
     parent: HWND,
+    /// Island 创建的原生子窗口。
     child: HWND,
+    /// XAML 根网格；按父窗口客户区和 DPI 更新其逻辑尺寸。
     root: Grid,
+    /// 将可交互控件从窗口拖动输入区域中排除。
     drag: crate::deploy_drag::DragLayer,
+    /// 上次应用的客户区宽、高和 DPI，用于跳过无变化的布局更新。
     size: Cell<(i32, i32, u32)>,
 }
 impl Layout {
+    /// 将 Island 子窗口和根网格同步到父窗口当前客户区。
+    ///
+    /// 先读取客户区与 DPI；尺寸三元组未变化时不调用窗口/XAML 更新接口。
+    /// Win32 或 XAML 更新失败时返回错误，调用方负责记录并继续窗口消息处理。
     unsafe fn resize(&self) -> Result<(), String> {
         let mut rect = RECT::default();
         GetClientRect(self.parent, &mut rect)
@@ -159,6 +179,7 @@ impl Layout {
         Ok(())
     }
 }
+/// 在销毁绑定时清空父窗口中的裸指针，避免窗口过程继续访问已释放的布局。
 struct LayoutBinding(Box<Layout>);
 impl Drop for LayoutBinding {
     fn drop(&mut self) {
@@ -168,6 +189,11 @@ impl Drop for LayoutBinding {
     }
 }
 
+/// 在已初始化的单线程 COM/XAML 环境中创建窗口、运行消息循环并等待部署工作线程结束。
+///
+/// `guard` 在工作线程启动前由调用线程持有；启动成功后转移给工作线程，使部署锁覆盖
+/// 整个任务。XAML/窗口初始化阶段的错误会保留该锁供外层回退；启动工作线程后的错误
+/// 不得触发第二次部署。函数返回前清理邮箱窗口句柄、回调绑定和窗口相关资源。
 unsafe fn run_initialized(guard: &mut Option<SingleInstance>) -> Result<(), String> {
     let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     let mut cursor = POINT::default();
@@ -425,6 +451,9 @@ unsafe fn run_initialized(guard: &mut Option<SingleInstance>) -> Result<(), Stri
     Ok(())
 }
 
+/// 处理部署窗口的非客户区、关闭、尺寸、DPI 与最小尺寸消息。
+///
+/// 部署完成前拦截关闭请求；尺寸变化时同步 XAML 子窗口布局，其他消息交由默认窗口过程。
 unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     // Keep WS_THICKFRAME for DWM shadow/rounding, but let XAML occupy the caption.
     if message == WM_NCCALCSIZE as u32 && wp.0 != 0 {
@@ -475,6 +504,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: 
     DefWindowProcW(hwnd, message, wp, lp)
 }
 
+/// 将屏幕坐标下的非客户区命中测试转换为与窗口 DPI 无关的逻辑坐标后判定边框区域。
+///
+/// 无法读取窗口矩形时返回客户区命中，避免因几何信息不可用而意外启动缩放操作。
 unsafe fn window_hit_test(hwnd: HWND, lp: LPARAM) -> i32 {
     let mut rect = RECT::default();
     if !GetWindowRect(hwnd, &mut rect).as_bool() {
@@ -491,6 +523,7 @@ unsafe fn window_hit_test(hwnd: HWND, lp: LPARAM) -> i32 {
     )
 }
 
+/// 在指定工作区内居中放置给定像素尺寸的窗口。
 fn centered_position(work: &RECT, width: i32, height: i32) -> (i32, i32) {
     (
         work.left + (work.right - work.left - width) / 2,
@@ -498,6 +531,9 @@ fn centered_position(work: &RECT, width: i32, height: i32) -> (i32, i32) {
     )
 }
 
+/// 按逻辑坐标区分窗口缩放边缘、标题栏拖动区和普通客户区。
+///
+/// 超出窗口范围的点按客户区处理；边缘判定优先于标题栏，以保留四边和四角缩放。
 fn frame_hit_test(x: f64, y: f64, width: f64, height: f64) -> i32 {
     if x < 0.0 || y < 0.0 || x >= width || y >= height {
         return HTCLIENT;
@@ -517,6 +553,10 @@ fn frame_hit_test(x: f64, y: f64, width: f64, height: f64) -> i32 {
     }
 }
 
+/// 根据系统背景色同步 XAML 与 DWM 的深浅主题，并选择 Mica、亚克力或纯色背景。
+///
+/// `previous` 用于跳过未变化主题的重复设置；DWM/画刷能力不可用时尽量降级，诊断输出
+/// 失败也不会中断窗口运行。
 fn apply_theme(
     hwnd: HWND,
     root: &Grid,
@@ -587,12 +627,17 @@ fn apply_theme(
 }
 
 #[derive(Default)]
+/// 为界面预览保留有界日志尾部，避免部署输出无限增长占用内存。
 struct LogBuffer {
+    /// 按换行切分并保留的日志片段。
     chunks: VecDeque<String>,
+    /// 当前片段的 UTF-8 字节总数。
     bytes: usize,
+    /// 是否因单行过长或总容量限制而省略过旧/过长内容。
     truncated: bool,
 }
 impl LogBuffer {
+    /// 追加日志并按字节上限及片段数量上限裁剪；截断位置会向前移至 UTF-8 字符边界。
     fn append(&mut self, text: &str) {
         // Split at line boundaries; a pathological single line is also bounded.
         for line in text.split_inclusive('\n') {
@@ -612,6 +657,7 @@ impl LogBuffer {
             }
         }
     }
+    /// 组合当前预览文本；存在截断时在保留的日志前提示完整日志另有保存。
     fn text(&self) -> String {
         let mut text = if self.truncated {
             "[较早日志已省略；完整日志已保存]\n".into()

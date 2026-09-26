@@ -1,4 +1,5 @@
-//! Bounded asynchronous reporting; never perform pipe I/O on the UI thread.
+//! 将主题通知记录到本地诊断日志，并异步转发给 broker。
+
 use std::{
     sync::{OnceLock, mpsc},
     time::Duration,
@@ -8,6 +9,10 @@ use weasel_common::{
     rpc::{RpcClient, RpcError, try_default_broker_pipe_name},
 };
 
+/// 记录主题通知，并尽力将长度受限的消息异步发送给 broker。
+///
+/// 首次调用时惰性创建唯一后台工作线程；队列最多缓存 32 条，调用方不会等待
+/// 队列空间。测试构建只记录通知而不连接 broker。
 pub fn report(theme: &str, notice: crate::theme_api::ThemeNotice) {
     let level = match notice.severity {
         crate::theme_api::NoticeSeverity::Info => weasel_common::logging::Level::INFO,
@@ -90,6 +95,7 @@ pub fn report(theme: &str, notice: crate::theme_api::ThemeNotice) {
     }
 }
 
+/// 以警告级别报告主题不可用及其加载错误。
 pub fn theme_unavailable(theme: &str, error: &str) {
     report(
         theme,
@@ -102,6 +108,20 @@ pub fn theme_unavailable(theme: &str, error: &str) {
     );
 }
 
+/// 报告 renderer 消费的全局配置无效，并说明已经采用内置回退值。
+pub fn invalid_configuration(details: &str) {
+    report(
+        "renderer",
+        crate::theme_api::ThemeNotice {
+            severity: crate::theme_api::NoticeSeverity::Warning,
+            code: "configuration.invalid".into(),
+            message: "渲染配置无效，已使用内置默认值。".into(),
+            details: details.into(),
+        },
+    );
+}
+
+/// 移除 NUL 并按字节上限截断字符串，同时保证截断位置位于 UTF-8 字符边界。
 fn bounded(value: &str, limit: usize) -> String {
     let value = value.replace('\0', "");
     let mut end = value.len().min(limit);
@@ -111,6 +131,7 @@ fn bounded(value: &str, limit: usize) -> String {
     value[..end].into()
 }
 
+/// 取出后端当前积累的通知，并逐条交由异步报告通道处理。
 pub fn drain(theme: &str, backend: &mut dyn crate::theme_api::ThemeBackend) {
     for notice in backend.take_notices() {
         report(theme, notice);

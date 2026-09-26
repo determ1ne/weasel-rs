@@ -1,3 +1,5 @@
+//! 管理 librime 动态库、引擎实例与输入会话，并将宿主事件和引擎状态相互转换。
+
 mod api;
 mod loader;
 mod raw;
@@ -18,10 +20,14 @@ use self::loader::RimeLibrary;
 const RIME_TRUE: std::os::raw::c_int = 1;
 const MAX_CANDIDATES: usize = 256;
 
-// Construct only after a successful getter. The matching free callback has
-// already been checked before invoking that getter, including in test tables.
+/// 持有一次成功获取的 librime 输出，并在离开作用域时调用配对释放函数。
+///
+/// 仅在 getter 成功且对应 free 回调已确认存在后构造；RAII 也保证转换发生
+/// panic 时仍会释放输出。释放函数的 ABI 契约必须与 `T` 匹配。
 struct Output<T> {
+    /// 从引擎取得、尚未释放的结构体值。
     value: T,
+    /// librime 为该结构体规定的配对释放函数。
     free: unsafe extern "C" fn(*mut T) -> i32,
 }
 
@@ -40,34 +46,48 @@ impl<T> Drop for Output<T> {
     }
 }
 
+/// 将引擎候选数转换为可用于切片构造的长度，并拒绝负数或超出上限的值。
 fn candidate_count(count: i32) -> Option<usize> {
     usize::try_from(count)
         .ok()
         .filter(|&count| count <= MAX_CANDIDATES)
 }
 
+/// 将路径转换为 C 字符串；包含 NUL 字节时返回可诊断错误。
 fn path_string(path: &Path) -> Result<CString, String> {
     CString::new(path.to_string_lossy().as_bytes())
         .map_err(|error| format!("invalid user data directory path: {error}"))
 }
 
+/// 已加载并初始化的 librime 引擎句柄。
+///
+/// `Rc` 与内部 API 表使该句柄不可跨线程共享；引擎只会在最后一个会话释放后
+/// 最终化并卸载其动态库。
 pub struct Librime {
     inner: Rc<Engine>,
 }
 
 struct Engine {
     api: RimeLibraryApi,
-    // None is used only by fake-table tests; production engines always own the DLL.
+    /// 生产实例持有 DLL；仅使用伪造函数表的单元测试为 `None`。
     _library: Option<RimeLibrary>,
+    /// 传给 librime 的应用名，其存储须覆盖引擎生命周期。
     app_name: CString,
+    /// 传给 librime 的共享数据目录，其存储须覆盖引擎生命周期。
     shared_data_dir: CString,
+    /// 传给 librime 的用户数据目录，其存储须覆盖引擎生命周期。
     user_data_dir: CString,
 }
 
+/// 一个独立的 librime 输入会话。
+///
+/// 会话由创建它的引擎 API 表操作，并通过 `_engine` 保持引擎及 DLL 存活；丢弃时
+/// 先销毁会话。该类型采用单线程 `Rc` 生命周期管理，不可跨线程转移或共享。
 pub struct RimeSession {
     api: RimeLibraryApi,
+    /// librime 分配的会话标识；零值不构成有效会话。
     id: raw::RimeSessionId,
-    // Keeps finalize and DLL unload after destroy_session, even if Librime is dropped first.
+    /// 保证即使 `Librime` 先被丢弃，也先销毁本会话再最终化引擎或卸载 DLL。
     _engine: Rc<Engine>,
 }
 
@@ -77,6 +97,10 @@ struct RimeLibraryApi {
 }
 
 impl Librime {
+    /// 加载并初始化 `base_dir/rime.dll`，配置共享数据和用户数据目录。
+    ///
+    /// DLL、API 表、路径或必需入口不可用时返回错误。成功后返回的引擎由其会话
+    /// 共同持有；最后一个持有者释放时调用 `finalize` 并卸载 DLL。
     pub fn load(base_dir: &Path, user_data_dir: &Path) -> Result<Self, String> {
         let library = RimeLibrary::load(&base_dir.join("rime.dll"))?;
         let api = unsafe { RimeLibraryApi::load(library.api().as_ptr(), false)? };
@@ -106,6 +130,10 @@ impl Librime {
         })
     }
 
+    /// 执行一次独立的 librime 数据部署流程。
+    ///
+    /// 成功完成部署后先调用 `finalize` 再返回；部署函数返回非真值、必需入口
+    /// 缺失或加载/路径配置失败时返回错误。
     pub fn deploy(base_dir: &Path, user_data_dir: &Path) -> Result<(), String> {
         let library = RimeLibrary::load(&base_dir.join("rime.dll"))?;
         let api = unsafe { RimeLibraryApi::load(library.api().as_ptr(), true)? };
@@ -134,6 +162,9 @@ impl Librime {
         }
     }
 
+    /// 创建会话；引擎拒绝创建或返回零标识时失败。
+    ///
+    /// 返回的会话会持有引擎，因此可以独立于 `Librime` 变量继续使用。
     pub fn new_session(&self) -> Result<RimeSession, String> {
         let api = self.inner.api.clone();
         let id = unsafe { api.required("create_session", (*api.api).create_session)?() };
@@ -163,7 +194,10 @@ impl Drop for Engine {
 }
 
 impl RimeSession {
-    /// Initial application preference, applied only when allocating a session.
+    /// 设置新会话的 ASCII 模式偏好，不提交当前组合文本。
+    ///
+    /// librime 未提供 `set_option` 时此操作无效；该方法适用于会话分配时应用宿主
+    /// 的初始偏好。
     pub fn set_ascii_mode(&mut self, ascii: bool) {
         unsafe {
             if let Some(set) = (*self.api.api).set_option {
@@ -171,8 +205,10 @@ impl RimeSession {
             }
         }
     }
-    /// Explicit assignment, including a truthful acknowledgement. Repeating the
-    /// same assignment must not commit an unrelated active composition.
+    /// 显式设置 ASCII 模式并返回引擎状态。
+    ///
+    /// 只有当前模式确实不同且引擎支持提交时，才先提交组合文本；重复设置不会
+    /// 误提交无关的组合。状态读取通过响应报告实际模式。
     pub fn set_ascii_mode_response(&mut self, ascii: bool) -> KeyEventResponse {
         unsafe {
             if let Some(get) = (*self.api.api).get_option {
@@ -187,6 +223,11 @@ impl RimeSession {
         self.read_response(false, String::new())
     }
 
+    /// 执行宿主上下文操作，并按操作语义提交、清除或读取会话状态。
+    ///
+    /// 切换模式前提交当前组合；取消或宿主终止会清除组合并丢弃引擎提交文本，
+    /// 避免重新插入由宿主负责处理的文本。缺少可选 API 时相应动作会退化为空响应
+    /// 或仅返回可取得的状态。
     pub fn context_action(
         &mut self,
         action: weasel_common::message::ContextAction,
@@ -235,6 +276,10 @@ impl RimeSession {
         }
     }
 
+    /// 将翻译后的按键交给 librime，并收集按键处理结果及最新可用会话状态。
+    ///
+    /// `process_key` 缺失或调用失败时按未消费处理；状态和提交文本仍由
+    /// `read_response` 根据可用 getter 获取。
     pub fn process_key(&mut self, event: &InputKey) -> KeyEventResponse {
         let mask = event.modifiers;
         let eaten = unsafe {
@@ -246,6 +291,10 @@ impl RimeSession {
         self.read_response(eaten, String::new())
     }
 
+    /// 将渲染器候选/翻页事件映射为 librime 操作，并读取操作后的状态。
+    ///
+    /// 候选索引受候选上限约束；缺少对应可选入口、未知动作或引擎操作失败时，
+    /// 响应不会声称事件已被消费。
     pub fn process_renderer_event(&mut self, event: &RendererEvent) -> KeyEventResponse {
         let result = unsafe {
             match RendererEventAction::try_from(event.action).ok() {
@@ -296,6 +345,12 @@ impl RimeSession {
         self.read_response(result.unwrap_or(false), String::new())
     }
 
+    /// 收集提交文本、组合区、候选页、状态及原始输入组成响应。
+    ///
+    /// 只有 getter 成功且配对释放函数存在时才读取并释放对应输出。候选数量在创建
+    /// 切片前校验并限制为 `MAX_CANDIDATES`；无效计数不会解引用候选指针。游标先
+    /// 限制到 UTF-8 边界，再换算为宿主使用的 UTF-16 单元偏移。`eaten` 由调用方
+    /// 提供，`commit_text` 可作为未取得引擎提交时的默认值。
     fn read_response(&mut self, eaten: bool, mut commit_text: String) -> KeyEventResponse {
         unsafe {
             if let (Some(get_commit), Some(free)) =
@@ -406,6 +461,7 @@ impl Drop for RimeSession {
 }
 
 impl RimeLibraryApi {
+    /// 要求函数表中的入口存在；缺失时返回包含入口名的错误。
     unsafe fn required<T>(&self, name: &str, function: Option<T>) -> Result<T, String> {
         function.ok_or_else(|| format!("librime API function is unavailable: {name}"))
     }
@@ -662,12 +718,16 @@ mod input_mode_tests {
     }
 }
 
+/// 计算 librime 结构体头部之后的数据字节数，用于其 `data_size` ABI 字段。
 fn struct_data_size<T>() -> i32 {
     (size_of::<T>() - size_of::<i32>()) as i32
 }
 
-// The engine must provide a readable NUL-terminated string for the lifetime of
-// its output guard. Raw pointer validity cannot be established by Rust.
+/// 将引擎提供的 C 字符串复制为有损 UTF-8 `String`；空指针转换为空串。
+///
+/// # Safety
+/// 非空指针必须指向可读且以 NUL 结尾的内存，并在本次复制期间保持有效。调用方
+/// 负责保证 librime 输出仍由对应输出守卫持有；Rust 无法验证裸指针有效性。
 unsafe fn c_string(pointer: *const std::os::raw::c_char) -> String {
     if pointer.is_null() {
         return String::new();

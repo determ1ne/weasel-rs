@@ -1,24 +1,40 @@
-//! Input-intent admission with ranked reclamation; never truncate in-flight work.
+//! 按真实输入意图准入连接，并在槽位不足时按优先级回收可淘汰连接。
+//!
+//! 握手本身只占用有界待准入名额；连接提交输入意图后才竞争活动槽位。回收不会截断
+//! 正在执行的请求，活动槽位由信号量许可持有至准入对象销毁。
 use crate::client_connection::ClientConnection;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-/// Four extra connections may perform a handshake/OpenInput before presenting
-/// real input intent. They cannot take an active slot just by connecting.
+/// 允许先完成握手或打开输入上下文、再提交真实输入意图的额外连接数。
+///
+/// 超出此上限时 [`Gate::start`] 返回 `None`；仅建立连接不会占用活动槽位。
 pub(crate) const PENDING_LIMIT: usize = 4;
+/// 管理活动连接槽位、连接索引以及等待准入者的唤醒通知。
 pub(crate) struct Gate {
+    /// 活动输入连接的并发上限。
     slots: Arc<tokio::sync::Semaphore>,
+    /// 按连接标识索引的服务端连接，供准入回收候选。
     pub peers: std::sync::Mutex<HashMap<u64, Arc<ClientConnection>>>,
+    /// 连接活跃状态改变或槽位释放时唤醒等待者。
     pub changed: tokio::sync::Notify,
+    /// 当前持有活动槽位的连接标识。
     active: std::sync::Mutex<std::collections::HashSet<u64>>,
+    /// 已开始但尚未取得活动许可的连接数，受 [`PENDING_LIMIT`] 限制。
     pending: std::sync::atomic::AtomicUsize,
 }
+/// 单条连接的准入状态；持有的许可代表其占用一个活动槽位。
 pub(crate) struct Admission {
+    /// 在 [`Gate::active`] 中登记的连接标识。
     id: u64,
+    /// 共享的准入门及其槽位、连接索引。
     gate: Arc<Gate>,
+    /// `Some` 时连接已准入；释放该许可会向其他等待者开放槽位。
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// 等待真实输入意图取得活动槽位的绝对截止时间。
     pub deadline: tokio::time::Instant,
 }
 impl Gate {
+    /// 创建具有指定活动连接上限的共享准入门。
     pub fn new(limit: usize) -> Arc<Self> {
         Arc::new(Self {
             slots: Arc::new(tokio::sync::Semaphore::new(limit)),
@@ -28,6 +44,9 @@ impl Gate {
             pending: Default::default(),
         })
     }
+    /// 登记一条待准入连接；待处理名额耗尽时立即返回 `None`。
+    ///
+    /// 成功登记的对象有两秒准入期限；成功准入或未准入对象销毁时都会释放待处理计数。
     pub fn start(self: &Arc<Self>, id: u64) -> Option<Admission> {
         use std::sync::atomic::Ordering;
         self.pending
@@ -44,9 +63,13 @@ impl Gate {
     }
 }
 impl Admission {
+    /// 当前尚未取得活动槽位时返回 `true`。
     pub fn pending(&self) -> bool {
         self.permit.is_none()
     }
+    /// 组合引擎唤醒回调与准入等待者通知。
+    ///
+    /// 回调先调用引擎，再通过弱引用通知仍存活的准入门，避免通知闭包延长门的生命周期。
     pub fn notifier(&self, engine: Arc<dyn Fn() + Send + Sync>) -> Arc<dyn Fn() + Send + Sync> {
         let gate = Arc::downgrade(&self.gate);
         Arc::new(move || {
@@ -56,6 +79,10 @@ impl Admission {
             }
         })
     }
+    /// 在截止时间内取得活动许可，必要时尝试回收较低优先级的活动连接。
+    ///
+    /// 已准入时幂等返回 `true`；等待期间若连接断开、超时或信号量关闭则返回 `false`。
+    /// 只有成功持有许可后才登记为活动连接并减少待处理计数。
     pub async fn promote(&mut self, id: u64, connection: &ClientConnection) -> bool {
         if self.permit.is_some() {
             return true;
@@ -109,6 +136,7 @@ impl Admission {
     }
 }
 impl Drop for Admission {
+    /// 清理活动登记并释放许可；尚未准入的对象同时归还待处理名额。
     fn drop(&mut self) {
         if self.permit.is_none() {
             self.gate
@@ -126,6 +154,7 @@ impl Drop for Admission {
 }
 
 #[cfg(test)]
+/// 从连接集合中按最早空闲时间尝试淘汰一条超过给定空闲时长的连接。
 fn retire_stale(connections: &HashMap<u64, Arc<ClientConnection>>, age: Duration) -> Option<u64> {
     let mut candidates: Vec<_> = connections
         .iter()

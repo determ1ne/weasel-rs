@@ -1,5 +1,9 @@
+//! 主题配置与明暗配色：集中校验作者可调参数，并为绘制代码提供统一调色板。
 use weasel_wasm_sdk::{Kind, config::OPTIONS, diagnostics::report_notice};
 
+/// 从主题选项读取的稳定样式设置。
+///
+/// 字体大小和颜色在创建主题时解析；动画开关控制装饰时间线与翻页过渡是否运行。
 pub struct Style {
     pub font_size: f32,
     pub animations: bool,
@@ -7,6 +11,7 @@ pub struct Style {
     dark: u32,
 }
 impl Style {
+    /// 读取并校验主题配置；缺省或无效值使用默认值并报告提示。
     pub fn read() -> Self {
         let size = OPTIONS.number("/fontSize");
         if OPTIONS.kind("/fontSize") != Kind::Missing
@@ -27,6 +32,7 @@ impl Style {
             dark: color("/accentDark", 0xff9bc3e8),
         }
     }
+    /// 根据宿主当前明暗外观组合背景、文字和强调色。
     pub fn palette(&self, dark: bool) -> Palette {
         if dark {
             Palette {
@@ -64,6 +70,7 @@ fn color(path: &str, fallback: u32) -> u32 {
     ));
     fallback
 }
+/// 当前外观下供面板与候选绘制共同使用的一组颜色。
 pub struct Palette {
     pub background: u32,
     pub border: u32,

@@ -1,29 +1,30 @@
-//! WASM 主题 DLL。
+//! 面向 Windows renderer 的 WASM 主题 DLL。
 //!
-//! 用户以 AssemblyScript 编写主题、编译为 .wasm；本 DLL 用 wasmtime 加载并
-//! 驱动候选窗 UI，各层职责：
-//! - [`protocol`]：WASM↔Host ABI 契约（导入/导出名、常量、命令类型）
-//! - [`runtime`]：wasmtime 运行时（Store/Linker/host 导入/trap 收敛）
-//! - [`canvas`]：Direct2D/DirectWrite 封装（唯一接触 D2D 绑定的文件）
-//! - [`window`]：HWND/DPI/锚点定位/消息分发/动画计时/设备丢失恢复
-//! - [`backend`]：ThemeBackend 实现
+//! 主题模块以 WASM 形式提供，由 Wasmtime 执行并驱动候选窗界面。主要职责划分：
 //!
-//! 加载或实例化 .wasm 失败时 `Factory::create` 返回 `Err`，
-//! renderer 走既有主题回退路径。
+//! - [`protocol`] 定义 WASM 与宿主之间的导入、导出和绘制协议。
+//! - [`runtime`] 管理 Wasmtime 实例、宿主状态、资源及陷阱收敛。
+//! - [`canvas`] 封装 Direct2D/DirectWrite 绘制能力。
+//! - [`window`] 管理 HWND、DPI、消息分发、计时器和设备丢失恢复。
+//! - [`layers`] 与 [`layer_api`] 实现事务化保留图层模型及其宿主导入。
+//! - [`animation`] 汇总事件请求并安排窗口唤醒。
+//! - [`backend`] 将窗口接入通用 `ThemeBackend` 接口。
+//!
+//! 主题加载或初始化失败时，工厂返回错误供 renderer 走既有回退路径。
 pub use weasel_theme_api as theme_api;
 pub use weasel_theme_support::{appearance, bindings, d2d_bindings, presentation};
 
 #[path = "../sdk-rust/src/types.rs"]
 mod abi;
 mod animation;
-mod layers;
-mod layer_api;
 pub mod backend;
 pub mod canvas;
 mod composition;
 mod data;
 mod geometry;
 mod glass;
+mod layer_api;
+mod layers;
 pub mod protocol;
 mod resources;
 pub mod runtime;

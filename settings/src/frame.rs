@@ -4,6 +4,10 @@ use crate::bindings::*;
 
 const SUBCLASS_ID: usize = 0x575253;
 
+/// 为窗口安装非客户区子类并触发系统重算窗口框架。
+///
+/// 子类不持有 Rust 状态；框架刷新失败会立即撤销子类，避免留下半安装状态。
+/// 成功后窗口销毁时由消息过程自动移除子类。
 pub fn install(hwnd: HWND) -> Result<(), String> {
     unsafe {
         if !SetWindowSubclass(hwnd, Some(window_proc), SUBCLASS_ID, 0).as_bool() {
@@ -26,6 +30,10 @@ pub fn install(hwnd: HWND) -> Result<(), String> {
     Ok(())
 }
 
+/// 处理扩展框架的非客户区消息，并在窗口销毁时解除子类。
+///
+/// 命中测试优先保留 DWM 原生标题按钮，其次处理缩放边缘与拖动标题区；其他消息
+/// 依次交给 DWM 和原窗口过程。该过程不保存状态，所有未接管消息都继续向系统转发。
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     msg: u32,
@@ -107,8 +115,10 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-/// 最大化的窗口矩形包含屏幕外的缩放边框，按钮却位于显示器工作区内。
-/// 使用 DWM 实际分配的按钮区域尺寸，并以可见工作区右上角为最大化时的基准。
+/// 将屏幕坐标命中位置映射到 DWM 标题栏按钮槽。
+///
+/// 最大化窗口的外框可能越出屏幕，而按钮位于工作区内；此时以最近显示器的工作区
+/// 右上角定位。DWM 边界或窗口/显示器信息不可用时返回 `None`，交由系统继续处理。
 unsafe fn caption_button(hwnd: HWND, lp: LPARAM) -> Option<i32> {
     unsafe {
         let mut bounds = RECT::default();

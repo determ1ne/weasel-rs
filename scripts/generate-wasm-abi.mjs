@@ -38,7 +38,12 @@ for (const f of abi.functions) {
 }
 const header = "// Generated from themes/wasm/abi.json. DO NOT EDIT.\n";
 const doc = (text,prefix) => text ? text.split("\n").map(line=>prefix+line).join("\n")+"\n" : "";
-const rsTypes = header+"#![allow(dead_code)]\n"+`pub const ABI_VERSION: i32 = ${abi.version};\n`+
+const rsTypes = header+"#![allow(dead_code)]\n"+
+  "//! 与宿主 ABI 对齐的版本号、字段编号和语义枚举。\n"+
+  "//!\n"+
+  "//! 这些枚举的 `repr(i32)` 数值属于 ABI 合约；主题应使用变体而非自行假定编号。\n"+
+  "/// 当前主题 ABI 版本；导出 `theme_abi_version` 时返回此值。\n"+
+  `pub const ABI_VERSION: i32 = ${abi.version};\n`+
   abi.enums.map(e=>doc(e.doc,"/// ")+
     "#[repr(i32)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n"+
     `pub enum ${e.name} {\n`+Object.entries(e.values).map(([n,v])=>`    ${n} = ${v},`).join("\n")+"\n}\n"+
@@ -52,7 +57,8 @@ const rs = header+abi.doc.map(t=>doc(t,"//! ")).join("")+
   `#[link(wasm_import_module = "${abi.module}")]\nunsafe extern "C" {\n`+
   abi.functions.map(f=>doc(`分组：${f.group}。${f.doc}`,"    /// ")+`    pub fn ${f.name}(${f.params.map(p=>p.name+": "+types[p.type][0]).join(", ")})${f.result==="void"?"":" -> "+types[f.result][0]};\n`).join("")+"}\n";
 const as = header+abi.functions.map(f=>doc(`分组：${f.group}。${f.doc}`,"// ")+`@external("${abi.module}", "${f.name}")\nexport declare function ${f.name}(${f.params.map(p=>p.name+": "+types[p.type][1]).join(", ")}): ${f.result};\n`).join("\n");
-const signatures = header+"#[rustfmt::skip]\npub const IMPORTS: &[(&str, &[&str], &[&str])] = &[\n"+
+const signatures = header+"/// 由 `themes/wasm/abi.json` 生成的 ABI 导入签名表，供宿主校验主题模块。\n"+
+  "#[rustfmt::skip]\npub const IMPORTS: &[(&str, &[&str], &[&str])] = &[\n"+
   abi.functions.map(f=>`    ("${f.name}", &[${f.params.map(p=>JSON.stringify(types[p.type][2])).join(", ")}], &[${f.result==="void"?"":JSON.stringify(types[f.result][2])}]),`).join("\n")+"\n];\n";
 const js = header+abi.enums.map(e=>`export const ${e.name} = Object.freeze(${JSON.stringify(e.values)});\n`).join("");
 for (const [path,content] of [

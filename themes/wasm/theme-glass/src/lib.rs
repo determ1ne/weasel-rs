@@ -1,7 +1,8 @@
-//! Aero 风格横向候选栏：WASM 负责布局与交互，宿主负责文字和毛玻璃合成。
+//! Aero 风格的横向候选栏：本模块负责布局和鼠标交互，宿主负责文字绘制与毛玻璃合成。
 //!
 //! 当前采用固定配色，不支持候选窗内的 preedit。所有尺寸为 DIP，颜色为 ARGB；
-//! 不自行处理 DPI 或创建窗口，也不填充不透明背景，以保留宿主的玻璃材质。
+//! 不自行处理 DPI 或创建窗口，也不填充不透明背景，以保留宿主的玻璃材质。候选窗口不
+//! 支持预编辑文本；无效或过大的快照会被拒绝，且不会保留上一帧可点击的候选。
 use std::cell::{Cell, RefCell};
 use weasel_wasm_sdk::{
     ABI_VERSION, Action, BackdropStyle, ErrorCode, EventKind, FONT_TEXT_BOLD, FrameResult,
@@ -109,15 +110,18 @@ fn paint_body(v: &View) {
     }
 }
 
+/// 返回此模块实现的主题 ABI 版本，供宿主在调用其他入口前协商接口。
 #[unsafe(no_mangle)]
 pub extern "C" fn theme_abi_version() -> u32 {
     ABI_VERSION as u32
 }
+/// 返回主题能力位；当前实现不声明额外能力。
 #[unsafe(no_mangle)]
 pub extern "C" fn theme_capabilities() -> u32 {
     0
 }
 
+/// 初始化主题的行高布局状态；返回零表示成功，非零值为 ABI 错误码。
 #[unsafe(no_mangle)]
 pub extern "C" fn theme_create(_mode: i32, _dark: i32) -> i32 {
     let mut offsets = [0.0; 3];
@@ -133,6 +137,7 @@ pub extern "C" fn theme_create(_mode: i32, _dark: i32) -> i32 {
 }
 
 /// 从宿主结构化快照读取候选并完成布局；失败时不发布半成品。
+/// 候选文本由新建的 `String` 持有；超出数量、尺寸限制或包含预编辑内容时返回 `None`。
 fn read_view() -> Option<View> {
     let snapshot = weasel_wasm_sdk::View::read()?;
     if snapshot.preedit.is_some() {
@@ -223,7 +228,10 @@ fn refresh(_dark: i32) {
     VIEW.with(|state| paint(&state.borrow()));
 }
 
-/// ABI 2 统一事件入口；未重绘则不提交，避免空帧覆盖现有画面。
+/// ABI 2 统一事件入口，处理快照、外观、隐藏、指针和动画事件。
+///
+/// 返回 ABI 错误码表示事件无效或快照无法接受；成功更新画面时返回 `Present`，仅改变
+/// 内部交互状态时返回 `Keep`，宿主据此决定是否提交新帧。
 #[unsafe(no_mangle)]
 pub extern "C" fn theme_event(kind: i32, detail: i32, x: f32, y: f32, now: f64) -> i32 {
     let Ok(kind) = EventKind::try_from(kind) else {

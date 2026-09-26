@@ -1,7 +1,13 @@
+//! eleven 主题的候选项、快捷操作视觉树及系统配色资源。
+//!
+//! 所有 XAML 对象在所属 UI STA 使用；画刷、字体和系统调色板按主题实例缓存，
+//! 外观刷新时统一失效。事件撤销句柄由渲染调用方持有，以便销毁或替换视觉树。
+
 use crate::theme_api::{CandidateView, UiAction};
 use windows_core::HSTRING;
 use windows_version::OsVersion;
 
+/// 根据系统版本选择包含所需字形的图标字体，兼顾旧版 Windows 10。
 fn icon_font_for_version(version: OsVersion) -> &'static str {
     const WINDOWS_10: OsVersion = OsVersion::new(10, 0, 0, 0);
     const WINDOWS_11: OsVersion = OsVersion::new(10, 0, 0, 22_000);
@@ -12,11 +18,13 @@ fn icon_font_for_version(version: OsVersion) -> &'static str {
     }
 }
 
+/// 获取当前进程选定的图标字体；进程内只检测并缓存一次。
 fn icon_font() -> &'static str {
     static FONT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
     FONT.get_or_init(|| icon_font_for_version(OsVersion::current()))
 }
 
+/// 返回与对应系统图标字体匹配的表情面板入口字形。
 fn emoji_glyph_for_version(version: OsVersion) -> &'static str {
     if icon_font_for_version(version) == "Segoe MDL2 Assets" {
         "\u{E76E}" // Emoji2: available in older Windows 10 MDL2 fonts.
@@ -68,17 +76,29 @@ use crate::bindings::{
     UIColorType, UISettings, VerticalAlignment,
 };
 
+/// eleven 候选窗的视觉配置和 UI 资源缓存。
+///
+/// 内部 `RefCell`/`Cell` 缓存允许渲染辅助方法通过共享引用复用 COM 对象；因此
+/// 实例只应在创建它的 UI STA 上串行访问。`refresh` 会使外观相关缓存失效，
+/// 不销毁由调用方持有的 XAML 控件或事件撤销句柄。
 pub struct CandidateTheme {
+    /// 当前主题的字体、颜色配置及共享告警缓冲区。
     config: super::config::ThemeConfig,
+    /// 按 RGBA 键缓存的纯色画刷，避免重复创建 WinRT 画刷对象。
     brushes: std::cell::RefCell<Vec<([u8; 4], SolidColorBrush)>>,
+    /// 当前系统/配置合成的调色板；外观刷新后清空。
     palette: std::cell::Cell<Option<Palette>>,
+    /// 已创建的候选字体族对象；外观刷新后清空。
     font: std::cell::RefCell<Option<FontFamily>>,
 }
 
 impl CandidateTheme {
+    /// 取出主题配置加载或渲染期间累积的告警。
     pub fn take_notices(&self) -> Vec<crate::theme_api::ThemeNotice> {
         self.config.take_notices()
     }
+
+    /// 创建具有空 UI 资源缓存的主题状态。
     pub fn new(config: super::config::ThemeConfig) -> Self {
         Self {
             config,
@@ -87,11 +107,13 @@ impl CandidateTheme {
             font: Default::default(),
         }
     }
+    /// 使画刷、配色和字体缓存失效，供系统外观变化后重新读取并建立资源。
     pub fn refresh(&mut self) {
         self.brushes.get_mut().clear();
         self.palette.set(None);
         *self.font.get_mut() = None;
     }
+    /// 返回指定颜色的缓存画刷；首次创建失败时传播 WinRT 错误且不缓存失败项。
     fn brush(&self, color: Color) -> windows_core::Result<SolidColorBrush> {
         let key = [color.A, color.R, color.G, color.B];
         let mut cache = self.brushes.borrow_mut();
@@ -105,6 +127,7 @@ impl CandidateTheme {
 }
 
 impl CandidateTheme {
+    /// 获取候选文字字体族并缓存成功结果；创建失败会在当前调用中向上传播。
     fn candidate_font(&self) -> windows_core::Result<FontFamily> {
         if let Some(font) = self.font.borrow().as_ref() {
             return Ok(font.clone());
@@ -114,8 +137,11 @@ impl CandidateTheme {
         Ok(font)
     }
 
-    /// Validate shared visuals while the attached host is still hidden, without
-    /// creating callbacks or requiring a snapshot/event owner.
+    /// 在宿主仍隐藏时准备共享视觉属性并验证必需字体与画刷。
+    ///
+    /// 此阶段不构建候选项、不注册事件，也不需要快照或事件发送端，可用于在
+    /// 初始化期间提前发现 XAML 资源错误。系统配色只在首次准备时计算并缓存。
+    /// 任一必需 WinRT 操作失败都会返回错误，供主题工厂中止初始化。
     pub fn prepare(
         &self,
         root: &Border,
@@ -178,6 +204,16 @@ impl CandidateTheme {
         Ok(())
     }
 
+    /// 根据快照重建候选项与快捷操作，并将交互事件登记到调用方的撤销列表。
+    ///
+    /// 调用前应先撤销该列表中旧视觉树的回调；本方法清空两组子项，再逐项创建
+    /// 控件。每个可用控件的回调克隆事件发送端，点击时发送对应 `UiAction`；
+    /// 禁用项不注册交互回调。XAML 创建、属性设置或事件订阅失败会返回错误，
+    /// 已追加的撤销句柄仍由调用方持有并负责清理。
+    ///
+    /// # 性能
+    ///
+    /// 每次调用都会重建候选和快捷操作子树；上层应仅在内容变化时调用。
     pub fn render(
         &self,
         root: &Border,
@@ -386,6 +422,11 @@ impl CandidateTheme {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// 创建一个快捷操作控件，并仅在启用时注册悬停、按压、释放和点击回调。
+///
+/// 事件撤销句柄追加到调用方提供的列表，保证其生命周期覆盖该控件的可见期；
+/// 点击事件通过克隆的发送端发出。禁用时只显示禁用态字形。任何 XAML 操作
+/// 失败均返回错误，已登记的句柄由调用方统一撤销。
 fn append_action(
     actions: &StackPanel,
     label: &str,
@@ -467,14 +508,20 @@ fn append_action(
 }
 
 #[derive(Clone, Copy)]
+/// 单次渲染使用的系统与用户配色快照。
 struct Palette {
+    /// 用户显式设置的背景色；没有时由明暗模式生成亚克力基色。
     background: Option<Color>,
+    /// 系统或用户指定的前景文字色。
     foreground: Color,
+    /// 系统或用户指定的强调色。
     accent: Color,
+    /// 由系统背景亮度推导的深色模式标记。
     dark: bool,
 }
 
 impl Palette {
+    /// 读取系统背景、文字和强调色；读取不完整时使用内置浅色回退方案。
     fn system() -> Self {
         let fallback = Self {
             background: None,
@@ -513,6 +560,7 @@ impl Palette {
         }
     }
 
+    /// 返回显式背景色或按明暗模式选取的亚克力不透明回退色。
     fn acrylic_base(self) -> Color {
         if let Some(background) = self.background {
             return background;
@@ -526,6 +574,10 @@ impl Palette {
     }
 }
 
+/// 尝试为根面板配置 HostBackdrop 亚克力；创建或配置失败时记录诊断并设为纯色。
+///
+/// 亚克力不可用本身不视为主题错误，只要纯色回退背景成功设置就返回成功；
+/// 回退背景设置失败则将 WinRT 错误传回调用方。
 fn apply_panel_background(
     root: &Border,
     palette: &Palette,
@@ -567,15 +619,18 @@ fn apply_panel_background(
     }
 }
 
+/// 创建未缓存的纯色 WinRT 画刷，并保留底层资源错误。
 fn solid(color: Color) -> windows_core::Result<SolidColorBrush> {
     SolidColorBrush::CreateInstanceWithColor(color)
 }
 
+/// 保留 RGB 通道并替换颜色的不透明度通道。
 fn with_alpha(mut color: Color, alpha: u8) -> Color {
     color.A = alpha;
     color
 }
 
+/// 按左、上、右、下顺序构造 XAML 边距/边框厚度值。
 fn thickness(left: f64, top: f64, right: f64, bottom: f64) -> Thickness {
     Thickness {
         Left: left,
@@ -585,6 +640,7 @@ fn thickness(left: f64, top: f64, right: f64, bottom: f64) -> Thickness {
     }
 }
 
+/// 为四个角设置相同半径。
 fn corner_radius(value: f64) -> CornerRadius {
     CornerRadius {
         TopLeft: value,

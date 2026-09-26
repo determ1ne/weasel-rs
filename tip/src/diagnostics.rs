@@ -1,5 +1,7 @@
-//! Fault containment and on-demand reports. Normal callbacks and lock access do
-//! not record events; fault reports still perform disk I/O on a helper thread.
+//! 记录 TIP 实例的首个故障，并按需生成隔离的诊断报告。
+//!
+//! 正常回调和锁访问不写日志；故障标记本身只做有界的内存及原子操作，报告的磁盘 I/O
+//! 与对话框显示均放在辅助线程。线程句柄连同 DLL 租约保留到线程完全结束，以免卸载代码。
 use std::{
     cell::RefCell,
     panic::Location,
@@ -26,11 +28,15 @@ thread_local! {
 }
 
 #[derive(Clone)]
+/// 可跨线程格式化的单条故障或隔离事件；调用点由 `track_caller` 捕获。
 struct Event {
+    /// 事件发生时间及线程，用于关联异步报告中的故障上下文。
     time: SystemTime,
     thread: std::thread::ThreadId,
+    /// 编译期调用点和稳定事件类别；不保存用户输入内容。
     site: &'static Location<'static>,
     kind: &'static str,
+    /// 可选 HRESULT 或内部数值，以十六进制形式展示。
     value: u64,
 }
 
@@ -50,19 +56,30 @@ impl std::fmt::Debug for Event {
 }
 
 struct Recorder {
+    /// 当前 TIP 实例编号，用于报告区分与槽位选择。
     id: usize,
+    /// 仅保留首个实例故障；诊断和隔离事件不会覆盖它。
     first_fault: Mutex<Option<Event>>,
+    /// 首故障报告成功写入后的标记，不代表人工导出或隔离报告。
     saved: Arc<AtomicBool>,
 }
 
+/// TIP 实例的故障门闩、窗口维护目标及报告重试状态。
+///
+/// 故障标记为单向状态；实例故障会抑制后续服务操作，独立的隔离报告则不会改变该状态。
 pub(crate) struct FaultState {
+    /// 实例级单向故障门闩；置位后服务操作应拒绝继续执行。
     flag: AtomicBool,
+    /// 本实例首因及报告身份，和窗口线程状态分开保存。
     recorder: Arc<Recorder>,
+    /// 接收维护定时器的 HWND 原值，零表示尚未关联窗口。
     window: AtomicUsize,
+    /// 故障报告的有界重试次数。
     report_attempts: AtomicUsize,
 }
 
 impl FaultState {
+    /// 建立实例记录器，并将其弱引用登记到当前线程，供当前实例的“关于/诊断”入口使用。
     pub(crate) fn new(_: bool) -> Self {
         let recorder = Arc::new(Recorder {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
@@ -78,10 +95,14 @@ impl FaultState {
         }
     }
 
+    /// 以调用方指定的内存序读取故障门闩。
     pub(crate) fn load(&self, ordering: Ordering) -> bool {
         self.flag.load(ordering)
     }
 
+    /// 只记录第一个故障原因，并触发有界报告重试和 TSF 线程维护通知。
+    ///
+    /// 此路径不等待锁；锁竞争时仍保留故障门闩，但首因可能无法落入记录器。
     #[track_caller]
     pub(crate) fn mark(&self, reason: &'static str, code: u64) {
         if self.flag.swap(true, Ordering::AcqRel) {
@@ -101,9 +122,11 @@ impl FaultState {
         self.request_maintenance();
     }
 
+    /// 更新可接收维护定时器的窗口句柄；零表示当前没有可用窗口。
     pub(crate) fn set_window(&self, hwnd: usize) {
         self.window.store(hwnd, Ordering::Release);
     }
+    /// 请求窗口在 TSF 线程稍后执行维护，不在故障发生线程同步调用 TSF。
     pub(crate) fn request_maintenance(&self) {
         let hwnd = self.window.load(Ordering::Acquire);
         if hwnd != 0 {
@@ -117,6 +140,7 @@ impl FaultState {
             }
         }
     }
+    /// 最多尝试四次异步保存首故障报告；测试构建和已保存实例不会写盘。
     pub(crate) fn retry_report(&self) {
         if cfg!(test)
             || !self.load(Ordering::Acquire)
@@ -139,6 +163,7 @@ impl FaultState {
         self.request_maintenance();
     }
 
+    /// 记录某个编辑上下文被隔离的原因，不设置实例故障门闩或首故障记录。
     #[track_caller]
     pub(crate) fn report_quarantine(&self, context_id: u64, reason: &'static str, code: u64) {
         let cause = Event {
@@ -155,6 +180,10 @@ impl FaultState {
 }
 
 impl Recorder {
+    /// 在辅助线程保存报告或显示对话框。
+    ///
+    /// 线程数、同时写入数和对话框数均受限；所有争用都以跳过本次操作处理，不能阻塞宿主
+    /// 回调。线程持有模块租约，句柄由全局列表保留至 `is_finished`，且不会在回调中 join。
     fn save(&self, fault: Option<Event>, dialog: Option<bool>, quarantine: Option<(u64, Event)>) {
         let Ok(mut threads) = THREADS.try_lock() else {
             return;
@@ -259,6 +288,9 @@ impl Recorder {
     }
 }
 
+/// 将长度限制为 64 KiB 的报告写入专用目录，并最多保留 32 个符合命名规则的日志文件。
+///
+/// 轮转只触及本函数识别的诊断日志；目录或文件操作失败原样返回给异步调用方。
 fn write_report(dir: &std::path::Path, id: usize, report: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
@@ -295,6 +327,9 @@ fn write_report(dir: &std::path::Path, id: usize, report: &[u8]) -> std::io::Res
     Ok(())
 }
 
+/// 请求当前线程关联实例显示“关于”或诊断报告。
+///
+/// TLS 访问及线程争用失败均静默跳过；具体对话框与磁盘工作由 `Recorder::save` 异步执行。
 pub(crate) fn show_dialog(diagnostics: bool) {
     let _ = CURRENT.try_with(|current| {
         if let Some(recorder) = current.borrow().upgrade() {

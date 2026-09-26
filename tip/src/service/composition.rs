@@ -1,22 +1,38 @@
+//! 管理 TSF 编辑会话中的组合文本生命周期。
+//!
+//! 本模块将异步引擎响应转换为针对指定 `ITfContext` 的编辑步骤，并在 TSF
+//! 授予的编辑 Cookie 有效期间更新、提交或结束组合。编辑请求可能经由宿主
+//! 回调重入，因此每一步都要重新核对上下文令牌和当前组合，不能把旧响应
+//! 应用到已失效或已被替换的编辑状态。
 use super::*;
 use crate::bindings::TF_E_READONLY;
 
+/// 描述预编辑文本从显示到提交的生命周期阶段。
 #[derive(Default)]
 enum CompositionPhase {
+    /// 文本仍是可撤销的预编辑内容。
     #[default]
     Preedit,
+    /// 正在调用宿主文本接口提交；此时不再保留可恢复的原始输入。
     Committing,
+    /// 提交调用完成，等待 TSF 结束组合。
     Committed,
 }
 
-/// Metadata belongs to the text being applied, not the latest queued reply.
+/// 与当前组合文本绑定的元数据，不随最新排队响应而转移。
+///
+/// 特别是 `raw` 只属于它所描述的预编辑文本；宿主在提交期间或提交后终止
+/// 组合时，不得将旧原始输入重新解释为尚未提交的文本。
 #[derive(Default)]
 pub(super) struct CompositionContent {
+    /// 原始输入是否仍可作为当前预编辑内容恢复。
     phase: CompositionPhase,
+    /// 生成当前预编辑文本的原始输入；旧引擎响应缺少该信息时保持为空。
     raw: Option<String>,
 }
 
 impl CompositionContent {
+    /// 创建一份属于新预编辑内容的元数据。
     pub(super) fn preedit(raw: Option<String>) -> Self {
         Self {
             phase: CompositionPhase::Preedit,
@@ -24,6 +40,10 @@ impl CompositionContent {
         }
     }
 
+    /// 开始向 TSF 写入提交文本，并立即放弃恢复原始输入的资格。
+    ///
+    /// `SetText` 可能重入宿主代码，也可能以失败结束；两种情况下提交结果
+    /// 都可能不确定，因此调用后都不能把内容回滚为原始输入。
     fn begin_commit(&mut self) {
         // SetText can reenter the host. Never roll back an in-flight or
         // uncertain commit to raw input, including when SetText fails.
@@ -31,6 +51,10 @@ impl CompositionContent {
         self.raw = None;
     }
 
+    /// 结束当前组合元数据，并取出仍可恢复的预编辑原始输入。
+    ///
+    /// 只有尚未开始提交的预编辑内容会返回原始输入；提交中、已提交或缺少
+    /// 原始输入时均返回 `None`。无论结果如何，本对象都会重置为默认状态。
     pub(super) fn finish(&mut self) -> Option<String> {
         let previous = std::mem::take(self);
         match previous.phase {
@@ -41,6 +65,11 @@ impl CompositionContent {
 }
 
 impl TextService {
+    /// 校验并排队一个针对指定 TSF 上下文的编辑步骤。
+    ///
+    /// 普通响应必须匹配上下文令牌；断连清理步骤例外，因为它负责处理已
+    /// 失效连接留下的组合。队列有界，清理步骤优先于普通响应。此方法只请求
+    /// TSF 编辑会话，不在调用线程直接修改宿主文本。
     pub(super) fn request_edit_session(
         &self,
         context: ITfContext,
@@ -85,6 +114,11 @@ impl TextService {
         Ok(())
     }
 
+    /// 从待处理队列取出仍有效的编辑，并向 TSF 请求异步可写编辑会话。
+    ///
+    /// 预留票据与服务代次用于识别请求期间发生的失效或重入。拒绝写入、
+    /// 请求失败及会话失败分别执行恢复或隔离处理；成功时由编辑会话接管
+    /// 预留状态。
     pub(super) fn schedule_edit(&self) -> Result<()> {
         if !self.activated.load(Ordering::Acquire) || self.faulted.load(Ordering::Acquire) {
             return Ok(());
@@ -179,6 +213,11 @@ impl TextService {
         Ok(())
     }
 
+    /// 在当前 TSF 编辑会话中建立组合范围并初始化预编辑状态。
+    ///
+    /// 通过上下文令牌确认响应仍属于当前会话后，使用 `ITfInsertAtSelection`
+    /// 查询插入位置，再由 `ITfContextComposition` 建立组合。后续文本更新或
+    /// 提交会排入独立编辑步骤，避免在同一宿主回调中混用旧响应。
     pub(super) fn start_composition(
         &self,
         context: &ITfContext,
@@ -227,6 +266,10 @@ impl TextService {
         Ok(())
     }
 
+    /// 将引擎响应中的预编辑文本、光标和可选显示属性应用到现有组合。
+    ///
+    /// 只在上下文令牌有效且 TSF 组合仍存在时修改范围。显示属性与布局通知
+    /// 属于尽力处理；它们失败时不应回放或否定已经成功的文本编辑。
     pub(super) fn update_composition(
         &self,
         context: &ITfContext,
@@ -265,6 +308,10 @@ impl TextService {
         Ok(())
     }
 
+    /// 在当前选择处插入非组合提交文本，并按响应要求继续建立组合。
+    ///
+    /// 插入由 TSF 编辑 Cookie 授权；插入后折叠范围到末尾并设置选择。若引擎
+    /// 同时要求继续组合，则排队新的组合启动步骤。
     pub(super) fn insert_commit(
         &self,
         context: &ITfContext,
@@ -305,6 +352,11 @@ impl TextService {
         Ok(())
     }
 
+    /// 将现有组合范围替换为提交文本，并排队结束组合步骤。
+    ///
+    /// 在清除显示属性、写入文本及调整选择前后反复核对令牌和组合对象，
+    /// 因为 `SetText` 等宿主调用可能触发终止回调并使当前代次失效。开始
+    /// 写入前先标记提交阶段，避免重入时恢复已经提交或状态不确定的原始输入。
     pub(super) fn commit_composition(
         &self,
         context: &ITfContext,
@@ -360,6 +412,11 @@ impl TextService {
         Ok(())
     }
 
+    /// 结束当前 TSF 组合，可选清除范围，并按需排队后续组合。
+    ///
+    /// 先从上下文状态中取出组合，令重入的宿主回调无法再次操作同一组合；
+    /// 清理显示属性、文本及保存的宿主选择后调用 `EndComposition`。恢复选择
+    /// 只适用于仍保存的有效选择，重启则作为新的编辑请求处理。
     pub(super) fn end_composition(
         &self,
         context: &ITfContext,
@@ -409,6 +466,12 @@ impl TextService {
         Ok(())
     }
 
+    /// 在 TSF 授予的编辑 Cookie 下执行一个已排队步骤。
+    ///
+    /// `ApplyResponse` 会根据提交文本、组合状态及响应标志展开为具体步骤。
+    /// 断连步骤保留现有预编辑文本并结束 TSF 组合，不采纳候选、不删除宿主
+    /// 文本，也不恢复可能过期的选择。调用的 TSF 接口可能触发宿主回调，故
+    /// 具体操作仍须自行复查令牌与组合状态。
     pub(super) fn apply_edit(&self, pending: PendingEdit, ec: TfEditCookie) -> Result<()> {
         let PendingEdit {
             state,

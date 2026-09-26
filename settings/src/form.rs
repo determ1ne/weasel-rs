@@ -1,29 +1,50 @@
-//! 框架无关的表单字段。有限控件覆盖常见字段，复杂 union/字典保留 JSON 编辑。
+//! 将配置 schema 与覆盖文档转换为框架无关的表单字段，并处理字段路径读写和值解析。
+//! 常见类型使用有限控件；复杂联合类型和字典保留 JSON 编辑入口。
 use crate::{catalog::Section, config::Document};
 use serde_json::Value;
 use weasel_common::settings::merge;
 
 pub struct Field {
+    /// 写入覆盖配置时使用的完整 JSON 路径，包含 section 的挂载路径。
     pub path: Vec<String>,
+    /// 表单标签；优先取 UI 元数据，其次取 schema 标题。
     pub title: String,
+    /// 供界面识别字段的本地键名，不包含挂载路径。
     pub key: String,
+    /// 面向用户的说明；JSON 控件会注明其编辑的是 JSON 值。
     pub description: String,
+    /// 选项控件可选值；数值枚举还会在末尾提供自定义输入项。
     pub values: Vec<Value>,
+    /// 界面显示的继承项、枚举项或覆盖项标签。
     pub choices: Vec<String>,
+    /// 当前覆盖项在 choices 中的索引；零表示继承。
     pub selected: i32,
+    /// 当前有效值的编辑文本，供字符串、JSON 和自定义数值控件使用。
     pub text: String,
+    /// 控件类别标识，如 color、choice、enum_number、string 或 json。
     pub kind: String,
+    /// schema 是否将该字段声明为布尔值。
     pub boolean: bool,
+    /// JSON 对象编辑器是否应使用多行输入。
     pub multiline: bool,
+    /// 未被覆盖时的继承值文本。
     pub inherited_text: String,
+    /// 继承值对应的选项索引；没有匹配项时可为负数。
     pub inherited_selected: i32,
+    /// 颜色 schema 是否接受特殊值 `system`。
     pub allow_system_color: bool,
+    /// 颜色 schema 是否接受浅色/深色成对对象。
     pub adaptive_color: bool,
 }
+/// 沿对象键逐层读取值；路径任一层不存在或不是对象时返回 `None`。
 pub fn at<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
     path.iter()
         .try_fold(value, |node, key| node.as_object()?.get(key))
 }
+/// 在 JSON 树中设置或删除路径值；空路径代表替换根节点，删除空根时重置为空对象。
+///
+/// 删除不存在的中间分支是幂等的；写入时会为缺失的中间键创建对象。若经过的节点
+/// 不是对象则返回错误，不会将该节点强制转换。
 pub fn assign(root: &mut Value, path: &[String], value: Option<Value>) -> Result<(), String> {
     if path.is_empty() {
         *root = value.unwrap_or_else(|| serde_json::json!({}));
@@ -52,6 +73,7 @@ pub fn assign(root: &mut Value, path: &[String], value: Option<Value>) -> Result
     }
     Ok(())
 }
+/// 按默认值、安装配置、当前覆盖的顺序合并 section，得到最终生效值。
 pub fn effective(section: &Section, doc: &Document) -> Value {
     let mut value = section.metadata.defaults.clone();
     if let Some(base) = at(&doc.base, &section.mount) {
@@ -62,12 +84,16 @@ pub fn effective(section: &Section, doc: &Document) -> Value {
     }
     value
 }
+/// 将字符串值原样显示，其他 JSON 值使用紧凑 JSON 表示。
 fn display(value: &Value) -> String {
     value
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| value.to_string())
 }
+/// 根据 section 的 rich schema 生成可编辑字段；仅从 patch 判断覆盖状态，base 作为继承值。
+///
+/// schema 引用、字段深度和字段总数均受限；无效引用或超限时返回错误。
 pub fn fields(section: &Section, doc: &Document) -> Result<Vec<Field>, String> {
     let mut base = section.metadata.defaults.clone();
     if let Some(value) = at(&doc.base, &section.mount) {
@@ -87,6 +113,10 @@ pub fn fields(section: &Section, doc: &Document) -> Result<Vec<Field>, String> {
     )?;
     Ok(out)
 }
+/// 递归展开 schema 对象并生成叶字段，同时应用 UI 注解和挂载路径。
+///
+/// 隐藏字段会跳过；对象属性按注解顺序稳定排序。递归深度超过 16 或累计字段达到
+/// 256 时失败，以限制元数据驱动的工作量。当前覆盖值不符合枚举约束时仍保留为可见原值。
 fn collect(
     schema: &Value,
     metadata: &crate::metadata::Metadata,
@@ -300,12 +330,14 @@ fn collect(
     });
     Ok(())
 }
+/// 将本地字段路径编码为 JSON Pointer 片段序列，转义键中的 `~` 与 `/`。
 fn pointer(path: &[String]) -> String {
     path.iter()
         .map(|s| format!("/{}", s.replace('~', "~0").replace('/', "~1")))
         .collect()
 }
 impl Field {
+    /// 返回当前覆盖在选项控件中的位置；继承状态映射到继承值的位置。
     pub fn display_selected(&self) -> i32 {
         if self.selected == 0 {
             self.inherited_selected
@@ -313,6 +345,10 @@ impl Field {
             self.selected - 1
         }
     }
+    /// 将界面选择和文本解析为待写入值；`None` 表示移除覆盖并恢复继承。
+    ///
+    /// 自定义数值必须是有限浮点数；JSON 文本最多 16 KiB。无效索引、数值或 JSON
+    /// 返回错误，不产生部分结果。
     pub fn value(&self, selected: i32, text: &str) -> Result<Option<Value>, String> {
         if selected == 0 {
             return Ok(None);
@@ -345,7 +381,9 @@ impl Field {
     }
 }
 
-// 仅解析包内引用，限制引用链长度；循环和外部引用不能拖住表单生成。
+/// 只解析根 schema 内的引用，并将引用 schema 的同级属性合并到目标上。
+///
+/// 引用链最多递归 16 层；外部、缺失和循环引用最终均以错误结束，避免表单生成无界递归。
 fn resolve(schema: &Value, root: &Value, depth: usize) -> Result<Value, String> {
     if depth > 16 {
         return Err("表单 schema 引用深度超限".into());
@@ -368,6 +406,7 @@ fn resolve(schema: &Value, root: &Value, depth: usize) -> Result<Value, String> 
     Ok(result)
 }
 
+/// 为布尔或枚举值查找控件索引；找不到枚举值时返回 `-1`。
 fn values_for_index(schema: &Value, value: &Value) -> i32 {
     if schema["type"] == "boolean" {
         return i32::from(value == true);

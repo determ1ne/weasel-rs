@@ -1,17 +1,15 @@
+//! 查询组合锚点的 TSF 布局，并向渲染端发送带上下文和修订标识的几何信息。
+//!
+//! 布局通知先合并为一个异步只读编辑会话；执行时重新读取当前组合和视图，
+//! 并在发出结果前复核上下文代次、编辑修订及组合身份，丢弃过期几何数据。
 use super::*;
 use crate::bindings::{
     GA_ROOT, GetAncestor, LogicalToPhysicalPointForPerMonitorDPI, POINT, TF_ES_ASYNC,
 };
 use weasel_common::message::ContextToken;
 
-/// Returns the narrow range used to anchor candidate UI.
-///
-/// Querying the entire composition makes the result depend on whether the
-/// host has finished laying out every newly inserted glyph. Query
-/// one target character so delayed layout of the remaining text cannot move
-/// or suppress the candidate anchor.
-///
-/// An empty composition (external preedit) remains collapsed at the caret.
+/// 返回用于定位候选窗的窄范围，避免尚未完成布局的其余组合文字影响锚点。
+/// 非空组合取起始处一个字符；空组合（外部预编辑）则保持折叠在插入点。
 fn composition_target_range(composition: &ITfComposition, ec: TfEditCookie) -> Result<ITfRange> {
     let composition_range = unsafe { composition.GetRange()? };
     let empty = unsafe { composition_range.IsEmpty(ec)? }.as_bool();
@@ -33,13 +31,16 @@ fn composition_target_range(composition: &ITfComposition, ec: TfEditCookie) -> R
     Ok(target_range)
 }
 
-/// One pending TSF read, refreshed by notifications received before it runs.
+/// 合并待执行的 TSF 只读会话；执行前到达的通知只刷新其上下文令牌。
 #[derive(Default)]
 pub(super) struct LayoutSchedule {
+    /// 用于区分先后排队的只读会话。
     serial: u64,
+    /// 待执行票据及其最新上下文令牌。
     pending: Option<(u64, ContextToken)>,
 }
 impl LayoutSchedule {
+    /// 有待处理会话时更新其令牌，否则创建新票据并请求排队一个会话。
     fn request(&mut self, token: ContextToken) -> Option<u64> {
         if let Some((_, latest)) = &mut self.pending {
             *latest = token;
@@ -49,6 +50,7 @@ impl LayoutSchedule {
         self.pending = Some((self.serial, token));
         Some(self.serial)
     }
+    /// 仅由对应票据取走最新令牌，过期会话不能消费后续请求。
     fn take(&mut self, ticket: u64) -> Option<ContextToken> {
         if self.pending.as_ref().is_some_and(|(id, _)| *id == ticket) {
             self.pending.take().map(|(_, token)| token)
@@ -58,6 +60,8 @@ impl LayoutSchedule {
     }
 }
 impl TextService {
+    /// 为当前焦点上下文的活动组合安排异步只读布局查询。
+    /// TSF 写锁释放后才执行；调用方可显式请求终止后的最终布局探测。
     pub(super) fn request_composition_layout(&self, state: &Arc<ContextState>) -> Result<()> {
         if !self.activated.load(Ordering::Acquire)
             || state.suspended.load(Ordering::Acquire)
@@ -97,22 +101,30 @@ impl TextService {
     }
 }
 #[implement(ITfEditSession)]
+/// 持有布局票据的 TSF 只读会话；回调只发送仍与当前编辑状态相符的结果。
 pub(super) struct LayoutProbe {
+    /// 持有目标文档上下文，使异步会话可安全读取状态。
     state: Arc<ContextState>,
+    /// 本次只读会话在布局调度器中的票据。
     ticket: u64,
+    /// 服务激活代次；与请求时的值不同时不发送布局结果。
     generation: Arc<AtomicU64>,
+    /// 排队时观察到的服务代次。
     requested_generation: u64,
+    /// 保持实现 ITfEditSession 的 COM 模块在回调期间加载。
     _module: ModuleLease,
 }
 impl Drop for LayoutProbe {
     fn drop(&mut self) {
-        // TSF can discard an edit session without executing it.
+        // TSF 可能丢弃而不执行会话。
         if let Ok(mut layout) = self.state.layout.try_lock() {
             layout.take(self.ticket);
         }
     }
 }
 impl ITfEditSession_Impl for LayoutProbe_Impl {
+    /// 使用 TSF 读 cookie 查询当前组合几何，并在 RPC 发送前复核其有效性。
+    /// 暂时无法取得文本几何时静默放弃本次更新，不影响键入。
     fn DoEditSession(&self, ec: TfEditCookie) -> Result<()> {
         boundary::guard(None, || {
             let Some(token) = self
@@ -186,9 +198,8 @@ impl ITfEditSession_Impl for LayoutProbe_Impl {
     }
 }
 
-/// The renderer uses physical screen pixels, whereas a text store may return
-/// screen coordinates in its host window's DPI space. Like Mozc, use the root
-/// window of the source view for the conversion, never the foreground window.
+/// 将文本视图返回的宿主 DPI 坐标转换为渲染端使用的物理屏幕像素。
+/// 转换以源视图所属根窗口为准；任一角点转换失败时保留原矩形，避免混用坐标系。
 fn physical_text_rect(view: &ITfContextView, rect: RECT) -> RECT {
     unsafe {
         let Ok(window) = view.GetWnd() else {

@@ -1,11 +1,20 @@
-//! Wasmtime 运行时封装：持有 Store/Instance，注册 host 导入函数，
-//! 提供类型化的导出调用入口，并把 wasm trap 收敛为 `Err(String)`。
+//! 在宿主与 WASM 主题之间建立受限的 Wasmtime 调用边界。
 //!
-//! `Engine` 为进程级单例（OnceLock）；模块目前每次创建时重新编译，
-//! 确保预览刷新能重新加载磁盘上的主题；不反序列化不可信的本地编译产物。
-//! 每个 [`WasmRuntime`] 拥有独立的 `Store`（绑定创建它的 UI 线程，非 Send）。
+//! 宿主通过 `Linker<HostState>` 暴露绘制、视图查询、资源测量和交互导入；主题只能
+//! 通过这些导入访问宿主能力。宿主则校验 ABI 与导出签名，再以类型化函数调用主题。
+//! guest 的 trap、燃料耗尽、无效返回码和宿主导入拒绝都会成为 `Err(String)`，由上层
+//! 主题故障路径隔离；事务同时回滚未提交的宿主展示状态，但无法回滚 guest 线性内存。
 //!
-//! 字体与布局资源由resources模块统一测量，并直接交给canvas回放。
+//! `Engine` 是启用 fuel 的进程级单例；每次创建运行时都从输入字节重新编译模块，
+//! 以便预览刷新读取主题新版本，也不加载不可信的本地编译缓存。每个
+//! [`WasmRuntime`] 独占一个 `Store`、实例及宿主状态，并绑定创建它的 UI 线程（非 `Send`）。
+//! 开始初始化后，丢弃运行时时至多调用一次有 fuel 限额的 `theme_destroy`；即使
+//! 清理回调 trap，也由 Wasmtime/宿主持有的资源所有权完成回收。
+//!
+//! start、初始化、渲染和普通事件分别使用独立燃料预算。Fuel 约束 guest 指令数，宿主
+//! 导入另有调用数、文本字节数、原生资源工作量、绘制命令、命中区及线性内存上限；
+//! 这些限制共同控制 guest 诱发的计算、分配和昂贵宿主工作。字体与布局资源由
+//! resources 模块统一测量，结果作为绘制命令交由 canvas 回放。
 
 use std::{
     sync::{Arc, OnceLock},
@@ -35,13 +44,17 @@ pub const MAX_DIM_DIP: f32 = 8192.0;
 // 每次导出的指令预算（wasmtime fuel）：超出即 trap，trap 被收敛为 Err。
 /// start 函数（如 AssemblyScript 静态初始化）在实例化时执行，单列预算。
 const INSTANTIATE_FUEL: u64 = 10_000_000;
+/// `theme_create` 的指令预算。
 const INIT_FUEL: u64 = 1_000_000;
+/// 视图渲染回调的指令预算。
 const RENDER_FUEL: u64 = 10_000_000;
+/// 指针、动画、隐藏和外观变化等事件回调的指令预算。
 const EVENT_FUEL: u64 = 1_000_000;
 
 /// 进程级 Wasmtime 引擎（启用 fuel 计量）。
 static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
 
+/// 惰性创建并缓存进程级引擎；初始化失败也会缓存，后续调用返回同一错误。
 fn engine() -> Result<&'static Engine, String> {
     ENGINE
         .get_or_init(|| {
@@ -54,16 +67,27 @@ fn engine() -> Result<&'static Engine, String> {
         .map_err(Clone::clone)
 }
 
-/// 主题实例的 host 侧状态，作为 `Store` 数据持有。
+/// 一个主题实例对应的宿主状态，随 `Store` 独占并在回调间持续保存。
+///
+/// WASM 只能通过已注册的导入间接读写其中允许的内容；宿主侧配额计数在每次导出调用
+/// 开始时清零。展示数据由 [`WasmRuntime::transact`] 暂存和提交，资源配置、日志等
+/// 非展示数据不属于展示快照，因而不会随帧回滚。
 pub struct HostState {
+    /// ABI 与能力声明查询阶段的门闩；该阶段内调用任一宿主导入都会失败。
     declaration_query: bool,
+    /// 宿主资源测量与布局服务；不会把原生资源句柄直接交给 guest。
     pub resources: crate::resources::Resources,
+    /// 当前帧候选视图的共享快照，避免查询导入反复复制整份视图。
     pub view: Option<Arc<crate::theme_api::CandidateView>>,
+    /// 由元数据默认值与实例选项合并后的主题配置。
     pub options: serde_json::Value,
+    /// 宿主提供给主题的数据设置。
     pub settings: serde_json::Value,
-    // 仅host能打开/关闭事件绘制事务，guest无需配对调用。
+    /// 仅由宿主在事件回调期间开启，回调结束后关闭；guest 无需自行配对。
     pub(crate) frame_open: bool,
+    /// 已提交及当前事务暂存的图层场景。
     pub(crate) layers: crate::layers::LayerScene,
+    /// 当前绘制命令和命中区所归属的图层；`None` 表示主画布。
     pub(crate) selected_layer: Option<u32>,
     pub(crate) layers_edited: bool,
     pub(crate) motion_revision: u64,
@@ -76,28 +100,34 @@ pub struct HostState {
     regions: Vec<HitRegion>,
     pointer_region: i32,
     pointer_layer: i32,
+    /// 按下时记录的图层 ID、代次和区域 ID；抬起事件据此防止旧目标误触。
     pub(crate) pressed_target: Option<(u32, u64, i32)>,
+    /// 当前导出调用已消耗的宿主导入次数与 UTF-8 文本字节数。
     host_calls: usize,
     text_bytes: usize,
+    /// 当前回调是否具备发送用户动作的资格，仅用于按下/抬起事件。
     accept_actions: bool,
-    /// 资源限额（经 `Store::limiter` 生效）：内存/表/实例增长上限。
+    /// 经 `Store::limiter` 生效的 Wasmtime 资源限制器，约束内存、表和实例的增长。
     pub limits: StoreLimits,
     /// 当前帧的绘制命令（host 在 WM_PAINT 回放）。
     pub commands: Vec<DrawCommand>,
     /// 主题最近一次声明的内容尺寸（DIP）。
     pub size: (f32, f32),
     anchor_rect: Option<crate::protocol::Rect>,
+    /// 当前事务中的原生面板样式；成功提交后成为宿主展示状态。
     pub panel_style: PanelStyle,
+    /// 最近一次成功提交的原生背景材质配置。
     pub backdrop_style: crate::protocol::BackdropStyle,
     /// 展示状态随帧提交；每次视图回调默认可见，常驻主题可显式隐藏。
     pub visible: bool,
+    /// 当前事务中的窗口定位方式；成功提交后由宿主应用。
     pub placement: PlacementStyle,
-    /// A drag request is valid only while the guest handles a pointer-down.
+    /// 当前处理的鼠标事件类型；拖动请求仅在指针按下回调中有效。
     mouse_kind: Option<i32>,
     drag_requested: bool,
     /// 主题请求了下一动画帧。
     pub wake_request: crate::animation::WakeRequest,
-    /// 主题请求的高层动作 `(action, index)`。
+    /// 主题请求的高层动作 `(action, index)`；事务失败时清空。
     pub actions: Vec<(i32, i32)>,
     /// 用户通知（`report_notice` 导入与 host 侧警告）；普通日志不进入此队列。
     pub notes: Vec<String>,
@@ -161,6 +191,7 @@ pub(crate) struct HitRegion {
     radius: f32,
 }
 impl HitRegion {
+    /// 按圆角矩形几何规则判断点是否命中；坐标相对于所属画布或图层。
     pub(crate) fn contains(&self, x: f32, y: f32) -> bool {
         crate::geometry::hit_content(x - self.x, y - self.y, self.w, self.h, self.radius)
     }
@@ -179,6 +210,7 @@ struct Presentation {
     regions: Vec<HitRegion>,
 }
 impl Presentation {
+    /// 复制可回滚的展示状态；日志、资源、配额计数和 guest 内存不在快照中。
     fn capture(s: &HostState) -> Self {
         Self {
             layers: s.layers.clone(),
@@ -192,6 +224,7 @@ impl Presentation {
             regions: s.regions.clone(),
         }
     }
+    /// 恢复失败或保留帧的展示状态，同时保留快照以外的副作用。
     fn restore(self, s: &mut HostState) {
         s.layers = self.layers;
         s.size = self.size;
@@ -206,7 +239,10 @@ impl Presentation {
 }
 
 impl HostState {
-    /// Fuel only bounds guest instructions. Bound expensive native work separately.
+    /// 记录宿主边界调用及其文本字节数；与 Wasmtime fuel 分开限制原生工作入口。
+    ///
+    /// 声明查询期的导入调用会失败；单次导出最多允许 4096 次调用和累计 1 MiB 文本。
+    /// 任一配额超限都会返回错误并中止当前 guest 回调。
     pub(crate) fn charge(&mut self, bytes: usize) -> wasmtime::Result<()> {
         if self.declaration_query {
             return Err(wasmtime::format_err!(
@@ -221,6 +257,7 @@ impl HostState {
         Ok(())
     }
 
+    /// 检查是否能修改主展示面，并将操作计入宿主调用预算。
     fn edit_presentation(&mut self) -> wasmtime::Result<()> {
         self.charge(0)?;
         if self.selected_layer.is_some() {
@@ -229,6 +266,7 @@ impl HostState {
         Ok(())
     }
 
+    /// 限制单次回调中的昂贵原生资源工作；图片次数受独立子配额约束。
     pub(crate) fn charge_resource(&mut self, image: bool) -> wasmtime::Result<()> {
         self.measure_calls += 1;
         self.image_calls += u32::from(image);
@@ -239,6 +277,8 @@ impl HostState {
         }
         Ok(())
     }
+    /// 在事件绘制事务中追加命令，并维护绘制栈、主画布和图层的数量上限。
+    /// 非有限坐标、栈不平衡或命令超限都会使当前回调失败。
     pub(crate) fn draw(&mut self, command: DrawCommand) -> wasmtime::Result<()> {
         if !self.frame_open {
             return Err(wasmtime::format_err!(
@@ -286,7 +326,8 @@ impl HostState {
     }
 }
 
-/// 默认资源限额：内存 128 MiB（超限 grow 直接 trap）、表/实例有界。
+/// 为每个 Store 创建独立限制器：线性内存最多 128 MiB，并限制内存、表、表元素及实例数。
+/// 增长失败立即 trap，避免 guest 将超限当作可忽略的分配失败。
 fn default_limits() -> StoreLimits {
     StoreLimitsBuilder::new()
         .memory_size(MAX_MEMORY_BYTES)
@@ -298,7 +339,10 @@ fn default_limits() -> StoreLimits {
         .build()
 }
 
-/// 读取线性内存中的 UTF-8 字符串；越界或负长度返回 `None`。
+/// 从当前调用者导出的线性内存复制 UTF-8 字符串。
+///
+/// 指针按 wasm32 无符号地址解释；负长度、超过协议上限、地址溢出、越界、缺少 `memory`
+/// 导出或非法 UTF-8 均返回 `None`。返回字符串归宿主所有，不借用可变的 guest 内存。
 pub(crate) fn read_wasm_string(
     caller: &mut Caller<'_, HostState>,
     ptr: i32,
@@ -316,6 +360,10 @@ pub(crate) fn read_wasm_string(
 
 // ── host 导入函数（wasm → host）─────────────────────────────────────
 
+// 导入通过 `Caller` 访问当前实例的 Store，不跨运行时共享 guest 状态。每个入口在执行
+// 宿主工作前检查配额；拒绝请求会作为 Wasmtime 错误返回，交由事务层隔离未提交的展示修改。
+
+/// 校验并暂存面板圆角、阴影、偏移和颜色；保留当前事务中的显式边界。
 fn set_panel(
     mut caller: Caller<'_, HostState>,
     radius: f32,
@@ -347,6 +395,7 @@ fn set_panel(
     Ok(())
 }
 
+/// 校验背景材质开关、模糊半径和总和为 1 的混合权重后更新宿主状态。
 fn set_backdrop(
     mut caller: Caller<'_, HostState>,
     enabled: i32,
@@ -381,6 +430,7 @@ fn set_backdrop(
     Ok(())
 }
 
+/// 将圆角矩形填充请求转换为受限的绘制命令。
 fn fill_rounded_rect(
     mut caller: Caller<HostState>,
     x: f32,
@@ -401,6 +451,7 @@ fn fill_rounded_rect(
     })
 }
 
+/// 将矩形填充请求转换为受限的绘制命令。
 fn fill_rect(
     mut caller: Caller<'_, HostState>,
     x: f32,
@@ -415,6 +466,7 @@ fn fill_rect(
         .draw(DrawCommand::FillRect { x, y, w, h, color })
 }
 
+/// 将矩形描边请求转换为受限的绘制命令。
 fn stroke_rect(
     mut caller: Caller<'_, HostState>,
     x: f32,
@@ -435,6 +487,7 @@ fn stroke_rect(
     })
 }
 
+/// 设置 DIP 内容尺寸并清除依赖旧尺寸的锚点和面板边界。
 fn set_size(mut caller: Caller<'_, HostState>, w: f32, h: f32) -> wasmtime::Result<()> {
     caller.data_mut().edit_presentation()?;
     let st = caller.data_mut();
@@ -450,6 +503,7 @@ fn set_size(mut caller: Caller<'_, HostState>, w: f32, h: f32) -> wasmtime::Resu
     Ok(())
 }
 
+/// 设置本次展示事务提交后的可见状态；参数必须为 0 或 1。
 fn set_visible(mut caller: Caller<'_, HostState>, visible: i32) -> wasmtime::Result<()> {
     caller.data_mut().edit_presentation()?;
     if !matches!(visible, 0 | 1) {
@@ -459,6 +513,7 @@ fn set_visible(mut caller: Caller<'_, HostState>, visible: i32) -> wasmtime::Res
     Ok(())
 }
 
+/// 将窗口定位改为受限坐标范围内的固定 DIP 位置。
 fn set_fixed_position(mut caller: Caller<'_, HostState>, x: f32, y: f32) -> wasmtime::Result<()> {
     caller.data_mut().edit_presentation()?;
     if !x.is_finite()
@@ -472,6 +527,7 @@ fn set_fixed_position(mut caller: Caller<'_, HostState>, x: f32, y: f32) -> wasm
     Ok(())
 }
 
+/// 仅在处理指针按下事件时登记拖动请求；其他时机记诊断并忽略。
 fn begin_drag(mut caller: Caller<'_, HostState>) -> wasmtime::Result<()> {
     caller.data_mut().charge(0)?;
     if caller.data().mouse_kind != Some(MOUSE_DOWN) {
@@ -485,6 +541,7 @@ fn begin_drag(mut caller: Caller<'_, HostState>) -> wasmtime::Result<()> {
     Ok(())
 }
 
+/// 在指针按下/抬起回调中暂存有效动作；回调失败会丢弃，单次最多 16 项。
 fn send_action(mut caller: Caller<'_, HostState>, action: i32, index: i32) -> wasmtime::Result<()> {
     caller.data_mut().charge(0)?;
     let st = caller.data_mut();
@@ -506,12 +563,14 @@ fn send_action(mut caller: Caller<'_, HostState>, action: i32, index: i32) -> wa
     Ok(())
 }
 
+/// 请求约 16 毫秒后的下一帧，并受当前导出调用的宿主预算约束。
 fn request_frame(mut caller: Caller<'_, HostState>) -> wasmtime::Result<()> {
     caller.data_mut().charge(0)?;
     caller.data_mut().wake_request.request(now_ms() + 16.0);
     Ok(())
 }
 
+/// 将有效 UTF-8 通知复制到有界诊断队列；非法内存切片不追加内容。
 fn report_notice(caller: Caller<'_, HostState>, msg: i32, len: i32) -> wasmtime::Result<()> {
     let mut caller = caller;
     caller.data_mut().charge(len.max(0) as usize)?;
@@ -524,8 +583,10 @@ fn report_notice(caller: Caller<'_, HostState>, msg: i32, len: i32) -> wasmtime:
     Ok(())
 }
 
-/// AssemblyScript passes UTF-16 object pointers, followed by line/column, not lengths.
-/// Avoid depending on its managed object layout; preserve source coordinates.
+/// 将 AssemblyScript 的 abort 转为 trap，仅保留源码行列号。
+///
+/// 其消息与文件参数是托管 UTF-16 对象指针而非字节长度；这里不解析运行时私有对象布局，
+/// 以免依赖 guest 的内存表示。
 fn abort(
     _caller: Caller<'_, HostState>,
     _message: i32,
@@ -538,11 +599,16 @@ fn abort(
     ))
 }
 
+/// 返回进程内单调递增的毫秒时钟；时间原点未指定，仅适合计算间隔和动画截止时间。
 pub(crate) fn now_ms() -> f64 {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     EPOCH.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
 }
 
+/// 注册主题 ABI 的完整宿主导入面；签名注册失败时停止构造并返回上下文错误。
+///
+/// 导入处理的数据仍归属于调用方 Store；字符串从线性内存做有界复制，绘制、命中区、
+/// 动作和资源操作都执行各自校验或配额检查。
 fn register_imports(linker: &mut Linker<HostState>) -> Result<(), String> {
     let register = |result: wasmtime::Result<&mut Linker<HostState>>| -> Result<(), String> {
         result
@@ -787,10 +853,14 @@ fn register_imports(linker: &mut Linker<HostState>) -> Result<(), String> {
 
 // ── 运行时 ───────────────────────────────────────────────────────────
 
-/// 一个已实例化的主题模块及其 host 状态。非 `Send`：绑定在创建它的 UI 线程。
+/// 一个已实例化的主题模块及其宿主状态。
+///
+/// 每个运行时独占 Store 和实例，且绑定到创建它的 UI 线程（非 `Send`）。导出句柄不得
+/// 脱离 Store 使用；开始初始化后，丢弃时至多调用一次可选 `theme_destroy`，该清理
+/// 回调也使用有限燃料，失败不会阻止宿主释放 Wasmtime 资源。
 pub struct WasmRuntime {
     store: Store<HostState>,
-    /// 保持实例存活；导出句柄（TypedFunc/Memory）已独立引用 store 对象。
+    /// 与 Store 一同持有实例；显式保留实例生命周期直到运行时销毁。
     #[allow(dead_code)]
     instance: wasmtime::Instance,
     init_fn: TypedFunc<(i32, i32), i32>,
@@ -807,6 +877,7 @@ impl std::fmt::Debug for WasmRuntime {
     }
 }
 
+/// 将 ABI 状态码转换为统一错误；只有 `ERR_OK` 表示成功。
 fn check_code(code: i32, what: &str) -> Result<(), String> {
     if code == ERR_OK {
         Ok(())
@@ -815,8 +886,7 @@ fn check_code(code: i32, what: &str) -> Result<(), String> {
     }
 }
 
-/// 把 wasmtime 错误转为可读字符串。顶层 `Display` 仅输出 wasm backtrace；
-/// trap 根因（如 fuel 耗尽、越界）在 source 链末端，遍历 `chain()` 一并拼入。
+/// 把 Wasmtime 错误链转为可读字符串，保留 backtrace 与 fuel 耗尽、越界等根因。
 fn err_string(e: wasmtime::Error) -> String {
     let mut out = String::new();
     for (i, err) in e.chain().enumerate() {
@@ -829,12 +899,20 @@ fn err_string(e: wasmtime::Error) -> String {
 }
 
 impl WasmRuntime {
-    /// 编译并实例化主题模块；校验全部导出与 `memory` 导出。
+    /// 以默认宿主状态编译并实例化主题模块。
+    ///
+    /// 模块从传入字节重新编译；实例化期间的 start 函数有独立燃料预算。构造会校验元数据、
+    /// 导入、必需导出、ABI 版本和能力位，任何编译、链接、trap 或协议错误均返回字符串，
+    /// 不会产生可用的半初始化运行时。
     pub fn new(bytes: &[u8]) -> Result<Self, String> {
         Self::with_state(bytes, HostState::default())
     }
 
-    /// 以实例私有配置和资源根目录创建运行时。
+    /// 以实例私有宿主状态编译并实例化主题。
+    ///
+    /// 元数据默认值与 `state.options` 深度合并，选项必须为对象，合并结果最多 1 MiB。
+    /// ABI/能力查询期间禁止宿主导入；通过查询后才开放完整导入。Store 持有传入的资源、
+    /// 配置和限额，运行时之间互不共享这些状态。
     pub fn with_state(bytes: &[u8], mut state: HostState) -> Result<Self, String> {
         let metadata = weasel_common::wasm_metadata::read(bytes)?;
         let mut defaults = metadata
@@ -914,7 +992,8 @@ impl WasmRuntime {
         })
     }
 
-    /// 为下一次导出调用装载 fuel 预算；耗尽即 trap（收敛为 Err）。
+    /// 为下一次导出调用装载燃料并重置逐回调配额与暂存输出。
+    /// 燃料耗尽在 Wasmtime 中成为 trap，调用方再统一映射为 `Err(String)`。
     fn set_fuel(&mut self, budget: u64) -> Result<(), String> {
         let state = self.store.data_mut();
         state.event_revision = state.motion_revision;
@@ -935,7 +1014,8 @@ impl WasmRuntime {
         self.store.set_fuel(budget).map_err(err_string)
     }
 
-    /// 默认配置已由元数据合并；这里检查本次运行所需能力。
+    /// 检查宿主要求的外部 preedit 能力是否由主题声明支持。
+    /// 此检查不调用 guest，也不更改实例状态；主题配置已在构造时合并。
     pub fn configure(&mut self, preedit: bool) -> Result<(), String> {
         if preedit && !self.preedit {
             return Err("theme does not support external preedit".into());
@@ -943,8 +1023,12 @@ impl WasmRuntime {
         Ok(())
     }
 
-    /// host自动开始事务。Keep丢弃展示修改但保留合法动作；Present原子替换整帧。
-    /// 出错也丢弃动作；不尝试恢复guest内部变量，交由主题故障路径处理。
+    /// 用宿主快照包裹一次 guest 回调，并按 `FrameResult` 决定提交或回滚展示状态。
+    ///
+    /// `Present` 在验证绘制栈、命中区、图层及几何配额后提交完整展示帧；`Keep` 丢弃展示
+    /// 改动但保留成功回调产生的合法非展示副作用（如唤醒请求）。初始化的 `Keep` 保留
+    /// 初始化设置。回调或验证失败时恢复宿主展示快照并清空动作、拖动和唤醒请求；guest
+    /// 线性内存及内部变量无法回滚，因此由上层故障处理决定是否继续使用实例。
     fn transact(
         &mut self,
         budget: u64,
@@ -1027,6 +1111,10 @@ impl WasmRuntime {
         result.map(|_| ())
     }
 
+    /// 调用主题创建回调并标记实例进入可清理生命周期。
+    ///
+    /// 初始化使用专属燃料预算。标记在调用前设置，因此即使创建回调失败，丢弃时仍会尝试
+    /// 有限预算的 `theme_destroy`（若主题提供该导出）。
     pub fn init(&mut self, mode: i32, dark: bool) -> Result<(), String> {
         self.initialized = true;
         self.transact(INIT_FUEL, true, |rt| {
@@ -1039,6 +1127,10 @@ impl WasmRuntime {
         })
     }
 
+    /// 用候选视图快照调用主题渲染事件。
+    ///
+    /// 新视图通过 `Arc` 保存在宿主状态；每次成功渲染默认恢复可见。渲染有较大的独立
+    /// fuel 预算，只有返回 `Present` 并通过事务验证后才发布绘制结果和命中区域。
     pub fn render(&mut self, view: &crate::theme_api::CandidateView) -> Result<(), String> {
         // 新快照不继承旧候选的按下状态，即使图层和区域ID被复用。
         self.store.data_mut().pressed_target = None;
@@ -1058,6 +1150,10 @@ impl WasmRuntime {
         })
     }
 
+    /// 依据当前已提交图层和命中区域分发指针事件。
+    ///
+    /// 按下目标带有图层代次标识；抬起时目标必须仍相同才会向 guest 传递命中，否则按未命中
+    /// 处理，避免视图刷新后复用的区域 ID 误触。动作只允许由按下/抬起事件产生。
     pub fn mouse(&mut self, kind: i32, x: f32, y: f32) -> Result<(), String> {
         let target = self
             .store
@@ -1121,6 +1217,7 @@ impl WasmRuntime {
         })
     }
 
+    /// 以调用方提供的单调时钟时间触发动画事件，并按普通事件预算执行。
     pub fn frame(&mut self, now_ms: f64) -> Result<(), String> {
         self.transact(EVENT_FUEL, false, |rt| {
             let code = rt
@@ -1135,6 +1232,8 @@ impl WasmRuntime {
         })
     }
 
+    /// 通知主题隐藏，然后无条件清除宿主视图、图层、已呈现命令和待处理交互请求。
+    /// 即使 guest 隐藏回调失败，宿主仍完成清理并返回该错误。
     pub fn hide(&mut self) -> Result<(), String> {
         self.store.data_mut().pressed_target = None;
         let result = self.transact(EVENT_FUEL, false, |rt| {
@@ -1159,6 +1258,7 @@ impl WasmRuntime {
         result
     }
 
+    /// 通知主题外观模式变化；展示改动仍受常规事件事务与预算约束。
     pub fn refresh(&mut self, dark: bool) -> Result<(), String> {
         self.transact(EVENT_FUEL, false, |rt| {
             let code = rt
@@ -1179,20 +1279,22 @@ impl WasmRuntime {
         })
     }
 
-    /// 取走当前帧的全部绘制命令。
+    /// 取走最近一次已提交的帧命令；没有新帧时返回 `None`，空绘制帧仍为 `Some(vec![])`。
     pub fn take_frame(&mut self) -> Option<Vec<DrawCommand>> {
         self.store.data_mut().pending_frame.take()
     }
 
     #[cfg(test)]
+    /// 测试辅助接口：取出当前帧命令；没有待取帧时返回空向量。
     pub fn take_commands(&mut self) -> Vec<DrawCommand> {
         self.take_frame().unwrap_or_default()
     }
 
-    /// Latest native panel presentation declared by the guest.
+    /// 返回最近一次成功提交的面板样式副本。
     pub fn panel_style(&self) -> PanelStyle {
         self.store.data().panel_style
     }
+    /// 返回最近一次成功提交的背景材质样式副本。
     pub fn backdrop_style(&self) -> crate::protocol::BackdropStyle {
         self.store.data().backdrop_style
     }
@@ -1202,11 +1304,13 @@ impl WasmRuntime {
         self.panel_style().corner_radius
     }
 
+    /// 返回主题声明的内容尺寸，单位为 DIP。
     pub fn size(&self) -> (f32, f32) {
         self.store.data().size
     }
 
-    /// 已提交帧的命中区域；后声明的区域优先。-1 未命中，0 默认面板。
+    /// 查询已提交画面的命中结果；后声明区域优先，`-1` 表示未命中，`0` 表示默认面板。
+    /// 动画图层使用当前原生时间采样，并按裁剪和交互标志过滤区域。
     pub fn hit_test(&self, x: f32, y: f32) -> i32 {
         let s = self.store.data();
         if let Some((_, _, region)) = s.layers.hit(x, y, std::time::Instant::now()) {
@@ -1246,6 +1350,7 @@ impl WasmRuntime {
         }
     }
 
+    /// 返回主题显式设置的锚点矩形；未设置时以整个内容区域作为锚点。
     pub fn anchor_rect(&self) -> crate::protocol::Rect {
         self.store
             .data()
@@ -1257,45 +1362,51 @@ impl WasmRuntime {
                 h: self.size().1,
             })
     }
+    /// 主题是否声明可常驻运行。
     pub fn resident(&self) -> bool {
         self.resident
     }
 
+    /// 当前已提交展示状态的可见标志。
     pub fn visible(&self) -> bool {
         self.store.data().visible
     }
 
+    /// 只读访问当前已提交的图层场景。
     pub fn layers(&self) -> &crate::layers::LayerScene {
         &self.store.data().layers
     }
+    /// 最近一次已提交帧是否更新了主画布；装饰图层帧可为假。
     pub fn main_updated(&self) -> bool {
         self.store.data().main_updated
     }
 
+    /// 返回当前已提交的窗口放置方式。
     pub fn placement(&self) -> PlacementStyle {
         self.store.data().placement
     }
 
+    /// 取走并清除待处理的拖动请求。
     pub fn take_drag_request(&mut self) -> bool {
         std::mem::take(&mut self.store.data_mut().drag_requested)
     }
 
-    /// 取走动画帧请求标志。
+    /// 取走并清除主题请求的动画唤醒信息。
     pub fn take_frame_request(&mut self) -> crate::animation::WakeRequest {
         std::mem::take(&mut self.store.data_mut().wake_request)
     }
 
-    /// 取走本帧请求的高层动作 `(action, index)`。
+    /// 取走并清除本次回调产生的高层动作 `(action, index)`。
     pub fn take_actions(&mut self) -> Vec<(i32, i32)> {
         std::mem::take(&mut self.store.data_mut().actions)
     }
 
-    /// 取走诊断 notes。
+    /// 取走并清除主题通知和宿主侧警告；普通日志走独立日志通道。
     pub fn take_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.store.data_mut().notes)
     }
 
-    /// 每回调的昂贵资源操作次数，独立于WASM指令配额。
+    /// 返回最近一次导出回调的资源测量调用数，与 WASM 指令燃料分别计量。
     pub fn measure_calls(&self) -> u32 {
         self.store.data().measure_calls
     }
@@ -1983,6 +2094,7 @@ mod tests {
     }
 }
 impl Drop for WasmRuntime {
+    /// 若主题已进入初始化生命周期，尽力调用一次有界的销毁导出。
     fn drop(&mut self) {
         // 清理也受fuel/host配额约束；trap不能阻止host回收实例资源。
         if self.initialized {

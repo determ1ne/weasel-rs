@@ -1,9 +1,11 @@
-//! 模块列表仅编辑配置，不读取新路径或执行 WASM。
+//! 展示并编辑主题配置中的 WASM 模块条目，包括模块选择及字段覆盖管理。
+//! 本模块只更新配置文档，不读取模块路径，也不执行 WASM。
 use crate::{SettingsWindow, State, WasmEntry, form};
 use serde_json::{Value, json};
 use slint::{Model, VecModel};
 use std::{collections::BTreeSet, rc::Rc};
 
+/// 构造模块条目在覆盖配置中的完整路径。
 fn path(id: &str) -> Vec<String> {
     vec![
         "themeSettings".into(),
@@ -12,6 +14,10 @@ fn path(id: &str) -> Vec<String> {
         id.into(),
     ]
 }
+/// 从有效配置构建模块列表，并同步到窗口模型。
+///
+/// 列表按标识排序，最多 32 项；字段类型不符或模块不是对象时返回错误。若新旧行标识
+/// 顺序一致，则原位更新模型以保留控件实例和输入焦点，否则替换模型。
 pub fn show(state: &State, ui: &SettingsWindow) -> Result<(), String> {
     let effective = state.document.effective();
     let wasm = &effective["themeSettings"]["wasm"];
@@ -71,6 +77,10 @@ pub fn show(state: &State, ui: &SettingsWindow) -> Result<(), String> {
     }
     Ok(())
 }
+/// 对模块配置执行新增、删除、选择、设置或重置操作。
+///
+/// 操作只修改文档覆盖值，不加载路径或执行 WASM。标识、字段名及输入内容均有限制；
+/// 选择和字段编辑要求模块已存在，非法操作或配置写入失败时返回错误。
 pub fn action(
     state: &mut State,
     kind: &str,

@@ -1,5 +1,7 @@
-//! Modern TSF input-mode button. Like Mozc, use GUID_LBI_INPUTMODE and
-//! notify the shell through ITfLangBarItemSink, not a separate tray icon.
+//! 实现 TSF 语言栏中的中/英输入模式按钮，并通过 `ITfLangBarItemSink` 通知外壳刷新。
+//!
+//! 按钮状态由原子字段发布；当前上下文仅以弱引用关联，避免语言栏延长上下文生命周期。
+//! COM 回调会经边界保护转换错误；调用外壳或显示模态菜单时不持有服务锁，以容许同步重入。
 use super::*;
 use crate::bindings::*;
 use crate::icons::taskbar_is_light;
@@ -8,10 +10,13 @@ use weasel_common::message::{ContextAction, ContextCommand};
 use windows_core::{ComObject, HRESULT};
 use windows_strings::{BSTR, HSTRING, PCWSTR, w};
 
+/// 本按钮唯一支持的 `ITfLangBarItemSink` 订阅标识。
 const SINK_COOKIE: u32 = 1;
 
-// Like Mozc's toggle button, keep left-click mode switching and create a
-// native right-click menu. Never hold service locks across the modal menu.
+/// 在鼠标位置显示原生命令菜单，并把选中项分发给对应功能。
+///
+/// 菜单句柄由局部守卫确保销毁。弹出菜单期间不持有服务锁，因为菜单循环会运行嵌套消息泵，
+/// 可能重入 TIP；没有焦点窗口时直接返回，菜单创建、填充或命令投递失败则返回系统错误。
 fn show_command_menu(point: &POINT) -> Result<()> {
     struct Menu(HMENU);
     impl Drop for Menu {
@@ -55,6 +60,10 @@ fn show_command_menu(point: &POINT) -> Result<()> {
     Ok(())
 }
 
+/// 校验并分发语言栏菜单命令。
+///
+/// 关于与诊断对话框在本进程处理；其余已知命令异步投递给现有 broker 窗口。broker 不存在时
+/// 安静返回，避免在 TSF 回调中启动进程或等待；未知命令以 `E_INVALIDARG` 拒绝。
 fn dispatch_menu_command(command: u32) -> Result<()> {
     if matches!(
         command,
@@ -88,11 +97,14 @@ fn dispatch_menu_command(command: u32) -> Result<()> {
 }
 
 pub(super) struct LanguageBar {
+    /// 在整个语言栏项目注册期间保持 TSF 管理器存活。
     manager: ITfLangBarItemMgr,
+    /// COM 按钮对象；管理器持有的接口引用可能使其晚于此包装器释放。
     button: ComObject<ModeButton>,
 }
 
 impl LanguageBar {
+    /// 创建按钮并向 TSF 注册；转换或注册失败时不返回半初始化对象。
     pub fn attach(thread: &ITfThreadMgr) -> Result<Self> {
         // Retain the manager for the complete registration lifetime (Mozc).
         let manager: ITfLangBarItemMgr = thread.cast()?;
@@ -114,6 +126,11 @@ impl LanguageBar {
         Ok(Self { manager, button })
     }
 
+    /// 发布焦点上下文的展示状态，并仅在状态变化时请求外壳刷新。
+    ///
+    /// `ascii == None` 表示当前连接纪元尚无可信输入模式，不等同于英文模式或连接失败。
+    /// 上下文只保存为弱引用。锁竞争会快速返回错误；调用 `OnUpdate` 前释放所有内部锁，
+    /// 因为 TSF 可在该调用内同步重入图标、文本和状态查询。
     pub fn update(
         &self,
         context: Option<&Arc<ContextState>>,
@@ -190,6 +207,7 @@ impl LanguageBar {
 }
 
 impl LanguageBar {
+    /// 将按钮切换为暂停展示态，同时清除可操作上下文。
     fn suspend(&self) -> Result<()> {
         self.update(None, None, true, true, false, false)
     }
@@ -197,6 +215,7 @@ impl LanguageBar {
 
 impl Drop for LanguageBar {
     fn drop(&mut self) {
+        // 停用时先撤销可用性和弱引用，再从 TSF 注销并释放事件接收器。
         self.button.available.store(false, Ordering::Release);
         if let Some(mut target) = boundary::try_teardown(&self.button.target) {
             target.take();
@@ -212,20 +231,32 @@ impl Drop for LanguageBar {
 
 #[implement(ITfLangBarItemButton, ITfSource)]
 struct ModeButton {
+    /// 当前焦点上下文的非拥有引用；过期或正在销毁时点击不执行操作。
     target: Mutex<Option<Weak<ContextState>>>,
+    /// TSF 外壳通知接收器；最多允许一份订阅。
     sink: Mutex<Option<ITfLangBarItemSink>>,
+    /// 最近一次已知的 ASCII 模式值；仅在 `mode_known` 为真时有意义。
     ascii: AtomicBool,
+    /// 是否已从当前连接纪元取得可靠输入模式。
     mode_known: AtomicBool,
+    /// 与 Rime 的连接是否可用，影响错误提示及图标。
     connected: AtomicBool,
+    /// 当前是否有可接收切换命令的上下文。
     available: AtomicBool,
+    /// 服务暂停状态；暂停时保留语言栏可见性以供诊断入口使用。
     suspended: AtomicBool,
+    /// 当前焦点是否位于安全输入字段。
     secure_field: AtomicBool,
+    /// 用户是否允许 Rime 处理安全输入字段；用于明确提示风险。
     allow_rime_in_secure_fields: AtomicBool,
+    /// 最近读取的任务栏背景主题，用于选择对比度合适的资源图标。
     light_background: AtomicBool,
+    /// 保证 COM 对象存活期间 TIP DLL 不会被卸载。
     _module: ModuleLease,
 }
 
 impl ModeButton {
+    /// 按暂停、安全字段、未知模式和已知模式的优先级生成紧凑按钮文字。
     fn text(&self) -> &'static str {
         if self.suspended.load(Ordering::Acquire) {
             "!"
@@ -242,6 +273,7 @@ impl ModeButton {
 }
 
 impl ITfLangBarItem_Impl for ModeButton_Impl {
+    /// 向 TSF 提供稳定的服务 CLSID、标准输入模式 GUID 和按钮样式。
     fn GetInfo(&self, info: *mut TF_LANGBARITEMINFO) -> Result<()> {
         boundary::guard(None, || {
             if info.is_null() {
@@ -262,6 +294,7 @@ impl ITfLangBarItem_Impl for ModeButton_Impl {
         })
     }
 
+    /// 只有存在可用上下文或服务处于暂停展示态时才启用项目。
     fn GetStatus(&self) -> Result<u32> {
         boundary::guard(None, || {
             Ok(
@@ -275,10 +308,12 @@ impl ITfLangBarItem_Impl for ModeButton_Impl {
         })
     }
 
+    /// 本项目不接受 TSF 的显隐切换请求。
     fn Show(&self, _show: BOOL) -> Result<()> {
         boundary::guard(None, || Err(Error::from_hresult(E_NOTIMPL)))
     }
 
+    /// 根据连接、输入模式和安全字段策略生成面向用户的状态提示。
     fn GetTooltipString(&self) -> Result<BSTR> {
         boundary::guard(None, || {
             Ok(BSTR::from(if self.suspended.load(Ordering::Acquire) {
@@ -303,6 +338,10 @@ impl ITfLangBarItem_Impl for ModeButton_Impl {
 }
 
 impl ITfLangBarItemButton_Impl for ModeButton_Impl {
+    /// 右键打开命令菜单；左键仅对存活的普通焦点上下文异步发出模式切换。
+    ///
+    /// 该方法处于 TSF/COM 调用边界，绝不等待 RPC 响应；锁采用 `try_lock`，锁冲突以
+    /// HRESULT 错误返回。安全字段、暂停态、失效上下文均禁止切换。
     fn OnClick(&self, click: TfLBIClick, point: &POINT, _area: *const RECT) -> Result<()> {
         boundary::guard(None, || {
             if click == TF_LBI_CLK_RIGHT {
@@ -343,15 +382,22 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
             Ok(())
         })
     }
+    /// 菜单内容由原生命令菜单实现提供，此接口入口保持为空操作。
     fn InitMenu(&self, _menu: Ref<'_, ITfMenu>) -> Result<()> {
         boundary::guard(None, || Ok(()))
     }
+    /// 将 TSF 菜单选择交给统一的命令校验和分发逻辑。
     fn OnMenuSelect(&self, id: u32) -> Result<()> {
         boundary::guard(None, || dispatch_menu_command(id))
     }
+    /// 返回原子状态对应的单字按钮标签。
     fn GetText(&self) -> Result<BSTR> {
         boundary::guard(None, || Ok(BSTR::from(self.text())))
     }
+    /// 按当前系统主题和输入状态载入 TIP DLL 内的图标资源。
+    ///
+    /// 每次外壳查询时重新采样主题；返回的图标不是共享句柄，所有权按 TSF 图标接口约定
+    /// 交给调用方释放。
     fn GetIcon(&self) -> Result<HICON> {
         boundary::guard(None, || {
             // Re-read the system theme when the shell requests an icon.
@@ -371,6 +417,7 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
 }
 
 impl ITfSource_Impl for ModeButton_Impl {
+    /// 仅接受一个 `ITfLangBarItemSink` 订阅，并返回固定 cookie。
     fn AdviseSink(&self, iid: *const GUID, unknown: Ref<'_, IUnknown>) -> Result<u32> {
         boundary::guard(None, || {
             if iid.is_null() {
@@ -391,6 +438,7 @@ impl ITfSource_Impl for ModeButton_Impl {
             Ok(SINK_COOKIE)
         })
     }
+    /// 校验订阅 cookie 后移除接收器；无对应订阅时返回 TSF 连接错误。
     fn UnadviseSink(&self, cookie: u32) -> Result<()> {
         boundary::guard(None, || {
             if cookie != SINK_COOKIE {
@@ -410,6 +458,7 @@ impl ITfSource_Impl for ModeButton_Impl {
     }
 }
 
+/// 根据连接状态、模式和任务栏底色选择资源名；后缀表示字形颜色。
 fn icon_name(connected: bool, ascii: bool, light_background: bool) -> PCWSTR {
     // Asset suffixes describe glyph color, not the target Windows theme.
     if !connected {
@@ -427,6 +476,7 @@ fn icon_name(connected: bool, ascii: bool, light_background: bool) -> PCWSTR {
     }
 }
 
+/// 在普通图标规则上优先处理安全字段，并区分尚未同步的输入模式。
 fn mode_icon_name(
     connected: bool,
     ascii: bool,
@@ -450,6 +500,10 @@ fn mode_icon_name(
     }
 }
 
+/// 从当前 TIP DLL 载入图标，并返回由 TSF 调用方负责销毁的独立句柄。
+///
+/// 调用点持有 `ModuleLease`，因此按函数地址查询模块句柄期间 DLL 保持映射；不使用
+/// `LR_SHARED`，避免共享资源句柄与 TSF 的销毁责任冲突。
 fn load_mode_icon(
     connected: bool,
     ascii: bool,
@@ -691,6 +745,9 @@ mod tests {
 }
 
 impl TextService {
+    /// 同步语言栏展示状态；展示或刷新失败只记日志，不影响宿主文本输入。
+    ///
+    /// 输入模式仅采用与当前 RPC 连接纪元一致且非零的缓存值，防止重连前的旧状态闪现。
     pub(super) fn refresh_language_bar(&self) -> Result<()> {
         let bar = self.lock(&self.language_bar)?.clone();
         let Some(bar) = bar else {

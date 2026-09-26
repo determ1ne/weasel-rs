@@ -1,3 +1,8 @@
+//! 运行渲染器 RPC 服务，并在连接、UI 线程与配置代理之间路由消息。
+//!
+//! 每个客户端拥有独立的事件队列和所有者编号；快照通过 UI 命令通道交给界面，
+//! UI 事件只返回给仍拥有当前呈现状态的连接。传输层负责有界读写，服务退出时
+//! 会终止连接任务并关闭 UI。
 use crate::{
     state::Owner,
     theme_api::UiMode,
@@ -16,6 +21,15 @@ use weasel_common::{
     rpc::{RpcClient, RpcServer, default_renderer_pipe_name, try_default_broker_pipe_name},
 };
 
+/// 判断 broker 返回的主题名称是否受当前 renderer 支持。
+fn supports_theme(name: &str) -> bool {
+    ["eleven", "ten", "abc", "void", "wasm"].contains(&name)
+}
+
+/// 启动渲染器运行时、读取主题配置并运行 UI 与 RPC 服务。
+///
+/// 配置代理不可用或读取失败时记录诊断并采用内嵌配置；运行时或 UI 初始化失败
+/// 则返回错误。
 pub fn run() -> Result<(), String> {
     let runtime = Builder::new_current_thread()
         .enable_io()
@@ -30,7 +44,11 @@ pub fn run() -> Result<(), String> {
                 .expect("embedded settings must be valid JSON"),
         )
     });
-    let theme = settings.required::<String>(".theme")?;
+    let theme = settings.required::<String>(".theme").map_err(|error| {
+        let error = format!("invalid renderer theme setting: {error}");
+        crate::notifications::invalid_configuration(&error);
+        error
+    })?;
     let ui = UiHandle::start(&theme, UiMode::Live, &settings)?;
     runtime.block_on(run_rpc(
         RpcServer::with_role(default_renderer_pipe_name(), PeerRole::Renderer),
@@ -38,9 +56,13 @@ pub fn run() -> Result<(), String> {
     ))
 }
 
-/// Read the broker's theme and its settings. `refresh` asks the broker to re-read
-/// the on-disk configuration for this one call, so a preview reflects a setup the
-/// user edited after the broker started.
+/// 读取 broker 提供的主题和配置。
+///
+/// `refresh` 会要求 broker 在本次查询中重新读取磁盘配置，使预览能够反映 broker
+/// 启动后用户所做的修改。
+///
+/// 查询和连接均受两秒超时约束；响应必须包含有效配置根，并且主题须受当前后端
+/// 支持。此函数不在渲染器进程内直接重读配置文件。
 pub(crate) async fn load_theme(
     refresh: bool,
 ) -> Result<weasel_common::settings::ConfigSnapshot, String> {
@@ -66,12 +88,23 @@ pub(crate) async fn load_theme(
     })
     .await
     .map_err(|_| "configuration query timed out".to_owned())??;
-    if !crate::backend::supports_theme(&settings.required::<String>(".theme")?) {
-        return Err("broker returned an unsupported renderer theme".into());
+    let theme = settings.required::<String>(".theme").map_err(|error| {
+        let error = format!("broker returned an invalid renderer theme: {error}");
+        crate::notifications::invalid_configuration(&error);
+        error
+    })?;
+    if !supports_theme(&theme) {
+        let error = format!("broker returned unsupported renderer theme {theme:?}");
+        crate::notifications::invalid_configuration(&error);
+        return Err(error);
     }
     Ok(settings)
 }
 
+/// 协调 RPC 连接、UI 事件转发、父进程退出和有序关闭。
+///
+/// 最多同时接纳 64 条客户端连接。每条连接结束时由守卫向 UI 投递断开命令；服务
+/// 退出时先取消并回收连接任务，再关闭 UI，并将服务错误与关闭错误合并返回。
 async fn run_rpc(server: RpcServer, mut ui: UiHandle) -> Result<(), String> {
     let commands = ui.command_sender();
     let preedit = ui.capabilities.preedit;
@@ -137,16 +170,24 @@ async fn run_rpc(server: RpcServer, mut ui: UiHandle) -> Result<(), String> {
     result.and(close)
 }
 
+/// 连接任务的生命周期守卫，确保连接结束时通知 UI 清理该所有者。
 struct ConnectionOwner {
     owner: Owner,
     commands: UiCommandSender,
 }
+
+/// 连接所有者离开作用域时请求 UI 处理断开状态；发送失败不阻碍任务退出。
 impl Drop for ConnectionOwner {
     fn drop(&mut self) {
         let _ = self.commands.send(UiCommand::Disconnect(self.owner));
     }
 }
 
+/// 持续处理一个客户端的请求，并在同一连接上发送发往客户端的 UI 事件。
+///
+/// 事件写入使用传输层的有界队列，不等待写入确认，以免阻塞快照和断开请求的
+/// 接收。只有仍是当前所有者的连接会收到 UI 事件；关闭请求最多等待两秒发送
+/// 确认，其他传输或 UI 命令错误会结束该连接并向调用方报告。
 async fn serve_connection(
     connection: weasel_common::rpc::RpcConnection,
     owner: Owner,

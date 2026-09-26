@@ -1,17 +1,24 @@
-//! Shared snapshot visibility and screen-space placement, independent of toolkit.
+//! 提供与具体绘制工具包无关的快照显隐判断和屏幕坐标定位。
+//!
+//! 锚点与窗口尺寸使用物理像素；固定位置的配置偏移则以 DIP 表示，并按调用方提供的
+//! DPI 换算。定位优先使用锚点所在显示器的工作区，无法查询显示器信息时采用明确的回退值。
 use crate::bindings::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, RECT,
 };
 use crate::theme_api::{Anchor as RenderRect, CandidateView};
 
+/// 判断完整快照是否包含可展示内容及有效定位锚点。
+///
+/// 快照必须要求可见，并且至少包含候选或预编辑文本；锚点缺失或无效时结果为 `false`。
 pub fn is_visible(snapshot: &CandidateView) -> bool {
     snapshot.visible
         && (!snapshot.items.is_empty() || snapshot.preedit.is_some())
         && snapshot.anchor.as_ref().is_some_and(|anchor| anchor.valid)
 }
 
-/// Center a `width`x`height` (device pixels) window on the primary monitor's
-/// work area. Used only by the standalone preview, which has no caret anchor.
+/// 将独立预览窗口居中放在主显示器工作区内；预览没有插入点锚点可供定位。
+///
+/// `width`、`height` 和返回坐标均为物理像素；无法取得显示器信息时返回屏幕原点。
 pub fn preview_position(width: i32, height: i32) -> (i32, i32) {
     unsafe {
         // A 1x1 rect at the virtual-screen origin resolves to the monitor that
@@ -37,9 +44,10 @@ pub fn preview_position(width: i32, height: i32) -> (i32, i32) {
     }
 }
 
-/// Place a resident window at a stable DIP offset from the primary monitor's
-/// work-area origin. The result is clamped so configuration cannot strand the
-/// complete window outside the usable desktop.
+/// 将驻留窗口放在主显示器工作区原点的 DIP 偏移处，并限制在工作区内。
+///
+/// `width`、`height` 和返回坐标均为物理像素；`x`、`y` 是 DIP 偏移。换算时 DPI 至少按
+/// 1 处理。无法取得显示器信息时，返回未缩放、四舍五入后的偏移。
 pub fn fixed_position(x: f32, y: f32, width: i32, height: i32, dpi: u32) -> (i32, i32) {
     unsafe {
         let origin = RECT {
@@ -63,12 +71,17 @@ pub fn fixed_position(x: f32, y: f32, width: i32, height: i32, dpi: u32) -> (i32
     }
 }
 
+/// 将固定窗口坐标夹限在工作区内；窗口大于工作区时对齐工作区左上边界。
 fn clamp_fixed(x: i32, y: i32, width: i32, height: i32, work: &RECT) -> (i32, i32) {
     let max_x = work.right.saturating_sub(width).max(work.left);
     let max_y = work.bottom.saturating_sub(height).max(work.top);
     (x.clamp(work.left, max_x), y.clamp(work.top, max_y))
 }
 
+/// 根据锚点所在显示器的工作区放置弹出窗口，优先显示在锚点下方。
+///
+/// 尺寸及锚点边界均为物理像素。下方空间不足时尝试放在锚点上方，水平方向必要时
+/// 向左收进工作区；显示器信息不可用时退回锚点左下方。
 pub fn popup_position(anchor: &RenderRect, width: i32, height: i32) -> (i32, i32) {
     unsafe {
         let rect = RECT {
@@ -89,7 +102,9 @@ pub fn popup_position(anchor: &RenderRect, width: i32, height: i32) -> (i32, i32
     }
 }
 
-/// Device-pixel work area for multi-window themes.
+/// 返回锚点所在显示器的物理像素工作区，供多窗口主题共同约束窗口位置。
+///
+/// 显示器查询失败时返回 `None`；返回矩形标记为有效。
 pub fn work_area(anchor: &RenderRect) -> Option<RenderRect> {
     unsafe {
         let rect = RECT {
@@ -116,6 +131,7 @@ pub fn work_area(anchor: &RenderRect) -> Option<RenderRect> {
     }
 }
 
+/// 在工作区内计算弹出窗口位置；边界运算采用饱和加减以避免整数溢出。
 fn within_work_area(anchor: &RenderRect, width: i32, height: i32, work: &RECT) -> (i32, i32) {
     let y = if anchor.bottom.saturating_add(height) > work.bottom {
         anchor.top.saturating_sub(height)

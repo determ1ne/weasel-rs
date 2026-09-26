@@ -1,8 +1,7 @@
-//! COM and TSF registration for the text service.
+//! 为文本服务登记或撤销 COM 服务器、TSF 语言配置文件及类别。
 //!
-//! This follows the registration order used by Weasel: register the COM
-//! server, register language profiles, and then associate the TIP with its
-//! TSF categories.
+//! 注册按 COM 服务器、语言配置文件、TSF 类别的顺序执行；中途失败时按相反方向回滚已完成
+//! 的步骤。此模块只负责注册表和 TSF 管理器交互，不参与运行期输入处理。
 
 use crate::{CLSID_WEASEL_TIP, bindings};
 use bindings::{
@@ -54,6 +53,7 @@ const CATEGORIES: [&GUID; 16] = [
     &GUID_TFCAT_DISPLAYATTRIBUTEPROPERTY,
 ];
 
+/// 将 GUID 转换为 Windows 注册表惯用的大写、带花括号字符串形式。
 fn guid_string(guid: &GUID) -> String {
     format!(
         "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
@@ -71,10 +71,15 @@ fn guid_string(guid: &GUID) -> String {
     )
 }
 
+/// 生成本 TIP 的 COM 类注册表子键名。
 fn clsid_key() -> String {
     format!("{CLSID_KEY_PREFIX}{}", guid_string(&CLSID_WEASEL_TIP))
 }
 
+/// 获取当前 DLL 的完整路径，供 COM InprocServer32 和 TSF 图标注册使用。
+///
+/// 以导出函数地址定位模块，逐步扩展 UTF-16 缓冲区；达到 32 Ki 单元上限或 Win32 调用失败
+/// 时返回系统错误，调用方据此中止注册。
 pub(crate) fn module_path() -> Result<HSTRING> {
     let mut module = HMODULE::default();
     let address = PCWSTR(crate::DllRegisterServer as *const () as *const u16);
@@ -111,6 +116,7 @@ pub(crate) fn module_path() -> Result<HSTRING> {
     }
 }
 
+/// 写入 COM 类和进程内服务器信息；线程模型明确登记为 Apartment。
 fn register_server() -> Result<()> {
     let root = CLASSES_ROOT.create(clsid_key())?;
     root.set_string("", DESCRIPTION)?;
@@ -120,6 +126,10 @@ fn register_server() -> Result<()> {
     Ok(())
 }
 
+/// 向 TSF 注册五种中文语言配置文件。
+///
+/// 默认仅启用简体中文；`TEXTSERVICE_PROFILE` 可按配置名选择启用项。首个 TSF 错误即停止，
+/// 并由上层 `register` 撤销此前写入的 COM 服务器项。
 fn register_profiles() -> Result<()> {
     let manager: ITfInputProcessorProfileMgr = unsafe {
         bindings::CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?
@@ -163,6 +173,7 @@ fn register_profiles() -> Result<()> {
     Ok(())
 }
 
+/// 尽力撤销所有语言配置文件；管理器不可用或单项失败时继续清理。
 fn unregister_profiles() {
     let Ok(manager) = (unsafe {
         bindings::CoCreateInstance::<_, ITfInputProcessorProfileMgr>(
@@ -185,6 +196,9 @@ fn unregister_profiles() {
     }
 }
 
+/// 将本 TIP 登记到所声明的 TSF 能力及属性类别。
+///
+/// 首个失败 HRESULT 转为 `Error` 返回；上层负责撤销此前注册的配置文件和 COM 类。
 fn register_categories() -> Result<()> {
     let manager: ITfCategoryMgr =
         unsafe { bindings::CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)? };
@@ -198,6 +212,7 @@ fn register_categories() -> Result<()> {
     Ok(())
 }
 
+/// 尽力撤销所有 TIP 类别，容忍管理器创建或单项撤销失败。
 fn unregister_categories() {
     let Ok(manager) = (unsafe {
         bindings::CoCreateInstance::<_, ITfCategoryMgr>(
@@ -215,10 +230,12 @@ fn unregister_categories() {
     }
 }
 
+/// 删除本 TIP 的 COM 类注册树。
 fn unregister_server() {
     let _ = CLASSES_ROOT.remove_tree(clsid_key());
 }
 
+/// 按依赖顺序完成 COM 与 TSF 注册，并在任一步失败时回滚已完成步骤。
 pub(crate) fn register() -> Result<()> {
     register_server()?;
     if let Err(error) = register_profiles() {
@@ -233,6 +250,7 @@ pub(crate) fn register() -> Result<()> {
     Ok(())
 }
 
+/// 按类别、配置文件、COM 服务器的逆序尽力撤销注册。
 pub(crate) fn unregister() {
     unregister_categories();
     unregister_profiles();

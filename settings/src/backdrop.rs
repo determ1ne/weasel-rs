@@ -4,9 +4,14 @@ use crate::{SettingsWindow, bindings::*};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::{ComponentHandle, winit_030::WinitWindowAccessor};
 
+/// 当前系统是否支持主窗口系统材质所需的 Windows 版本。
 pub fn supported() -> bool {
     windows_version::OsVersion::current() >= windows_version::OsVersion::new(10, 0, 0, 22621)
 }
+/// 在 Slint 事件循环中等待原生窗口句柄并异步应用 Mica 材质。
+///
+/// 任务仅持有弱窗口句柄；窗口销毁或调度、窗口句柄、DWM 初始化失败时关闭
+/// Slint 的材质标志并记录错误，不阻塞调用线程。
 pub fn apply(ui: &SettingsWindow) {
     if !supported() {
         return;
@@ -33,6 +38,10 @@ pub fn apply(ui: &SettingsWindow) {
     }
 }
 
+/// 将 DWM 扩展帧和系统背景材质应用到 Win32 窗口，再安装自定义框架处理。
+///
+/// 非 Win32 句柄或 DWM 调用失败会返回错误；自定义框架安装失败只记录日志，材质
+/// 配置仍视为成功，因为它不影响已完成的 DWM 设置。
 fn configure(window: &slint::winit_030::winit::window::Window) -> Result<(), String> {
     let handle = window.window_handle().map_err(|e| e.to_string())?;
     let RawWindowHandle::Win32(handle) = handle.as_raw() else {

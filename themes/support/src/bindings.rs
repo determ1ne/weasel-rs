@@ -1,3 +1,4 @@
+//! 由构建脚本生成的 Windows/XAML 绑定及主题支持层使用的类型重导出。
 #![allow(dead_code)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]

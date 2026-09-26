@@ -1,6 +1,8 @@
+//! 在 TSF 编辑会话许可范围内操作文本范围和选区。
 use super::*;
 
 impl TextService {
+    /// 按原样恢复宿主选区及其样式；调用者须处于有效编辑会话内。
     pub(super) fn restore_selection(
         &self,
         context: &ITfContext,
@@ -20,6 +22,9 @@ impl TextService {
         result.ok()
     }
 
+    /// 将 UTF-8 字符串编码为 UTF-16 后替换指定 TSF 范围的文本。
+    ///
+    /// `ec` 必须是授予当前会话的编辑 cookie；空文本按 TSF 约定传空指针。
     pub(super) fn set_range_text(
         &self,
         range: &ITfRange,
@@ -42,6 +47,9 @@ impl TextService {
         }
     }
 
+    /// 将折叠到范围起点后的光标移动指定 UTF-16 单位数并设置插入选区。
+    ///
+    /// 若 TSF 实际移动量不足请求值则失败，防止光标落到范围之外或代理项内部。
     pub(super) fn set_selection(
         &self,
         context: &ITfContext,
@@ -82,6 +90,7 @@ impl TextService {
         }
     }
 
+    /// 折叠范围至末尾；仅能在对应的 TSF 编辑会话中调用。
     pub(super) fn collapse_end(&self, range: &ITfRange, ec: TfEditCookie) -> Result<()> {
         let hr = unsafe { range.Collapse(ec, TF_ANCHOR_END) };
         if hr.is_ok() {

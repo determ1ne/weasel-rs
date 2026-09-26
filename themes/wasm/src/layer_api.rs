@@ -1,4 +1,7 @@
-//! 可事务回滚的装饰层 ABI；不暴露 HWND、COM 对象或鼠标命中变换。
+//! 注册供 WASM 主题使用的保留图层和动画宿主函数。
+//!
+//! 修改仅能发生在 `theme_event` 打开的帧事务内；宿主将这些改动纳入场景
+//! 快照，事务失败时可以回滚。ABI 不暴露 HWND、COM 对象或原生鼠标命中变换。
 use crate::{
     abi::{Easing, LayerProperty as Property, LayerStop},
     layers::{LayerMotion, LayerOperation, LayerProperty, LayerState, MAX_LAYERS},
@@ -7,6 +10,9 @@ use crate::{
 use std::time::{Duration, Instant};
 use wasmtime::{Caller, Linker};
 
+/// 验证当前回调处于可编辑的帧事务，并记录本帧改动过图层。
+///
+/// 事务外调用会失败；这里不自行开启事务，也不改变宿主的计费策略。
 fn editing(state: &mut HostState) -> wasmtime::Result<()> {
     state.charge(0)?;
     if !state.frame_open {
@@ -15,6 +21,7 @@ fn editing(state: &mut HostState) -> wasmtime::Result<()> {
     state.layers_edited = true;
     Ok(())
 }
+/// 将 ABI 整数映射为宿主属性；未知枚举值作为 WASM 调用错误返回。
 fn property(value: i32) -> wasmtime::Result<LayerProperty> {
     Ok(
         match Property::try_from(value)
@@ -28,6 +35,7 @@ fn property(value: i32) -> wasmtime::Result<LayerProperty> {
         },
     )
 }
+/// 按属性的 ABI 数值域校验值，并拒绝 NaN 与无穷值。
 fn checked_value(property: LayerProperty, value: f32) -> wasmtime::Result<()> {
     let valid = value.is_finite()
         && match property {
@@ -41,6 +49,11 @@ fn checked_value(property: LayerProperty, value: f32) -> wasmtime::Result<()> {
         Err(wasmtime::format_err!("invalid layer value"))
     }
 }
+/// 创建或替换图层某一属性的唯一运动记录。
+///
+/// 新命令递增修订号；同一事件内的连续动画沿用该事件的逻辑起点，其他
+/// 重定向则从宿主单调时钟采样近似当前位置。停止命令的目标由既有运动
+/// 推导，`to` 仅用于通过属性域校验。找不到图层、参数越界或修订号耗尽均失败。
 fn motion(
     state: &mut HostState,
     id: i32,
@@ -107,8 +120,14 @@ fn motion(
     }
     Ok(())
 }
+/// 将装饰层宿主函数注册到主题 ABI 对应的导入模块。
+///
+/// 回调通过 Wasmtime 的 `Caller` 访问当前实例独占的 [`HostState`]，不在
+/// 独立线程中保存状态。每个调用都会校验事务及参数；错误交由运行时作为
+/// 导入失败处理，由外层事件事务决定是否回滚。
 pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
     let module = crate::protocol::IMPORT_MODULE;
+    // 图层按 z-index、再按创建代次排序；此处只更新排序键。
     linker.func_wrap(
         module,
         "layer_z_index",
@@ -125,6 +144,7 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
             Ok(())
         },
     )?;
+    // 裁剪矩形固定在内容坐标系；关闭裁剪时矩形参数不参与验证或存储。
     linker.func_wrap(
         module,
         "layer_clip",
@@ -158,6 +178,7 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
             Ok(())
         },
     )?;
+    // 禁用交互会同步清除指向该图层的按下目标，避免后续释放事件落到旧目标。
     linker.func_wrap(
         module,
         "layer_interactive",
@@ -180,6 +201,8 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
             Ok(())
         },
     )?;
+    // 选择图层并开始替换其绘制内容；传入 0 仅退出图层上下文。
+    // 切换前必须平衡绘制状态栈，新图层受数量配额限制。
     linker.func_wrap(
         module,
         "layer_content",
@@ -233,6 +256,7 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
             Ok(())
         },
     )?;
+    // 删除未选中的正 ID 图层，并清理指向它的按下目标；未知 ID 按幂等删除处理。
     linker.func_wrap(
         module,
         "layer_remove",
@@ -249,6 +273,7 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
             Ok(())
         },
     )?;
+    // 即时设置属性；仍通过 motion 统一维护属性唯一性和修订顺序。
     linker.func_wrap(
         module,
         "layer_set",
@@ -264,6 +289,7 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
             )
         },
     )?;
+    // 用 ABI 指定的缓动曲线将属性过渡到目标值。
     linker.func_wrap(
         module,
         "layer_animate",
@@ -279,6 +305,7 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
             )
         },
     )?;
+    // 冻结当前呈现值，或结束到原动画目标；实际语义由 LayerStop 决定。
     linker.func_wrap(
         module,
         "layer_stop",

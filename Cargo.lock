@@ -6347,6 +6347,7 @@ version = "0.1.7"
 dependencies = [
  "bindgen",
  "embed-resource",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

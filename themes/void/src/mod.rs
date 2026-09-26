@@ -9,7 +9,10 @@ use crate::theme_api::{
 };
 use weasel_common::settings::ConfigSnapshot;
 
-/// Factory 是无窗口资源的注册对象，可以跨线程查询元数据。
+/// 无窗口资源的主题工厂，可由宿主跨线程查询元数据。
+///
+/// 工厂本身不保存 UI 或图形对象；这些线程亲和资源若由真实主题创建，应由后端在创建
+/// 线程持有并负责释放。
 pub struct Factory;
 
 impl ThemeFactory for Factory {
@@ -31,6 +34,10 @@ impl ThemeFactory for Factory {
         Ok(serde_json::json!({}))
     }
 
+    /// 校验合并后的主题配置，并创建无窗口后端。
+    ///
+    /// 配置快照仅在本次调用中借用。当前实现没有可失败的资源初始化步骤；读取配置失败
+    /// 时返回错误，由宿主决定是否尝试其他主题。
     fn create(&self, _mode: UiMode, settings: &ConfigSnapshot) -> crate::theme_api::ThemeCreation {
         // ThemeCreation carries notices even if backend initialization fails.
         // Themes return data only: renderer owns logging and user notification.
@@ -55,6 +62,7 @@ impl ThemeFactory for Factory {
 struct VoidBackend;
 
 impl ThemeBackend for VoidBackend {
+    /// 接收快照但不绘制界面，也不产生用户操作事件。
     fn render(&mut self, _view: &CandidateView, _events: &EventSink) -> Result<(), String> {
         // view 是完整显示快照：候选、选中项、翻页状态和可选 preedit。
         // anchor 使用物理屏幕像素（允许负坐标）；不要把它当成 DIP 再缩放。
@@ -69,17 +77,20 @@ impl ThemeBackend for VoidBackend {
         Ok(())
     }
 
+    /// 无界面资源需要隐藏或释放。
     fn hide(&mut self) {
         // 实际主题应隐藏所有主题窗口、取消鼠标捕获/按下状态，释放旧事件 sink。
         // 不要在这里取消 Rime composition 或修改宿主文本。
     }
 
+    /// 此后端没有外观缓存，无需刷新。
     fn refresh_appearance(&mut self) -> Result<(), String> {
         // 系统外观变化时清理颜色/字体等缓存；不要自行显示已隐藏的窗口。
         // runtime 决定当前快照是否仍有所有权、是否需要重新绘制。
         Ok(())
     }
 
+    /// 此后端不持有可失效资源，始终视为健康。
     fn check_health(&mut self) -> Result<(), String> {
         // 窗口回调不能向外 unwind；实际主题可记录回调错误并在此返回 Err。
         // 无额外健康状态的主题可省略本方法，使用 trait 默认实现。

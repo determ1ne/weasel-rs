@@ -1,3 +1,5 @@
+//! 读取 librime 版本化 API 表的安全前缀快照，并验证当前用途所需的入口。
+
 use super::{RimeLibraryApi, raw};
 use std::{
     mem::{offset_of, size_of},
@@ -5,8 +7,16 @@ use std::{
 };
 
 impl RimeLibraryApi {
-    /// `source` must point to the DLL's readable, immutable versioned API table.
-    /// RimeApi uses data_size as its ABI version; get_version is informational.
+    /// 按 `data_size` 安全读取 API 表前缀，并验证初始化或部署流程的必需入口。
+    ///
+    /// 部署模式只要求设置、最终化及部署入口；运行模式还要求会话、按键处理、
+    /// 组合操作和状态读取及其配对释放入口。候选选择和翻页入口允许旧引擎缺省。
+    /// `get_version` 不用于判定结构布局，ABI 边界以 `data_size` 为准。
+    ///
+    /// # Safety
+    /// `source` 必须指向 librime 提供的、可读且在调用期间不可变的 API 表。其头部
+    /// `data_size` 字段必须可读，且该字段声明的每个已读取字节都必须位于实际分配
+    /// 区域内。函数指针必须符合对应 C ABI。
     pub(super) unsafe fn load(source: *const raw::RimeApi, deploy: bool) -> Result<Self, String> {
         if source.is_null() {
             return Err("librime returned a null API table".into());

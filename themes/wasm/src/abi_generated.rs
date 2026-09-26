@@ -1,4 +1,5 @@
 // Generated from themes/wasm/abi.json. DO NOT EDIT.
+/// 由 `themes/wasm/abi.json` 生成的 ABI 导入签名表，供宿主校验主题模块。
 #[rustfmt::skip]
 pub const IMPORTS: &[(&str, &[&str], &[&str])] = &[
     ("push_transform", &["f32", "f32", "f32", "f32", "f32", "f32"], &[]),

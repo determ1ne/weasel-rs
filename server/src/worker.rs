@@ -1,4 +1,8 @@
-//! A bounded mailbox whose processor is constructed and destroyed on one OS thread.
+//! 提供有界消息邮箱与专属工作线程。
+//!
+//! 处理器在工作线程内创建、调用并销毁，因此处理器本身不必实现 `Send`；这用于确保
+//! 原生引擎状态及其会话始终由同一线程持有。邮箱满时发送方立即得到错误，停止请求
+//! 则通过原子标志和线程唤醒独立传递，不占用队列容量。
 use std::{
     sync::{
         Arc,
@@ -8,8 +12,11 @@ use std::{
     thread,
 };
 
+/// 可克隆的有界邮箱发送端，同时持有唤醒工作线程所需的句柄。
 pub(crate) struct Sender<T> {
+    /// 满载时不会阻塞调用方的同步队列。
     queue: mpsc::SyncSender<T>,
+    /// 与处理器同属的工作线程；发送及显式通知都通过它解除休眠。
     wake: thread::Thread,
 }
 impl<T> Clone for Sender<T> {
@@ -21,31 +28,57 @@ impl<T> Clone for Sender<T> {
     }
 }
 impl<T> Sender<T> {
+    /// 尝试投递一条消息，并唤醒工作线程。
+    ///
+    /// 队列满或接收端已关闭时返回原消息；此方法不会等待队列腾出空间。
     pub fn try_send(&self, message: T) -> Result<(), mpsc::TrySendError<T>> {
         let result = self.queue.try_send(message);
         self.wake.unpark();
         result
     }
+    /// 创建可跨线程调用的唤醒回调，不向邮箱写入消息。
+    ///
+    /// 可用于通知处理器有外部状态变化；回调只执行 `unpark`，不等待工作线程处理。
     pub fn notifier(&self) -> Arc<dyn Fn() + Send + Sync> {
         let thread = self.wake.clone();
         Arc::new(move || thread.unpark())
     }
 }
 
+/// 在工作线程中独占使用的消息处理器。
+///
+/// 实现类型无需 `Send`：它由 `Worker::spawn` 的构造闭包直接在工作线程创建，并在同一
+/// 线程依次接收 `process`、`idle` 调用及最终析构。
 pub(crate) trait Processor<T> {
+    /// 处理一条已从邮箱取出的消息。
     fn process(&mut self, message: T);
+    /// 每轮取消息或空闲轮询后执行维护工作；无额外需求时无需重载。
     fn idle(&mut self) {}
 }
 
+/// 管理一个有界邮箱及其专属处理线程。
+///
+/// 释放或显式关闭都会请求停止并等待线程退出。成功启动后，`ready` 表示处理器已经
+/// 创建且尚未进入关闭阶段；`finished` 在工作线程完成处理器析构后通知。
 pub(crate) struct Worker<T> {
+    /// 供其他线程投递消息的发送端。
     pub sender: Sender<T>,
+    /// 处理器可用状态，使用 Release/Acquire 配对发布和读取。
     pub ready: Arc<AtomicBool>,
+    /// 与队列容量无关的停止标志。
     stop: Arc<AtomicBool>,
+    /// 尚未连接的线程句柄；关闭或析构时只取出并等待一次。
     thread: Option<thread::JoinHandle<Result<(), String>>>,
+    /// 工作线程结束通知；若处理器已创建，会先在该线程析构处理器再发送通知。
     pub finished: tokio::sync::oneshot::Receiver<()>,
 }
 
 impl<T: Send + 'static> Worker<T> {
+    /// 创建有界邮箱并启动专属线程。
+    ///
+    /// 构造闭包和消息必须可发送到新线程，但处理器 `S` 不要求 `Send`。容量限制待处理
+    /// 消息数；处理器初始化失败会通过 `finished` 报告线程已结束，并由 `shutdown` 返回
+    /// 原始错误。线程创建失败则直接返回错误。
     pub fn spawn<S: Processor<T> + 'static>(
         capacity: usize,
         create: impl FnOnce() -> Result<S, String> + Send + 'static,
@@ -103,12 +136,18 @@ impl<T: Send + 'static> Worker<T> {
         })
     }
 
+    /// 请求停止并唤醒线程；不等待当前处理中的消息完成。
+    ///
+    /// 停止标志独立于有界邮箱，因此即使队列已满也能关闭；尚未处理的排队消息会被丢弃。
     pub fn request_stop(&self) {
         self.ready.store(false, Ordering::Release);
         self.stop.store(true, Ordering::Release);
         self.sender.wake.unpark();
     }
 
+    /// 请求停止并异步等待线程退出，返回处理器初始化或线程执行错误。
+    ///
+    /// 阻塞式线程连接被放到 Tokio 的阻塞任务池中，避免占用当前异步执行线程。
     pub async fn shutdown(mut self) -> Result<(), String> {
         self.request_stop();
         let thread = self.thread.take().expect("worker joined once");
@@ -123,6 +162,7 @@ impl<T: Send + 'static> Worker<T> {
 }
 
 impl<T> Drop for Worker<T> {
+    /// 在同步析构路径上请求停止并连接线程；处理器正在执行时析构可能等待其返回。
     fn drop(&mut self) {
         self.ready.store(false, Ordering::Release);
         self.stop.store(true, Ordering::Release);

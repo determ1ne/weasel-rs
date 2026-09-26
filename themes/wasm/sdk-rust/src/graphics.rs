@@ -1,4 +1,8 @@
-//! 有界简便绘图缓存。需要自行处理配额失败时直接使用返回Result的资源API。
+//! 为常见文本绘制提供有界缓存，并转发到资源和绘制 API。
+//!
+//! 缓存按 WASM 线程隔离；字体数达到上限时会清理布局和字体，布局达到上限时会清理
+//! 布局。缓存创建资源失败会 panic，因此需要自行处理宿主配额错误或控制缓存策略的主题，
+//! 应直接使用 [`crate::resources`] 的 `Result` API。
 use crate::{Font, TextLayout};
 use std::{cell::RefCell, collections::HashMap};
 #[derive(Default)]
@@ -43,6 +47,9 @@ fn with_layout<T>(text: &str, font: i32, size: f32, operation: impl FnOnce(&Text
         operation(&cache.layouts[&text_key])
     })
 }
+/// 将字体槽位 `0..=3` 映射到字体族名称，并清空派生的字体与文本布局缓存。
+///
+/// 槽位 4 固定表示粗体，不可通过此函数配置；常在创建阶段设置，避免动画事件反复失效缓存。
 pub fn set_font(slot: i32, family: &str) {
     assert!((0..=3).contains(&slot));
     CACHE.with(|c| {
@@ -52,15 +59,19 @@ pub fn set_font(slot: i32, family: &str) {
         c.families.insert(slot, family.into());
     });
 }
+/// 测量单行/不换行文本的布局宽度，单位为 DIP；相同文本和参数会复用缓存。
 pub fn measure(text: &str, font: i32, size: f32) -> f32 {
     with_layout(text, font, size, TextLayout::width)
 }
+/// 返回用于测量的拉丁字母与中日韩字符样本 `M中` 的布局高度，单位为 DIP。
 pub fn line_height(font: i32, size: f32) -> f32 {
     with_layout("M中", font, size, TextLayout::height)
 }
+/// 使用缓存布局绘制文本，不添加外发光。
 pub fn draw(text: &str, x: f32, y: f32, font: i32, size: f32, color: u32) {
     draw_glow(text, x, y, font, size, color, 0.0, 0);
 }
+/// 使用缓存布局绘制文本及外发光；颜色采用非预乘 `0xAARRGGBB`。
 pub fn draw_glow(
     text: &str,
     x: f32,

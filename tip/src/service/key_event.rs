@@ -1,9 +1,13 @@
+//! 接收 TSF 按键回调，协调测试/实际按键配对并把可处理事件转发给引擎。
 use super::*;
 use crate::keyboard;
 use weasel_common::message::ContextToken;
 
+/// 缓存已在 `OnTestKey*` 中消费的按键，避免随后 `OnKey*` 重复处理。
 pub(super) struct TestedKey {
+    /// 上下文、连接和代次标识；任一变化都会使缓存失效。
     token: ContextToken,
+    /// `true` 表示按键释放方向，`false` 表示按下方向。
     key_up: bool,
 }
 
@@ -109,10 +113,10 @@ mod tests {
 }
 
 impl TestedKey {
-    // Weasel pairs callbacks by direction, not Windows message identity.
-    // Opposite-direction callbacks clear pending state; repeated Test callbacks
-    // keep it, while the actual Key callback consumes it. One Option therefore
-    // represents the two mutually exclusive down/up pending flags.
+    /// 判断当前 TSF 回调是否对应已处理的测试回调。
+    ///
+    /// 配对应依据方向和上下文令牌，而非 Windows 消息时间或重复计数。
+    /// 重复测试回调保留缓存，实际按键回调消费缓存；方向或令牌不符时丢弃旧值。
     fn reuse(pending: &mut Option<Self>, token: &ContextToken, key_up: bool, test: bool) -> bool {
         let Some(previous) = pending.take() else {
             return false;
@@ -126,12 +130,18 @@ impl TestedKey {
         true
     }
 
+    /// 仅为已消费的测试回调建立缓存；实际回调、未消费事件和失效连接不缓存。
     fn processed(token: ContextToken, key_up: bool, test: bool, eaten: bool) -> Option<Self> {
         (test && eaten && token.connection_epoch != 0).then_some(Self { token, key_up })
     }
 }
 
 impl TextService {
+    /// 处理 TSF 按键回调并返回是否由输入法消费。
+    ///
+    /// 该入口运行在宿主 COM/TSF 回调边界：不可等待重入锁；只读或安全输入上下文、
+    /// 无效服务状态及不可用引擎均应让宿主继续处理。响应在应用前须与上下文令牌匹配，
+    /// 并先排空同一有序 RPC 流上的更新，避免覆盖较早到达的渲染提交。
     pub(super) fn forward_key_event(
         &self,
         context: Ref<'_, ITfContext>,
@@ -224,6 +234,7 @@ impl TextService {
     }
 }
 
+/// 将 TSF 状态查询解释为可编辑性；查询失败时采取放行按键的保守策略。
 fn context_is_writable(status: Result<bindings::TF_STATUS>) -> bool {
     status
         .map(|status| status.dwDynamicFlags & bindings::TF_SD_READONLY == 0)

@@ -1,5 +1,8 @@
-//! WASM 主题入口：从配置定位 .wasm 文件，装配 canvas + runtime + window，
-//! 产出 ThemeBackend。加载/实例化失败时返回 `Err`，renderer 走既有回退路径。
+//! WASM 主题工厂：按配置定位并加载主题模块，创建画布、运行时与窗口后端。
+//!
+//! 模块加载、实例化、初始化或窗口健康检查失败都会返回错误，由 renderer
+//! 沿现有主题回退路径处理。显式文件路径只尝试指定位置；未指定时先查安装
+//! 目录，再查用户数据目录。
 
 use crate::backend::WasmBackend;
 use crate::runtime::{HostState, WasmRuntime};
@@ -10,9 +13,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use weasel_common::settings::ConfigSnapshot;
 
+/// 构造 WASM 主题后端的工厂。
 pub struct Factory;
 
-/// Default search is installation first, user data second; explicit paths do not fall back.
+/// 计算模块候选路径；默认依次查安装目录和用户数据目录，显式路径仅生成一个候选。
 fn module_paths(
     id: &str,
     explicit: Option<&str>,
@@ -28,6 +32,10 @@ fn module_paths(
     }
 }
 
+/// 按候选顺序读取首个可打开的模块，并返回其字节和同名资源目录。
+///
+/// 缺失文件会继续尝试后续候选，其他打开错误立即返回；读取最多接受 16 MiB，
+/// 超限或读取失败均返回描述性错误。该函数只读取文件，不实例化 WASM。
 fn load_theme(paths: &[PathBuf]) -> Result<(Vec<u8>, PathBuf), String> {
     use std::io::Read;
     let mut selected = None;

@@ -1,3 +1,4 @@
+//! 由构建脚本生成并重导出的 Direct2D、DirectWrite 等 Windows 图形绑定。
 #![allow(
     dead_code,
     non_camel_case_types,

@@ -1,4 +1,7 @@
-//! The engine publishes into a single latest-value slot, never into a network queue.
+//! 在引擎与渲染器之间传递最新渲染快照，并将渲染器事件送回引擎。
+//!
+//! 快照保存在容量为一的 watch 通道中，慢速或暂时离线的渲染器只会收到最新状态，
+//! 不会积压过时网络消息。渲染器能力协商结果通过发布器共享给引擎。
 use crate::engine::Work;
 use std::{
     sync::{
@@ -13,6 +16,9 @@ use weasel_common::{
     rpc::{RpcClient, RpcError, default_renderer_pipe_name},
 };
 
+/// 查询渲染器是否支持外置预编辑区。
+///
+/// 只接受配置响应中严格等于 JSON `true` 的值；其他响应类型视为 RPC 协议错误。
 async fn query_preedit_capability(client: &RpcClient) -> Result<bool, RpcError> {
     let response = client
         .request(Payload::QueryConfig(QueryConfig {
@@ -27,12 +33,20 @@ async fn query_preedit_capability(client: &RpcClient) -> Result<bool, RpcError> 
 }
 
 #[derive(Clone)]
+/// 在线程间共享的渲染状态发布端。
+///
+/// 克隆句柄共享能力标志、最新快照槽和单调序号；写入采用覆盖语义，不为慢接收方
+/// 保存历史快照。
 pub(crate) struct RendererPublisher {
+    /// 当前渲染器是否支持外置预编辑区，供引擎以 Acquire/Release 顺序读取。
     preedit: Arc<AtomicBool>,
+    /// 容量为一的最新快照槽；所有发布者克隆共享同一通道。
     snapshots: watch::Sender<Option<RenderSnapshot>>,
+    /// 为所有发布操作分配唯一递增序号，达到上限时拒绝继续发布。
     sequence: Arc<AtomicU64>,
 }
 impl RendererPublisher {
+    /// 创建发布器及其唯一订阅端；订阅端初始尚无快照。
     pub fn channel() -> (Self, watch::Receiver<Option<RenderSnapshot>>) {
         let (tx, rx) = watch::channel(None);
         (
@@ -44,6 +58,10 @@ impl RendererPublisher {
             rx,
         )
     }
+    /// 覆盖发布最新快照，并由发布器统一分配序号。
+    ///
+    /// 序号分配与 watch 槽更新在同一写锁内完成，以保证并发克隆发布后，槽中的快照
+    /// 不会出现序号倒退；`u64` 耗尽时触发 panic，避免序号回绕产生歧义。
     pub fn publish(&self, mut snapshot: RenderSnapshot) {
         // Allocate while holding the watch slot's write lock so concurrent clones
         // cannot publish an older sequence after a newer one. Never wrap to zero.
@@ -58,11 +76,16 @@ impl RendererPublisher {
             *latest = Some(snapshot);
         });
     }
+    /// 返回最近一次完成的渲染器能力协商结果。
     pub fn supports_preedit(&self) -> bool {
         self.preedit.load(Ordering::Acquire)
     }
 }
 
+/// 启动渲染器桥接任务。
+///
+/// `eager` 为真时连接与能力查询立即开始；否则仅在存在可见快照后连接。任务负责
+/// 重连、双向转发和更新能力标志；调用方可取消并等待返回的句柄以完成清理。
 pub(crate) fn spawn(
     mut snapshots: watch::Receiver<Option<RenderSnapshot>>,
     engine: crate::worker::Sender<Work>,
@@ -138,6 +161,10 @@ pub(crate) fn spawn(
     })
 }
 
+/// 根据一次引擎按键响应构造渲染快照。
+///
+/// 快照序号保留为零，由 [`RendererPublisher::publish`] 在真正发布时分配。候选项和
+/// 分页状态沿用引擎响应；候选窗只有在存在候选项或外置预编辑内容且锚点有效时可见。
 pub(crate) fn render_snapshot(
     session_id: u64,
     revision: u64,

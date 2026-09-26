@@ -1,18 +1,19 @@
-//! WASM 主题窗口：HWND 生命周期、DPI、锚点定位与消息分发。
+//! WASM 主题窗口的原生宿主层，负责 HWND 生命周期、DPI、定位与消息分发。
 //!
-//! 原生资源全部留在创建它的 UI 线程上：
-//! - HWND：类注册/创建/销毁、最顶层、live 模式不可激活
-//! - DPI：`GetDpiForWindow` + `WM_DPICHANGED`
-//! - 定位：锚点（物理像素）→ 工作区钳制 → `SetWindowPos`
-//! - 动画帧：`SetTimer`(16ms) → wasm `frame(now_ms)`；主题不再请求时自然停止
-//! - 设备丢失：`D2DERR_RECREATE_TARGET` → 有限重试（100ms，≤3 次，成功重置）
+//! HWND、Direct2D 画布和定时器均由创建窗口的 UI 线程管理；live 窗口保持置顶且
+//! 不激活，预览窗口允许激活并可关闭。窗口位置以屏幕物理像素计算，锚点坐标、
+//! 工作区边界和 DPI 缩放在定位时统一处理。
 //!
-//! 本模块不做布局：WASM 主题产出 [`crate::protocol::DrawCommand`] 命令流，
-//! 窗口只在 `WM_PAINT` 用 canvas.rs 回放命令，并把鼠标/动画事件转发给
-//! 运行时（`window.rs` + `canvas.rs` + `runtime.rs` 三层互不越界）。
+//! 动画定时器只在内容可见且主题请求后续帧时运行。设备目标丢失时按固定间隔有限
+//! 重试，绘制成功会清零失败计数；非设备丢失错误或超过预算的错误会转为窗口健康
+//! 错误，不再继续绘制。
 //!
-//! 借用语义：可能同步派发消息的原生调用（`SetWindowPos`）绝不持有
-//! `App` 的可变借用（与 ten 主题相同的重入约束）。
+//! 本模块不负责布局。WASM 主题通过 [`crate::protocol::DrawCommand`] 提交绘制命令；
+//! 本模块在绘制消息中委托画布回放，并将输入、外观和动画事件交给运行时处理。
+//!
+//! 重入约束：可能同步派发窗口消息的系统调用（例如 `SetWindowPos`）不得在持有
+//! `App` 可变借用时执行。窗口分配的地址在 HWND 存续期间保持稳定，回调通过该地址
+//! 访问状态；释放窗口前必须先移除回调指针并停止定时器。
 
 use crate::appearance::{self};
 use crate::d2d_bindings::*;
@@ -38,13 +39,19 @@ const RETRY_INTERVAL_MS: u32 = 100;
 /// notices 上限：防止主题刷日志导致无界增长（`take_notices` 会排空）。
 const MAX_NOTICES: usize = 64;
 
-/// 设备丢失重试状态（预算与 ten 主题一致：至多 3 次，成功重置）。
+/// Direct2D 设备目标恢复预算。
+///
+/// 一轮连续故障最多安排三次重试；任意一次绘制成功都会清零计数。`waiting` 为真时
+/// 暂停处理绘制，直到重试定时器到期或窗口隐藏。
 #[derive(Default)]
 struct Recovery {
+    /// 当前连续设备丢失的次数。
     failures: u8,
+    /// 是否正在等待重试定时器，等待期间跳过绘制。
     waiting: bool,
 }
 impl Recovery {
+    /// 记录绘制失败；仅设备丢失且预算未耗尽时返回 `true` 并进入等待态。
     fn failed(&mut self, device_lost: bool) -> bool {
         if !device_lost || self.failures >= 3 {
             return false;
@@ -53,6 +60,7 @@ impl Recovery {
         self.waiting = true;
         true
     }
+    /// 绘制成功后结束当前恢复轮次并恢复完整重试预算。
     fn succeeded(&mut self) {
         self.failures = 0;
         self.waiting = false;
@@ -61,18 +69,26 @@ impl Recovery {
 
 #[derive(Clone, Copy)]
 struct DragState {
+    /// 开始拖动时的屏幕光标坐标（物理像素）。
     cursor_x: i32,
+    /// 开始拖动时的屏幕光标纵坐标（物理像素）。
     cursor_y: i32,
+    /// 开始拖动时的窗口左上角屏幕坐标（物理像素）。
     window_x: i32,
+    /// 开始拖动时的窗口顶部屏幕坐标（物理像素）。
     window_y: i32,
 }
 
-/// DIP → 物理像素（96 基），最小 1px。
+/// 将 DIP 尺寸按当前 DPI 向上取整为物理像素，结果至少为 1。
+///
+/// DPI 为零时按 1 处理，避免产生零缩放；此函数用于尺寸而非坐标换算。
 fn pixels(dip: f32, dpi: u32) -> i32 {
     (dip * dpi.max(1) as f32 / 96.0).ceil().max(1.0) as i32
 }
 
-/// Keep a manually moved window reachable while allowing it to cross monitors.
+/// 将窗口左上角限制在最近显示器的工作区内，同时允许拖动跨越显示器。
+///
+/// 工作区查询失败时原样返回请求坐标；窗口大于工作区时，将其起点放在工作区左上边界。
 fn clamp_to_nearest_work_area(x: i32, y: i32, width: i32, height: i32) -> (i32, i32) {
     unsafe {
         let requested = RECT {
@@ -107,6 +123,8 @@ fn clamp_to_nearest_work_area(x: i32, y: i32, width: i32, height: i32) -> (i32, 
 }
 
 /// 动作 id → 高层 `UiAction`（越界 id 丢弃）。
+///
+/// 索引仅对条目动作有意义；条目是否存在、是否启用由调用方按当前快照再次校验。
 fn ui_action(action: i32, index: i32) -> Option<UiAction> {
     Some(match action {
         ACTION_ITEM => UiAction::ItemInvoked(index as u32),
@@ -120,12 +138,20 @@ fn ui_action(action: i32, index: i32) -> Option<UiAction> {
 
 /// 已展示内容：持有事件回调与最近一次快照（用于同内容快照的去重）。
 struct Content {
+    /// 与当前内容对应的宿主事件接收端；替换快照时同步更新。
     events: EventSink,
+    /// 最近一次已提交的候选快照，用于内容比较及动作合法性校验。
     last: CandidateView,
 }
 
+/// UI 线程上的主题运行状态与渲染快照。
+///
+/// 该结构仅通过 `Window::app` 的动态借用访问。调用可能重入窗口过程的原生 API 前，
+/// 必须释放其可变借用。
 struct App {
+    /// 与此窗口关联的 Direct2D 画布；引用计数用于共享其稳定所有权。
     canvas: Rc<RefCell<crate::canvas::Canvas>>,
+    /// WASM 实例及其事件/布局状态，随窗口内容生命周期推进。
     runtime: WasmRuntime,
     /// 最近一帧命令流（`WM_PAINT` 回放）。
     frame: Vec<DrawCommand>,
@@ -133,7 +159,9 @@ struct App {
     size: (f32, f32),
     /// 已应用到窗口的尺寸（DIP），用于去重 `SetWindowPos`。
     applied: (f32, f32),
+    /// 最近一次已提交快照中的锚点；无锚点或无效锚点时无法按锚定模式定位。
     anchor: Option<Anchor>,
+    /// 最近一次提交到主题的内容快照和事件回调；隐藏时清空。
     content: Option<Content>,
     /// 主题/宿主诊断（`take_notices` 排空）。
     notices: Vec<ThemeNotice>,
@@ -141,27 +169,49 @@ struct App {
 
 /// 稳定的分配对象比其 HWND 活得久：原生回调同步派发消息时，
 /// 绝不持有它或 `App` 的可变借用。
+///
+/// 所有字段服务于单一 UI 线程上的窗口过程，不实现跨线程共享。`create_window` 将
+/// 此对象的地址交给 HWND；窗口销毁时先摘除该指针，`Drop` 再释放 HWND 与计时器。
 pub struct Window {
+    /// 原生窗口句柄；尚未创建或已销毁时为空句柄。
     hwnd: Cell<HWND>,
+    /// 当前窗口 DPI，至少为 1；在 DPI 消息中更新。
     dpi: Cell<u32>,
+    /// 可重入借用的主题、画布和当前帧状态。
     app: RefCell<App>,
+    /// 首个不可恢复错误；写入后健康检查持续返回该错误。
     error: RefCell<Option<String>>,
+    /// Direct2D 设备丢失恢复计数与等待状态。
     recovery: RefCell<Recovery>,
+    /// 防止定位过程因同步重入而递归执行。
     positioning: Cell<bool>,
+    /// 当前鼠标拖动起点；无拖动时为空。
     drag: Cell<Option<DragState>>,
-    /// Physical screen position chosen by the user for this process lifetime.
+    /// 用户本次进程运行期间手动选择的物理屏幕位置，优先于主题布局位置。
     manual_position: Cell<Option<(i32, i32)>>,
+    /// 最近应用的面板样式，用于检测布局/定位相关变化。
     panel: Cell<crate::protocol::PanelStyle>,
+    /// 最近应用的背景样式，用于决定是否重绘。
     backdrop: Cell<crate::protocol::BackdropStyle>,
+    /// 最近应用的锚点矩形，用于检测定位输入变化。
     anchor_rect: Cell<crate::protocol::Rect>,
+    /// 最近应用的定位策略。
     placement: Cell<PlacementStyle>,
+    /// 是否为可激活、可关闭的预览窗口。
     preview: bool,
+    /// 最近同步到运行时的系统深浅色状态。
     dark: Cell<bool>,
+    /// 当前排定的动画帧截止时间；None 表示无待处理帧。
     wake_deadline: Cell<Option<f64>>,
+    /// 窗口是否已显示，用于首次显示前刷新画布。
     shown: Cell<bool>,
 }
 
 impl Window {
+    /// 初始化窗口状态；此时尚未创建 HWND。
+    ///
+    /// `canvas` 与 `runtime` 的实际操作必须留在窗口所属 UI 线程。`preview` 决定窗口
+    /// 激活策略及初始定位模式。
     pub(crate) fn new(
         canvas: Rc<RefCell<crate::canvas::Canvas>>,
         runtime: WasmRuntime,
@@ -196,6 +246,9 @@ impl Window {
         }
     }
 
+    /// 保存首个不可恢复错误并停止后续动画唤醒。
+    ///
+    /// 已有错误不会被后续错误覆盖，以便健康检查稳定报告最初故障。
     fn fail(&self, error: impl ToString) {
         self.cancel_wakeup();
         let mut slot = self.error.borrow_mut();
@@ -204,12 +257,14 @@ impl Window {
         }
     }
 
+    /// 请求 Windows 在后续绘制消息中重绘整个窗口。
     fn invalidate(&self) {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd.get()), None, false);
         }
     }
 
+    /// 仅当鼠标捕获当前属于本窗口时释放捕获。
     fn cancel(&self) {
         unsafe {
             if GetCapture() == self.hwnd.get() {
@@ -218,6 +273,9 @@ impl Window {
         }
     }
 
+    /// 若主题使用固定定位，则记录拖动基准并捕获鼠标；锚定布局不允许手动拖动。
+    ///
+    /// 系统坐标查询失败时返回原生错误；捕获调用本身失败不改变返回结果。
     fn begin_drag(&self) -> windows_core::Result<bool> {
         if !matches!(
             self.app.borrow().runtime.placement(),
@@ -242,6 +300,9 @@ impl Window {
         Ok(true)
     }
 
+    /// 根据光标相对拖动起点的位移移动窗口，并钳制到最近工作区。
+    ///
+    /// 返回 `false` 表示当前没有活动拖动；定位失败通过 `Result` 传回。
     fn move_drag(&self) -> windows_core::Result<bool> {
         let Some(drag) = self.drag.get() else {
             return Ok(false);
@@ -281,6 +342,10 @@ impl Window {
     }
 
     /// 按主题声明尺寸与锚点定位窗口（DPI 变化时有限次重算）。
+    ///
+    /// 手动位置优先，其次为预览位置或主题固定/锚定位置。定位期间以 RAII 标记防止
+    /// 同步消息重入；跨屏导致 DPI 改变时最多重算三轮。尺寸尚未声明或锚点无效时
+    /// 不调整 HWND，系统定位错误原样返回。
     fn position(&self) -> windows_core::Result<()> {
         if self.positioning.replace(true) {
             return Ok(());
@@ -363,6 +428,9 @@ impl Window {
         Ok(())
     }
 
+    /// 按当前运行时样式和最近提交的命令流绘制画布。
+    ///
+    /// 只有内容存在且运行时可见时才安装附加图层；成功完成整次绘制后才清除恢复预算。
     fn paint(&self) -> windows_core::Result<()> {
         let app = self.app.borrow();
         app.canvas
@@ -381,6 +449,9 @@ impl Window {
         Ok(())
     }
 
+    /// 使失效的设备目标作废，并按恢复预算安排重试或记录终止错误。
+    ///
+    /// 重试定时器创建失败会覆盖为当前线程的原生错误；其余不可恢复错误遵循首次错误优先。
     fn graphics_error(&self, error: windows_core::Error) {
         self.app
             .borrow_mut()
@@ -404,6 +475,10 @@ impl Window {
 
     /// 鼠标/帧/外观事件后的公共副作用：发送动作、尺寸变化重定位、
     /// 画布 resize、动画计时器、收集诊断。
+    ///
+    /// 条目和翻页动作按最近快照校验后才发送。窗口尺寸、样式或锚点变化会同步更新
+    /// HWND 与画布；底层失败转为字符串错误。主题诊断按先进先出方式限制在
+    /// [`MAX_NOTICES`] 条，避免持续输出占用无界内存。
     fn apply_side_effects(
         &self,
         actions: &[(i32, i32)],
@@ -489,6 +564,7 @@ impl Window {
         Ok(())
     }
 
+    /// 清除帧截止时间并取消对应的 Windows 定时器。
     fn cancel_wakeup(&self) {
         self.wake_deadline.set(None);
         unsafe {
@@ -496,6 +572,10 @@ impl Window {
         }
     }
 
+    /// 合并主题唤醒请求并安排单个帧定时器。
+    ///
+    /// 内容不可见或不存在时不保留定时器；相同截止时间不重复重设。系统定时器创建
+    /// 失败时返回错误，且不登记新的截止时间。
     fn schedule_wakeup(&self, request: crate::animation::WakeRequest) -> Result<(), String> {
         let old = self.wake_deadline.get();
         let next = if self.app.borrow().runtime.visible() && self.app.borrow().content.is_some() {
@@ -521,6 +601,10 @@ impl Window {
         Ok(())
     }
 
+    /// 使 HWND 显示状态与运行时一致，并在首次显示前先绘制新内容。
+    ///
+    /// 隐藏时取消动画唤醒并清除图层；绘制失败按图形恢复策略处理，显示调用自身的
+    /// 返回值不作为致命错误。
     fn sync_visibility(&self) {
         let visible = self.app.borrow().runtime.visible();
         if !visible {
@@ -553,6 +637,10 @@ impl Window {
     }
 
     /// 渲染入口：同内容快照只重定位；新快照交给 wasm 重排。
+    ///
+    /// 同内容路径更新锚点和事件接收端而不调用主题布局。新内容仅在候选视图可见或
+    /// 常驻运行时仍处于活动状态时接受；运行时未提交新帧时保留已显示命令和动作身份。
+    /// 返回运行时、定位或副作用错误；窗口已记录的健康错误会在入口和成功路径检查。
     pub(crate) fn render(
         &self,
         snapshot: &CandidateView,
@@ -639,6 +727,9 @@ impl Window {
         self.health()
     }
 
+    /// 结束当前内容展示，清理捕获、动画与帧状态并隐藏 HWND。
+    ///
+    /// 即使主题隐藏回调失败也继续完成本地清理；该失败作为警告通知保留供宿主读取。
     pub(crate) fn hide(&self) {
         self.cancel_wakeup();
         if let Err(e) = self.app.borrow().canvas.borrow_mut().clear_layers() {
@@ -676,6 +767,9 @@ impl Window {
     }
 
     /// 外观变化：通知主题（wasm 内部重排），随后回放最新命令。
+    ///
+    /// 无活动内容时为空操作。主题调用错误向上传递；刷新产生的动作、诊断和帧请求
+    /// 由统一副作用流程处理。
     pub(crate) fn refresh_appearance(&self) -> Result<(), String> {
         self.health()?;
         let (actions, frame_requested, notes, changed) = {
@@ -709,6 +803,10 @@ impl Window {
         self.health()
     }
 
+    /// 将屏幕客户区鼠标坐标换算为内容空间 DIP，并将输入事件送入 WASM 运行时。
+    ///
+    /// 无当前内容时忽略输入。鼠标按下可按主题请求启动固定窗口拖动；普通捕获、动作
+    /// 发送和重绘均在运行时调用结束后处理，以免持有可变借用时触发重入。
     fn mouse(&self, kind: i32, param: LPARAM) -> Result<(), String> {
         if !self.app.borrow().content.is_some() {
             return Ok(());
@@ -753,6 +851,9 @@ impl Window {
         Ok(())
     }
 
+    /// 推进一帧动画并应用该帧产生的命令、动作、尺寸、诊断和后续唤醒请求。
+    ///
+    /// 内容不存在或运行时不可见时不调用 WASM。
     fn tick_frame(&self) -> Result<(), String> {
         if self.app.borrow().content.is_none() || !self.app.borrow().runtime.visible() {
             return Ok(());
@@ -782,6 +883,8 @@ impl Window {
     }
 
     /// WM_SIZE：按实际客户区尺寸 resize 画布。
+    ///
+    /// 客户区宽高最小按 1 像素处理；查询或画布调整错误由调用方交给图形恢复逻辑。
     fn resize(&self) -> windows_core::Result<()> {
         let mut rc = RECT::default();
         unsafe {
@@ -794,6 +897,7 @@ impl Window {
         )
     }
 
+    /// 返回窗口已记录的首个致命错误（若有）。
     pub(crate) fn health(&self) -> Result<(), String> {
         self.error
             .borrow()
@@ -801,12 +905,17 @@ impl Window {
             .map_or(Ok(()), |e| Err(e.clone()))
     }
 
+    /// 取出并清空当前诊断队列。
     pub(crate) fn take_notices(&self) -> Vec<ThemeNotice> {
         std::mem::take(&mut self.app.borrow_mut().notices)
     }
 }
 
 /// 注册窗口类并创建窗口（live：不可激活的工具窗口；preview：可关闭的预览窗）。
+///
+/// HWND 创建成功后将 `window` 的稳定地址绑定到窗口过程，并读取初始 DPI、急切创建
+/// Direct2D 目标。任一创建或目标初始化失败均返回错误；目标初始化失败时 HWND 已经
+/// 创建并绑定，最终仍由 `Window` 的析构路径销毁。
 pub(crate) fn create_window(window: &Window) -> Result<(), String> {
     unsafe {
         let instance = GetModuleHandleW(None);
@@ -866,6 +975,7 @@ pub(crate) fn create_window(window: &Window) -> Result<(), String> {
 }
 
 impl Drop for Window {
+    /// 摘除窗口过程中的 Rust 指针，停止计时器并释放鼠标捕获后销毁 HWND。
     fn drop(&mut self) {
         let hwnd = self.hwnd.get();
         if !hwnd.0.is_null() {
@@ -882,10 +992,13 @@ impl Drop for Window {
 }
 
 struct PaintGuard {
+    /// 本次 BeginPaint/EndPaint 配对所针对的窗口句柄。
     hwnd: HWND,
+    /// BeginPaint 填充的绘制上下文，供析构时 EndPaint 使用。
     ps: PAINTSTRUCT,
 }
 impl PaintGuard {
+    /// 开始一次原生绘制区间；必须在对应 UI 线程调用。
     unsafe fn begin(hwnd: HWND) -> Self {
         let mut ps = PAINTSTRUCT::default();
         unsafe {
@@ -895,6 +1008,7 @@ impl PaintGuard {
     }
 }
 impl Drop for PaintGuard {
+    /// 无论绘制路径如何退出，都结束对应的原生绘制区间。
     fn drop(&mut self) {
         unsafe {
             let _ = EndPaint(self.hwnd, &self.ps);
@@ -902,6 +1016,9 @@ impl Drop for PaintGuard {
     }
 }
 
+/// Windows 窗口过程的 ABI 边界：捕获 Rust panic，避免异常越过系统回调边界。
+///
+/// panic 时尽力将窗口标为故障并返回零；即便错误槽正被借用，也不会再次触发 panic。
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     // 拦截所有 Rust 回调（含 panic），保证 ABI 边界可恢复。
     match catch_unwind(AssertUnwindSafe(|| unsafe { dispatch(hwnd, msg, wp, lp) })) {
@@ -920,6 +1037,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
     }
 }
 
+/// 分派窗口消息并更新关联窗口状态。
+///
+/// 仅由 `wnd_proc` 在系统回调边界内调用。`WM_NCCREATE` 将稳定的 `Window` 地址存入
+/// HWND；`WM_NCDESTROY` 清除该关联。调用者负责保证 HWND 和用户数据指针仍有效。
 unsafe fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         if msg == WM_NCCREATE as u32 {

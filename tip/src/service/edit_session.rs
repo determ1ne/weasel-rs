@@ -1,12 +1,19 @@
-//! One TSF edit request owns one immutable task. A late callback cannot consume
-//! a different request's context or edit cookie after reactivation.
+//! 执行提交给 TSF 的单个编辑任务，并隔离停用、重新激活前后的异步回调。
+//!
+//! 每个会话持有自己的待处理任务、票据和服务代次；迟到或重复的 COM 回调不能
+//! 消费其他请求，也不能在新一轮激活中使用旧上下文或编辑 cookie。
 use super::*;
 
 #[implement(ITfEditSession)]
+/// 一个不可变请求对应的 TSF 编辑会话；任务至多消费一次。
 pub(super) struct ResponseEdit {
+    /// 由 `_owner` 保活的文本服务对象地址，仅在回调期间解引用。
     service: *const TextService,
+    /// 本会话专属任务；`DoEditSession` 从中取走任务以防重复执行。
     pending: Mutex<Option<PendingEdit>>,
+    /// 创建本会话时的服务激活代次。
     generation: u64,
+    /// 调度器为此请求分配的编辑票据。
     ticket: u64,
     // Keeps `service` alive even after its pending task has been consumed.
     _owner: IUnknown,
@@ -41,6 +48,7 @@ mod tests {
 }
 
 impl Drop for ResponseEdit {
+    /// TSF 丢弃未执行的会话时释放对应预约标记并请求维护。
     fn drop(&mut self) {
         if let Some(pending) = self
             .pending
@@ -65,6 +73,7 @@ impl Drop for ResponseEdit {
 }
 
 impl ResponseEdit {
+    /// 构造会话并持有请求的 COM 所有者，使服务指针在回调和清理期间有效。
     pub(super) fn new(
         service: &TextService,
         pending: PendingEdit,
@@ -83,6 +92,9 @@ impl ResponseEdit {
 }
 
 impl ITfEditSession_Impl for ResponseEdit_Impl {
+    /// 在 TSF 授予的写 cookie 中验证请求、协调组合状态并应用编辑。
+    /// 回调不递归请求另一写锁；后续调度通过窗口消息恢复。若写入失败且文档
+    /// 可能已被部分修改，则隔离后续输入，避免重放同一响应。
     fn DoEditSession(&self, ec: TfEditCookie) -> Result<()> {
         // TSF dispatches this session on the requesting apartment; _owner keeps
         // the pointed-to COM allocation alive throughout this callback.

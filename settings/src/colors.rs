@@ -1,11 +1,16 @@
-//! UI 只编辑颜色；JSON 的字符串/浅深色对象转换留在宿主侧。
+//! 注册设置界面的颜色编解码，将 JSON 字符串、系统色和浅深色对象映射到 UI 值。
+//! JSON 结构转换在宿主侧完成，模块同时提供十六进制颜色解析与格式化。
 use crate::{Channels, ColorCodec, ColorValue, ParsedColor, SettingsWindow};
 use serde_json::{Value, json};
 use slint::{Color, ComponentHandle};
 
+/// 从 JSON 字符串颜色解析 UI 颜色；输入不合法时采用调用方给定的回退色。
 fn parse(value: &Value, fallback: Color) -> Color {
     value.as_str().and_then(parse_hex).unwrap_or(fallback)
 }
+/// 解析 6 位 RGB 或 8 位 ARGB 十六进制颜色，可带 `#` 和外围空白。
+///
+/// RGB 输入补全不透明 alpha；格式错误或非十六进制字符返回 `None`。
 fn parse_hex(text: &str) -> Option<Color> {
     let text = text.trim();
     let text = text.strip_prefix('#').unwrap_or(text);
@@ -19,9 +24,14 @@ fn parse_hex(text: &str) -> Option<Color> {
         _ => None,
     }
 }
+/// 将 Slint 颜色编码为大写的 `#AARRGGBB` 文本。
 fn hex(color: Color) -> String {
     format!("#{:08X}", color.as_argb_encoded())
 }
+/// 注册 UI 与 JSON 颜色值之间的编解码及辅助回调。
+///
+/// 解码识别系统色、单色和浅/深色对象；无法解析的颜色分别使用预设回退色。编码按
+/// mode 输出相应 JSON 形状，通道回调将 Slint 通道转换为浮点分量。
 pub fn install(ui: &SettingsWindow) {
     let codec = ui.global::<ColorCodec>();
     codec.on_decode(|text| {

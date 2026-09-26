@@ -1,5 +1,7 @@
-//! Classic ABC-inspired candidate window. No legacy code or resource assets are embedded.
-//! Native lifetime/paint handling follows our D2D backend; input remains owned by TIP.
+//! 提供经典 ABC 风格的输入预编辑框与候选窗，绘制由 Direct2D/DirectWrite 完成，
+//!
+//! 窗口只呈现并转发候选快照中的交互事件；输入状态仍归 TIP 所有。原生窗口回调
+//! 使用稳定的 `Rc<Window>` 分配承载状态，绘图资源在创建它们的 UI 线程上使用。
 mod logic;
 
 use crate::d2d_bindings::*;
@@ -19,15 +21,25 @@ use windows_strings::w;
 const CLASS: windows_strings::PCWSTR = w!("Weasel.ThemeAbc.D2D");
 const RETRY_TIMER: usize = 1;
 
+/// 一组绑定到当前 UI 线程的 Direct2D/DirectWrite 资源。
+///
+/// 工厂和文本格式随窗口存活；HWND 渲染目标可在设备丢失后丢弃，并由
+/// [`Graphics::ensure_target`] 按需重建。
 struct Graphics {
+    /// 创建 HWND 渲染目标的单线程 Direct2D 工厂。
     factory: ID2D1Factory,
+    /// 创建文本布局的 DirectWrite 工厂。
     write: IDWriteFactory,
+    /// 预编辑文本格式。
     text: IDWriteTextFormat,
+    /// 候选窗底部标签格式。
     label: IDWriteTextFormat,
+    /// 与当前 HWND 关联的渲染目标；设备失效时设为 `None`。
     target: Option<ID2D1HwndRenderTarget>,
 }
 
 impl Graphics {
+    /// 在调用线程创建工厂与固定文本格式；底层 API 失败时原样返回错误。
     fn new() -> windows_core::Result<Self> {
         unsafe {
             let factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
@@ -57,6 +69,9 @@ impl Graphics {
             })
         }
     }
+    /// 首次使用或目标已丢弃时创建渲染目标，已有目标保持不变。
+    ///
+    /// 尺寸取 HWND 当前客户区且每边至少为一个像素；创建失败时不留下半成品。
     fn ensure_target(&mut self, hwnd: HWND, dpi: u32) -> windows_core::Result<()> {
         if self.target.is_none() {
             unsafe {
@@ -88,45 +103,68 @@ impl Graphics {
     }
 }
 
+/// 某一可见窗口当前呈现的数据快照、事件接收端和命中区域。
 struct Content {
+    /// 用于绘制和判断控件是否仍可操作的最新快照。
     snapshot: CandidateView,
+    /// 点击释放时接收 UI 操作的发送端。
     events: EventSink,
+    /// 按当前窗口角色和候选数量计算的 DIP 布局。
     layout: Layout,
 }
+/// 窗口独占的可变 UI 状态；借用期间不得调用可能同步重入窗口过程的原生 API。
 struct App {
+    /// 当前窗口的图形资源。
     graphics: Graphics,
+    /// 无内容时为 `None`，避免隐藏窗口继续持有旧快照和事件发送端。
     content: Option<Content>,
+    /// 鼠标按压与悬停状态机。
     gesture: Gesture,
 }
 
-/// The stable allocation outlives its HWND. Native calls that can synchronously
-/// dispatch messages never hold a mutable reference to this object or its App.
+/// 窗口过程回调可访问的稳定状态分配。
+///
+/// 此分配必须至少存活到 HWND 销毁；任何可能同步分派消息的原生调用之前，
+/// 都不能持有指向本对象或其 [`App`] 的可变借用，以免重入导致 RefCell 冲突。
 struct Window {
+    /// 是否启用文本抗锯齿。
     antialiasing: bool,
+    /// 原生 HWND；销毁通知到达后清空。
     hwnd: Cell<HWND>,
+    /// 当前窗口 DPI，始终至少为 1。
     dpi: Cell<u32>,
+    /// 渲染与交互状态。只在 UI 线程访问，不跨线程共享。
     app: RefCell<App>,
+    /// 首个致命错误；设置后由健康检查持续报告。
     error: RefCell<Option<String>>,
+    /// Direct2D 设备丢失的有限重试状态。
     recovery: RefCell<Recovery>,
+    /// 防止定位期间由 DPI 消息引发递归定位。
     positioning: Cell<bool>,
+    /// 此窗口是否属于可交互的主题预览模式。
     preview: bool,
+    /// 输入框或候选窗，决定布局及交互策略。
     role: Role,
 }
 
-// Keep the native callback's allocation behind a shared reference even while
-// ThemeBackend is called through &mut self.
+/// 主题后端持有两个 HWND 状态分配，并与原生回调共享其稳定地址。
 struct Abc {
-    // Input is owned by candidates and must be destroyed first.
+    /// 输入框以候选窗为 owner；声明顺序确保输入框先于候选窗销毁。
     input: Rc<Window>,
+    /// 候选窗及其对应的状态。
     candidates: Rc<Window>,
 }
 
+/// 创建候选窗和其 owner 输入窗；任一窗口创建失败都会返回错误，已创建资源随即释放。
 fn create(mode: UiMode, antialiasing: bool) -> Result<Box<dyn ThemeBackend>, String> {
     let candidates = create_window(mode, Role::Candidates, None, antialiasing)?;
     let input = create_window(mode, Role::Input, Some(candidates.hwnd.get()), antialiasing)?;
     Ok(Box::new(Abc { input, candidates }))
 }
 
+/// 创建一个窗口及其状态，并在返回前验证渲染目标和窗口健康状态。
+///
+/// `owner` 仅用于建立原生窗口所有权关系；`mode` 决定是否使用预览窗口策略。
 fn create_window(
     mode: UiMode,
     role: Role,
@@ -217,8 +255,9 @@ fn create_window(
     Ok(window)
 }
 
-/// Sets the window's small and big icons so the preview window's task-bar button
-/// shows the Weasel icon. WM_SETICON is authoritative for the task-bar image.
+/// 设置预览窗口的小图标和大图标，使任务栏按钮显示 Weasel 图标。
+///
+/// 空图标不执行任何操作；`WM_SETICON` 的发送结果不作为创建失败处理。
 unsafe fn apply_taskbar_icon(hwnd: HWND, icon: HICON) {
     if icon.0.is_null() {
         return;
@@ -240,17 +279,20 @@ unsafe fn apply_taskbar_icon(hwnd: HWND, icon: HICON) {
 }
 
 impl Window {
+    /// 记录首个错误，避免后续连锁错误覆盖最初的故障原因。
     fn fail(&self, error: impl ToString) {
         let mut slot = self.error.borrow_mut();
         if slot.is_none() {
             *slot = Some(error.to_string());
         }
     }
+    /// 请求系统重绘当前 HWND；调用失败不改变窗口状态。
     fn invalidate(&self) {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd.get()), None, false);
         }
     }
+    /// 清除手势并在本窗口拥有鼠标捕获时释放捕获。
     fn cancel(&self) {
         self.app.borrow_mut().gesture.cancel();
         unsafe {
@@ -259,6 +301,10 @@ impl Window {
             }
         }
     }
+    /// 根据快照、窗口角色和 DPI 计算位置并移动窗口。
+    ///
+    /// 无可定位内容时成功返回；重入请求直接忽略。移动可能同步触发 DPI 变化，
+    /// 因而最多重新计算三次，原生定位错误向调用方传播。
     fn position(&self) -> windows_core::Result<()> {
         if self.positioning.replace(true) {
             return Ok(());
@@ -372,6 +418,7 @@ impl Window {
         }
         Ok(())
     }
+    /// 将当前客户区尺寸和 DPI 同步到已创建的渲染目标。
     fn resize(&self) -> windows_core::Result<()> {
         let app = self.app.borrow();
         if let Some(target) = &app.graphics.target {
@@ -389,6 +436,10 @@ impl Window {
         }
         Ok(())
     }
+    /// 丢弃可能失效的渲染目标，并按恢复策略安排重试或记录致命错误。
+    ///
+    /// 只有设备丢失且重试次数未耗尽时才设置短定时器；定时器创建失败会转为
+    /// 健康错误，后续绘制不再继续。
     fn graphics_error(&self, error: windows_core::Error) {
         self.app.borrow_mut().graphics.target = None;
         if !self
@@ -405,6 +456,9 @@ impl Window {
             }
         }
     }
+    /// 绘制当前内容；绘制结束后才将恢复计数清零。
+    ///
+    /// Direct2D/DirectWrite 错误由调用方交给 [`Window::graphics_error`] 处理。
     fn paint(&self) -> windows_core::Result<()> {
         let mut app = self.app.borrow_mut();
         app.graphics
@@ -558,6 +612,7 @@ impl Window {
         self.recovery.borrow_mut().succeeded();
         Ok(())
     }
+    /// 将客户区像素坐标转换为 DIP，并在当前布局中查找命中控件。
     fn hit(&self, param: LPARAM) -> Option<Hit> {
         let x = param.0 as u16 as i16 as f32 * 96.0 / self.dpi.get() as f32;
         let y = (param.0 >> 16) as u16 as i16 as f32 * 96.0 / self.dpi.get() as f32;
@@ -570,6 +625,7 @@ impl Window {
 }
 
 impl ThemeBackend for Abc {
+    /// 更新两个窗口；任一侧失败时立即隐藏整组界面并返回错误。
     fn render(&mut self, snapshot: &CandidateView, events: &EventSink) -> Result<(), String> {
         // Failure of either window hides the whole presentation.
         let result = self
@@ -581,21 +637,28 @@ impl ThemeBackend for Abc {
         }
         result
     }
+    /// 隐藏输入窗和候选窗，并清除各自的交互与快照状态。
     fn hide(&mut self) {
         self.input.hide();
         self.candidates.hide();
     }
+    /// 请求两个窗口重绘并检查其健康状态。
     fn refresh_appearance(&mut self) -> Result<(), String> {
         self.input.invalidate();
         self.candidates.invalidate();
         self.check_health()
     }
+    /// 按输入窗、候选窗顺序返回首个已记录的致命错误。
     fn check_health(&mut self) -> Result<(), String> {
         self.input.health().and_then(|_| self.candidates.health())
     }
 }
 
 impl Window {
+    /// 应用新快照，并按可见性决定只更新定位还是重建并显示内容。
+    ///
+    /// 预编辑游标等仅布局变化可复用当前内容，不取消按压手势，也不重建布局；
+    /// 内容或可见性发生变化时先取消手势。快照校验、定位和健康检查错误均向上传播。
     fn render(&self, snapshot: &CandidateView, events: &EventSink) -> Result<(), String> {
         if let Some(preedit) = &snapshot.preedit {
             preedit.validate()?;
@@ -659,6 +722,7 @@ impl Window {
         self.invalidate();
         self.health()
     }
+    /// 清除当前内容、停止恢复定时器并隐藏 HWND。
     fn hide(&self) {
         self.cancel();
         self.app.borrow_mut().content = None;
@@ -668,6 +732,7 @@ impl Window {
             let _ = ShowWindow(self.hwnd.get(), SW_HIDE);
         }
     }
+    /// 返回创建或回调过程中记录的首个错误。
     fn health(&self) -> Result<(), String> {
         self.error
             .borrow()
@@ -677,6 +742,7 @@ impl Window {
 }
 
 impl Drop for Window {
+    /// 在释放状态前解除回调指针，再停止定时器并销毁 HWND。
     fn drop(&mut self) {
         let hwnd = self.hwnd.get();
         if !hwnd.0.is_null() {
@@ -691,11 +757,15 @@ impl Drop for Window {
     }
 }
 
+/// Win32 绘制周期的 RAII 守卫，确保每次成功开始的绘制都会结束。
 struct PaintGuard {
+    /// 本次绘制所属窗口。
     hwnd: HWND,
+    /// `BeginPaint` 填充并由 `EndPaint` 配对使用的状态。
     ps: PAINTSTRUCT,
 }
 impl PaintGuard {
+    /// 开始一次 Win32 绘制周期；析构时配对调用 `EndPaint`。
     unsafe fn begin(hwnd: HWND) -> Self {
         let mut ps = PAINTSTRUCT::default();
         unsafe {
@@ -711,11 +781,15 @@ impl Drop for PaintGuard {
         }
     }
 }
+/// Direct2D 绘制周期的 RAII 守卫；提前返回时尽力结束绘制。
 struct DrawGuard<'a> {
+    /// 此守卫借用的渲染目标，保证其存活至绘制周期结束。
     target: &'a ID2D1HwndRenderTarget,
+    /// 显式 `finish` 后置位，避免析构时重复调用 `EndDraw`。
     ended: bool,
 }
 impl DrawGuard<'_> {
+    /// 显式结束 Direct2D 绘制并返回其设备错误。
     fn finish(mut self) -> windows_core::Result<()> {
         self.ended = true;
         unsafe { self.target.EndDraw(None, None).ok() }
@@ -731,8 +805,8 @@ impl Drop for DrawGuard<'_> {
     }
 }
 
+/// Win32 窗口过程入口：在跨越系统回调 ABI 边界前捕获所有 Rust panic，避免异常展开进入系统代码。
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    // Catch every Rust callback, including paint and event delivery, before ABI return.
     match catch_unwind(AssertUnwindSafe(|| unsafe { dispatch(hwnd, msg, wp, lp) })) {
         Ok(result) => result,
         Err(_) => {
@@ -749,6 +823,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
     }
 }
 
+/// 分派单个 Win32 消息；仅在这里访问绑定到 HWND 的 [`Window`] 指针。
+///
+/// `WM_NCCREATE` 安装由后端持有的稳定指针，`WM_NCDESTROY` 将其解除；输入事件
+/// 只有在按下与释放命中同一且仍启用的控件时才发送给主题事件接收端。
 unsafe fn dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         if msg == WM_NCCREATE as u32 {
@@ -894,6 +972,7 @@ fn color(rgb: u32) -> D2D_COLOR_F {
         a: 1.0,
     }
 }
+/// 构造指定边界的 Direct2D 矩形（坐标单位为 DIP）。
 fn rect(left: f32, top: f32, right: f32, bottom: f32) -> D2D_RECT_F {
     D2D_RECT_F {
         left,
@@ -902,6 +981,7 @@ fn rect(left: f32, top: f32, right: f32, bottom: f32) -> D2D_RECT_F {
         bottom,
     }
 }
+/// 绘制单行 UTF-16 文本；临时编码缓冲区只在本次 Direct2D 调用期间存在。
 unsafe fn text(
     target: &ID2D1HwndRenderTarget,
     brush: &ID2D1SolidColorBrush,
@@ -924,22 +1004,27 @@ unsafe fn text(
     }
 }
 
+/// ABC 主题工厂；默认配置来自同目录的 `config.json`。
 pub struct Factory;
 
 impl crate::theme_api::ThemeFactory for Factory {
+    /// 返回注册表使用的主题标识。
     fn name(&self) -> &'static str {
         "abc"
     }
+    /// 声明支持预编辑框且不要求常驻窗口。
     fn capabilities(&self) -> crate::theme_api::ThemeCapabilities {
         crate::theme_api::ThemeCapabilities {
             preedit: true,
             resident: false,
         }
     }
+    /// 解析编译期嵌入的默认配置；配置无效时返回带主题上下文的错误。
     fn default_settings(&self) -> Result<serde_json::Value, String> {
         serde_json::from_str(include_str!("config.json"))
             .map_err(|error| format!("invalid ABC default settings: {error}"))
     }
+    /// 从配置快照读取抗锯齿选项并创建后端；缺项、类型错误或窗口初始化失败都会体现在创建结果中。
     fn create(
         &self,
         mode: UiMode,
@@ -955,7 +1040,7 @@ impl crate::theme_api::ThemeFactory for Factory {
     }
 }
 
-// Classic bevel: outer gray/black, inner white/gray, inset gray/white.
+/// 绘制三层经典凸起边框；边线颜色顺序构成外、中、内三道明暗反差。
 unsafe fn draw_frame(target: &ID2D1HwndRenderTarget, brush: &ID2D1SolidColorBrush, w: f32, h: f32) {
     unsafe {
         for (inset, light, dark) in [
@@ -975,6 +1060,9 @@ unsafe fn draw_frame(target: &ID2D1HwndRenderTarget, brush: &ID2D1SolidColorBrus
         }
     }
 }
+/// 绘制带按下态和禁用态反馈的分页箭头按钮。
+///
+/// `up` 控制箭头方向，`enabled` 只影响箭头颜色，`pressed` 同时改变按钮边框和图形偏移。
 unsafe fn draw_arrow(
     target: &ID2D1HwndRenderTarget,
     brush: &ID2D1SolidColorBrush,

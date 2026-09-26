@@ -17,18 +17,34 @@ use std::{cell::RefCell, collections::HashSet, rc::Rc};
 use weasel_common::process::RuntimePaths;
 slint::include_modules!();
 
+/// 设置窗口的运行时模型；仅在 Slint 事件循环线程内访问。
+///
+/// `document` 保存基础配置与用户覆盖，`fields`/`owners` 将 UI 行映射回目录分区；
+/// `changed` 用于限定保存前的分区校验，`invalid` 和 `module_errors` 阻止保存。
 struct State {
+    /// 已加载的配置文档，包含基础值及待保存的用户补丁。
     document: config::Document,
+    /// 配置项目录及其分区元数据。
     catalog: catalog::Catalog,
+    /// 与完整 UI 行模型按索引对应的编辑字段。
     fields: Vec<form::Field>,
+    /// 每个字段所属的目录分区索引，与 `fields` 同步增长。
     owners: Vec<usize>,
+    /// 自上次成功保存以来发生改动的分区索引。
     changed: HashSet<usize>,
+    /// 当前无效的字段索引；存在时禁止保存。
     invalid: HashSet<usize>,
+    /// 以“模块 ID/键”标识的无效模块编辑。
     module_errors: HashSet<String>,
+    /// 最近成功读取的自动更新设置；读取失败时为 `None`，此项不可编辑。
     auto_update_saved: Option<bool>,
+    /// 界面当前选择的自动更新值，成功写入后同步到 `auto_update_saved`。
     auto_update_pending: bool,
 }
 impl State {
+    /// 根据有效配置重建应用选项行，并保留已有行的展开状态。
+    ///
+    /// 遇到非对象配置、超过 256 项或无效布尔值时返回错误，不提交部分模型。
     fn show_apps(&self, ui: &SettingsWindow) -> Result<(), String> {
         let effective = self.document.effective();
         let snapshot = weasel_common::settings::ConfigSnapshot::new(effective.clone());
@@ -95,6 +111,7 @@ impl State {
         ui.set_apps(Rc::new(VecModel::from(rows)).into());
         Ok(())
     }
+    /// 判断目录分区是否匹配当前主题及可选的 WASM 主题挂载条件。
     fn visible(&self, index: usize) -> bool {
         let value = self.document.effective();
         let mount = &self.catalog.sections[index].mount;
@@ -104,6 +121,10 @@ impl State {
                     || value["themeSettings"]["wasm"]["theme"].as_str()
                         == mount.get(3).map(String::as_str)))
     }
+    /// 按目录生成完整字段模型和过滤后的可见模型，并同步应用及 WASM 模块行。
+    ///
+    /// 字段、所有者映射与 UI 源索引保持同序。此方法会向字段和所有者列表追加内容，
+    /// 因此应在新建状态时调用；模型生成失败时返回错误。
     fn show(&mut self, ui: &SettingsWindow) -> Result<(), String> {
         let mut rows = Vec::new();
         for (index, section) in self.catalog.sections.iter().enumerate() {
@@ -162,6 +183,7 @@ impl State {
         wasm_modules::show(self, ui)?;
         Ok(())
     }
+    /// 原位更新字段行的可见标志，不重建模型或改变编辑索引。
     fn update_visibility(&self, ui: &SettingsWindow) {
         let model = ui.get_fields();
         for (index, &owner) in self.owners.iter().enumerate() {
@@ -175,6 +197,10 @@ impl State {
         }
     }
 }
+/// 初始化原生窗口后启动 Slint 事件循环；配置目录在后台线程读取。
+///
+/// 所有 UI 状态和回调均留在事件循环线程，后台任务通过容量为 1 的通道回传结果。
+/// 返回窗口初始化、线程创建或事件循环产生的错误。
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     slint::BackendSelector::new()
         .backend_name("winit".into())
@@ -560,6 +586,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 收尾应用选项编辑：成功时标记配置已修改并刷新行，失败时展示原始错误。
 fn finish_app_edit(state: &mut State, ui: &SettingsWindow, result: Result<(), String>) {
     match result {
         Ok(()) => {

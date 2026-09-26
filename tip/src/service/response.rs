@@ -1,14 +1,19 @@
-//! Validate out-of-process data before allocating text-store buffers or editing.
+//! 在分配文本存储缓冲区或请求 TSF 编辑会话前校验进程外响应。
 use super::*;
 
+/// 单个响应文本字段允许的最大 UTF-8 字节数。
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 
-/// Acknowledgements without state are not cancellation. Conversely, one-shot
-/// effects do not require a redundant state snapshot to be applied.
+/// 判断响应是否包含需要触发宿主编辑的状态或一次性效果。
+///
+/// 单纯确认且没有状态不代表取消；提交文本和打开表情面板则无需冗余状态快照。
 pub(super) fn has_edit_payload(response: &KeyEventResponse) -> bool {
     response.state_updated || !response.commit_text.is_empty() || response.open_emoji_panel
 }
 
+/// 验证文本大小及组合光标是否落在 UTF-16 字符边界。
+///
+/// 引擎数据跨越进程边界，非法长度或落在代理项中间的光标均以 `E_FAIL` 拒绝。
 pub(super) fn validate(response: &KeyEventResponse) -> Result<()> {
     if response.composition.len() > MAX_TEXT_BYTES
         || response.commit_text.len() > MAX_TEXT_BYTES

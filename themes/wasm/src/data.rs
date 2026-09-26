@@ -1,12 +1,18 @@
-//! Read-only host-owned data. Guests query values, never parse JSON or own host pointers.
-//! CandidateView uses typed accessors; scope 1 is themeSettings.wasm.modules.<id>.config.
-//! Scope 2 contains supported global presentation settings (currently preedit_type).
+//! 向 guest 暴露只读的宿主数据，不传递宿主指针，也不要求 guest 解析 JSON。
+//!
+//! 候选视图通过按类型区分的查询导入访问。数据作用域 1 对应
+//! `themeSettings.wasm.modules.<id>.config`；作用域 2 对应受支持的全局呈现设置，目前包括
+//! `preedit_type`。查询路径使用 JSON Pointer 语法，字符串长度和缓冲区容量均以 UTF-8
+//! 字节计。
 use crate::abi::{ConfigScope, DataKind, ViewField, ViewStringField};
 use crate::protocol::{IMPORT_MODULE, MEMORY};
 use crate::runtime::{HostState, read_wasm_string};
 use serde_json::Value;
 use wasmtime::{Caller, Linker};
 
+/// 从 guest 内存读取 JSON Pointer 路径，并执行调用计费和长度校验。
+///
+/// 长度必须在 0..=1024 字节内；越界或无效内存/UTF-8 会返回 Wasmtime 错误。
 fn path(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> wasmtime::Result<String> {
     caller.data_mut().charge(0)?;
     if !(0..=1024).contains(&len) {
@@ -16,6 +22,10 @@ fn path(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> wasmtime::Res
         .ok_or_else(|| wasmtime::format_err!("invalid data path memory or UTF-8"))
 }
 
+/// 在指定只读配置作用域内借用路径对应的 JSON 值。
+///
+/// 未知作用域、路径不存在或 JSON Pointer 无匹配项均返回 `None`；返回引用仅在宿主状态
+/// 保持借用期间有效，不复制配置数据。
 fn value<'a>(state: &'a HostState, scope: i32, path: &str) -> Option<&'a Value> {
     match ConfigScope::try_from(scope).ok()? {
         ConfigScope::Module => &state.options,
@@ -24,6 +34,14 @@ fn value<'a>(state: &'a HostState, scope: i32, path: &str) -> Option<&'a Value> 
     .pointer(path)
 }
 
+/// 注册候选视图和只读配置查询导入。
+///
+/// `view_i64` 与 `view_string` 读取当前宿主快照；没有快照时，数值字段返回 0 或其约定的
+/// `-1`，字符串查询返回 `-1`。`data_kind` 区分缺失与 JSON 类型，`data_len` 查询数组、
+/// 对象或字符串长度，类型不匹配时返回 `-1`；数值及整数查询在类型不匹配时分别返回
+/// NaN 和 0。字符串写入不截断且不追加终止符：容量不足时只返回所需 UTF-8 字节数，
+/// 缓冲区足够时才写入 guest 的 `memory`。非法字段、索引、路径和内存通过 Wasmtime 错误
+/// 报告；链接器注册失败原样返回。
 pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
     linker.func_wrap(
         IMPORT_MODULE,

@@ -1,4 +1,8 @@
-//! 有资源上限的离线元数据解析与验证；注解仅作为数据，不执行代码。
+//! 离线解析并验证主题配置元数据及其 JSON Schema 子集。
+//!
+//! 元数据和表单注解始终按数据处理，不执行其中的代码，也不访问远程引用。
+//! 解析、结构检查和实际值校验均受深度、节点、字段、字符串、字节数及工作量
+//! 上限约束；超出限制时返回错误，避免不可信描述导致无界内存或计算消耗。
 use regex::{Regex, RegexBuilder};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -11,12 +15,20 @@ const MAX_STRING: usize = 16384;
 const MAX_WORK: usize = 131072;
 
 #[derive(Debug, Clone)]
+/// 已通过结构与默认值校验的主题配置描述。
 pub struct Metadata {
+    /// 配置默认值；必须是 JSON 对象，允许为空或仅包含 `$schema` 提示。
     pub defaults: Value,
+    /// 版本为 1 的扩展 Schema，包含校验规则及受限的 UI 字段注解。
     pub richschema: Value,
 }
 
 impl Metadata {
+    /// 从版本为 1 的元数据封装中解析并验证配置描述。
+    ///
+    /// 输入最多 1 MiB，解析前先扫描 JSON 嵌套深度，随后检查封装成员、各部分
+    /// 的结构及默认值。非法 JSON、未知成员、资源超限或默认值不符合 Schema
+    /// 均以 `Err` 返回。
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() > MAX_BYTES {
             return Err("metadata exceeds 1 MiB".into());
@@ -66,6 +78,10 @@ impl Metadata {
         Self::from_parts(defaults, richschema)
     }
 
+    /// 验证分别提供的默认值与扩展 Schema，并构造元数据。
+    ///
+    /// 默认值为空对象或仅含 `$schema` 时视为未提供完整默认配置，不执行默认值
+    /// 校验；其他默认值必须满足扩展 Schema。所有结构和工作量限制仍然适用。
     pub fn from_parts(defaults: Value, richschema: Value) -> Result<Self, String> {
         let metadata = Self {
             defaults,
@@ -87,13 +103,21 @@ impl Metadata {
         Ok(metadata)
     }
 
+    /// 检查配置值是否满足当前元数据中的 Schema。
+    ///
+    /// 每次调用都会重新检查公开元数据字段及输入值的边界，再执行校验；普通
+    /// 不匹配和资源/Schema 错误均返回 `Err`，其中错误文本包含失败位置或原因。
     pub fn validate(&self, value: &Value) -> Result<(), String> {
         bounded(value)?;
         // 公共字段可能被调用者修改，每次验证都重新检查元数据。
         self.engine()?.validate(value)
     }
 
-    /// 表单能力探测复用相同的校验器，不自行猜测正则或 union 的语义。
+    /// 用指定 Schema 探测值是否可接受，复用与配置校验相同的受限语义。
+    ///
+    /// 返回 `Ok(false)` 表示值不匹配，`Err` 表示 Schema 无效或计算预算耗尽。
+    /// 此方法仍以元数据中的根 Schema 解析本地引用，因此引用目标必须存在于该
+    /// 根 Schema 中；每次探测独立使用完整工作量预算。
     pub fn accepts(&self, schema: &Value, value: &Value) -> Result<bool, String> {
         let mut work = MAX_WORK;
         Ok(self
@@ -102,6 +126,10 @@ impl Metadata {
             .is_none())
     }
 
+    /// 校验扩展描述并创建本次操作专用的 Schema 引擎。
+    ///
+    /// 引擎借用根 Schema，缓存已编译正则，并在构造时遍历 Schema 检查关键字、
+    /// 引用、UI 注解和属性总数；不会跨调用共享缓存或状态。
     fn engine(&self) -> Result<Engine<'_>, String> {
         let mut nodes = 2; // package object and formatVersion
         let mut bytes = 64; // conservative package wrapper allowance
@@ -166,10 +194,14 @@ impl Metadata {
     }
 }
 
+/// 按统一的 JSON 资源限制检查一棵值树。
 fn bounded(value: &Value) -> Result<(), String> {
     bounds(value, 0, &mut 0, &mut 0)
 }
 
+/// 累计检查值树的深度、节点数、对象字段数、字符串长度和估算字节数。
+///
+/// 计数器由调用方共享，使多个值可以受同一总预算约束；任一限制超出即失败。
 fn bounds(value: &Value, depth: usize, nodes: &mut usize, bytes: &mut usize) -> Result<(), String> {
     *nodes += 1;
     *bytes += 8;
@@ -200,6 +232,7 @@ fn bounds(value: &Value, depth: usize, nodes: &mut usize, bytes: &mut usize) -> 
     Ok(())
 }
 
+/// 限制字符串 UTF-8 字节长度，并将 JSON 引号及转义开销计入估算大小。
 fn string_bound(s: &str, bytes: &mut usize) -> Result<(), String> {
     if s.len() > MAX_STRING {
         return Err("string exceeds 16384 bytes".into());
@@ -216,6 +249,7 @@ fn string_bound(s: &str, bytes: &mut usize) -> Result<(), String> {
     Ok(())
 }
 
+/// 从有限工作量预算中扣除成本；不足时返回错误且不允许组合分支将其吞掉。
 fn spend(work: &mut usize, amount: usize) -> Result<(), String> {
     *work = work
         .checked_sub(amount)
@@ -223,6 +257,7 @@ fn spend(work: &mut usize, amount: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// 检查 JSON Pointer 片段是否以 `/` 开头且只含合法的 `~0`、`~1` 转义。
 fn valid_pointer(s: &str) -> bool {
     s.starts_with('/')
         && s.split('/').all(|part| {
@@ -236,14 +271,20 @@ fn valid_pointer(s: &str) -> bool {
         })
 }
 
+/// 一次 Schema 检查/校验所用的借用型引擎；不拥有 Schema，也不跨调用复用。
 struct Engine<'a> {
+    /// 本地 `$ref` 的解析根节点。
     root: &'a Value,
+    /// 本次引擎已编译的正则，避免同一表达式在遍历时重复编译。
     patterns: HashMap<String, Regex>,
+    /// 已计数的属性映射节点地址，防止通过引用重复累计同一属性表。
     property_maps: HashSet<*const Value>,
+    /// 所有不同 `properties` 与 `patternProperties` 表中的属性总数。
     property_count: usize,
 }
 
 impl<'a> Engine<'a> {
+    /// 仅解析指向根 Schema 内部的 `#/...` 引用，不读取外部资源。
     fn resolve(&self, reference: &Value) -> Result<&'a Value, String> {
         let r = reference.as_str().ok_or("$ref must be a string")?;
         let pointer = r
@@ -255,6 +296,10 @@ impl<'a> Engine<'a> {
             .ok_or_else(|| format!("unresolved $ref: {r}"))
     }
 
+    /// 预检 Schema 子集并编译其中的正则；递归栈用于拒绝循环引用。
+    ///
+    /// 深度、属性数及工作量均受全局上限约束；未知关键字、非法引用或非法
+    /// 关键字值直接返回错误。递归栈仅描述当前路径，因此同一非循环节点可复用。
     fn inspect(
         &mut self,
         schema: &Value,
@@ -366,6 +411,7 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
+    /// 在缓存未命中时按预算编译正则，并限制正则引擎的内存及嵌套规模。
     fn compile(&mut self, pattern: &str, work: &mut usize) -> Result<(), String> {
         if !self.patterns.contains_key(pattern) {
             spend(work, 2048 + pattern.len())?;
@@ -380,11 +426,13 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
+    /// 按模式与文本长度的乘积计费后执行缓存正则匹配。
     fn matches(&self, pattern: &str, text: &str, work: &mut usize) -> Result<bool, String> {
         spend(work, (pattern.len() + 1).saturating_mul(text.len() + 1))?;
         Ok(self.patterns[pattern].is_match(text))
     }
 
+    /// 使用独立工作量预算校验根 Schema；将普通不匹配转换为错误文本。
     fn validate(&self, value: &Value) -> Result<(), String> {
         let mut work = MAX_WORK;
         match self.check(self.root, value, "$", 0, &mut work)? {
@@ -393,7 +441,11 @@ impl<'a> Engine<'a> {
         }
     }
 
-    // 外层 Err 表示资源超限，不能被组合分支吞掉；内层 Some 表示普通不匹配。
+    /// 递归执行单个 Schema 节点的校验。
+    ///
+    /// `Ok(None)` 表示匹配，`Ok(Some(...))` 表示普通不匹配；`Err` 专用于无效
+    /// Schema、深度或工作量超限。组合分支会继续检查各分支，但任何 `Err` 都会
+    /// 立即传播，不能因另一个分支匹配而被掩盖。`path` 使用 JSON Pointer 风格路径。
     fn check(
         &self,
         schema: &Value,
@@ -570,6 +622,7 @@ impl<'a> Engine<'a> {
     }
 }
 
+/// 比较 JSON 数字；两个整数优先按整数精度比较，避免直接转浮点数丢失精度。
 fn number_cmp(a: &serde_json::Number, b: &serde_json::Number) -> std::cmp::Ordering {
     let integer = |n: &serde_json::Number| {
         n.as_i64()
@@ -593,6 +646,7 @@ fn number_cmp(a: &serde_json::Number, b: &serde_json::Number) -> std::cmp::Order
     }
 }
 
+/// 按 JSON 值语义递归比较常量/枚举值，并为遍历消耗共享工作量预算。
 fn equal(a: &Value, b: &Value, work: &mut usize) -> Result<bool, String> {
     spend(work, 1)?;
     Ok(match (a, b) {

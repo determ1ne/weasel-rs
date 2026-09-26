@@ -1,5 +1,9 @@
 // Generated from themes/wasm/abi.json. DO NOT EDIT.
 #![allow(dead_code)]
+//! 与宿主 ABI 对齐的版本号、字段编号和语义枚举。
+//!
+//! 这些枚举的 `repr(i32)` 数值属于 ABI 合约；主题应使用变体而非自行假定编号。
+/// 当前主题 ABI 版本；导出 `theme_abi_version` 时返回此值。
 pub const ABI_VERSION: i32 = 2;
 /// 只读快照整数属性。ItemEnabled使用候选index，其余index必须为0。AsciiMode/TotalItemCount的-1表示未知。
 #[repr(i32)]

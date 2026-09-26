@@ -1,4 +1,7 @@
-//! Engine state and sessions are confined to the worker OS thread.
+//! 管理输入会话、Rime 调用与渲染状态，并在工作线程中串行处理它们。
+//!
+//! 会话及其原生 Rime 资源只由引擎工作线程访问；来自客户端和渲染器的事件都先进入
+//! 工作队列，再由该线程完成状态变更。引擎据上下文令牌和修订号拒绝过期输入与界面事件。
 use crate::client_connection::ClientConnection;
 use crate::{
     librime,
@@ -21,48 +24,83 @@ use weasel_common::{
     process::RuntimePaths,
 };
 
+/// 引擎工作队列的有界容量，用于限制待处理事件占用的内存。
 pub(crate) const QUEUE_CAPACITY: usize = 128;
 
+/// 工作线程可处理的消息类型。
 pub(crate) enum Work {
+    /// 客户端请求及其连接存活标记；请求租约在处理完成前阻止连接被回收。
     Message {
+        /// 连接的服务端身份。
         client_id: u64,
+        /// 承载请求和响应的连接。
         connection: Arc<ClientConnection>,
+        /// 连接关闭时变为 `false`，用于丢弃已排队但尚未执行的请求。
         alive: Arc<AtomicBool>,
+        /// 解码后的 RPC 信封。
         envelope: Envelope,
+        /// 请求处理期间持有的租约；处理后才释放连接回收保护。
         _request: weasel_common::rpc::RequestLease,
     },
+    /// 渲染器发来的候选项或其他界面操作。
     Renderer(RendererEvent),
 }
 
+/// 某条输入连接在引擎中的原生会话及其路由、渲染快照。
 struct ClientSession {
+    /// 是否由渲染器显示预编辑文本，而非写入宿主输入框。
     inline_preedit: bool,
+    /// 所属客户端连接的身份。
     connection_id: u64,
+    /// 响应和布局更新所使用的连接。
     connection: Arc<ClientConnection>,
+    /// 连接存活标记；关闭后会话在引擎空闲处理时回收。
     alive: Arc<AtomicBool>,
+    /// 仅在引擎工作线程上调用的 Rime 会话。
     session: librime::RimeSession,
+    /// 会话状态版本；状态变化时递增，用于拒绝过期渲染操作。
     revision: u64,
+    /// 绑定输入上下文令牌并跟踪焦点状态的路由。
     route: session_route::SessionRoute,
+    /// 最近一次匹配当前输入上下文的宿主光标矩形。
     anchor: RenderRect,
+    /// 新组合文本等待宿主布局确认的最低修订号。
     waiting_for_layout: Option<u64>,
+    /// 已接受的最新布局修订号，阻止旧几何覆盖新几何。
     latest_layout_revision: Option<u64>,
+    /// 用于增量更新及连接能力切换的最近一次输入状态响应。
     last_response: KeyEventResponse,
 }
 
+/// 运行 Rime 输入会话并协调客户端、宿主布局与渲染器。
+///
+/// 所有实例状态（包括原生会话）由工作线程独占访问；`clients` 先于 `rime` 声明，
+/// 以保证会话在 Rime 引擎析构前销毁。数据目录锁还必须存活到 Rime 的终结回调结束。
 pub(crate) struct Engine {
     // None 保留每应用行为；Some 为服务生命周期内的共享模式。
+    /// `Some` 表示服务内共享的 ASCII 状态；`None` 表示各应用独立处理。
     global_ascii: Option<bool>,
+    /// 是否允许在安全输入框中使用 Rime，由配置快照初始化。
     allow_rime_in_secure_fields: bool,
+    /// 可选配置快照；缺省时使用每应用默认行为。
     settings: Option<weasel_common::settings::ConfigSnapshot>,
     // Field order is intentional: destroy every session before dropping the engine.
+    /// 以引擎内单调递增的会话标识索引活动输入会话。
     clients: HashMap<u64, ClientSession>,
+    /// 原生 Rime 所有者，必须晚于 `clients` 析构。
     rime: librime::Librime,
     // Must outlive the Rime owner, including its finalize callback.
+    /// 保持用户数据目录独占，生命周期覆盖 Rime 的初始化和终结。
     _data_lock: crate::data_lock::DataLock,
+    /// 当前向渲染器展示的会话标识。
     active_client: Option<u64>,
+    /// 向渲染线程发布快照及查询其预编辑文本能力。
     renderer: RendererPublisher,
+    /// 下一次分配的会话标识；溢出时拒绝继续分配并触发断言。
     next_session: u64,
 }
 
+/// 为宿主生成响应副本；外置预编辑时保留提交和组合状态，但清空宿主组合范围。
 fn host_response(mut response: KeyEventResponse) -> KeyEventResponse {
     if response.external_preedit {
         // Preserve composing/commit semantics while keeping the host range empty.
@@ -72,6 +110,9 @@ fn host_response(mut response: KeyEventResponse) -> KeyEventResponse {
     response
 }
 
+/// 新组合开始且 Rime 状态确实改变时，使旧光标锚点失效。
+///
+/// 返回 `true` 表示调用方必须等待本次组合对应的布局，避免用旧位置展示新候选项。
 fn reset_anchor_for_new_composition(
     previous: &KeyEventResponse,
     next: &KeyEventResponse,
@@ -84,6 +125,9 @@ fn reset_anchor_for_new_composition(
     false
 }
 
+/// 判断布局更新能否满足当前等待条件且不会回退已接受的布局版本。
+///
+/// 未携带修订号的旧版 TIP 保持令牌匹配语义；携带修订号时，两项最低版本约束都必须满足。
 fn layout_matches_pending(
     revision: Option<u64>,
     waiting_for_layout: Option<u64>,
@@ -171,6 +215,9 @@ mod preedit_tests {
     }
 }
 
+/// 将按键响应写回客户端，并附带服务端安全输入策略。
+///
+/// 队列已关闭等发送错误只记调试日志，不回滚已经完成的引擎状态变更。
 fn reply(
     connection: &ClientConnection,
     request_id: u64,
@@ -186,6 +233,7 @@ fn reply(
     }
 }
 
+/// 将协议失败写入连接的发送队列；发送失败不影响引擎状态。
 fn failure(connection: &ClientConnection, request_id: u64, code: FailureCode, message: &str) {
     let _ = connection.enqueue(Envelope {
         request_id,
@@ -196,13 +244,30 @@ fn failure(connection: &ClientConnection, request_id: u64, code: FailureCode, me
     });
 }
 
+/// 输入上下文令牌必须包含非零上下文、连接代次和上下文代次。
 fn valid_token(token: Option<&ContextToken>) -> bool {
     token.is_some_and(|token| {
         token.context_id != 0 && token.connection_epoch != 0 && token.generation != 0
     })
 }
 
+/// 读取 server 使用的布尔配置；快照异常时记录错误并采用调用方给出的安全默认值。
+fn bool_setting_or(
+    settings: &weasel_common::settings::ConfigSnapshot,
+    path: &str,
+    fallback: bool,
+) -> bool {
+    settings.required::<bool>(path).unwrap_or_else(|error| {
+        tracing::error!(%error, path, fallback, "invalid server setting; using fallback");
+        fallback
+    })
+}
+
 impl Engine {
+    /// 锁定用户数据目录、初始化日志与 Rime，并读取服务级配置。
+    ///
+    /// 初始化或必需配置读取失败时返回错误；调用者应在专用工作线程中构造实例，
+    /// 使后续原生 Rime 操作与初始化处于同一线程。
     pub fn new(
         paths: RuntimePaths,
         renderer: RendererPublisher,
@@ -213,13 +278,13 @@ impl Engine {
         let rime = librime::Librime::load(&paths.executable_directory, &paths.user_data)?;
         tracing::info!("librime initialized on engine thread");
         let (global_ascii, allow_rime_in_secure_fields) = match settings.as_ref() {
-            Some(settings) => (
-                settings
-                    .required::<bool>(".global_ascii_status")?
-                    .then(|| settings.required::<bool>(".ascii_mode"))
-                    .transpose()?,
-                settings.required::<bool>(".allow_rime_in_secure_fields")?,
-            ),
+            Some(settings) => {
+                let global_ascii = bool_setting_or(settings, ".global_ascii_status", false)
+                    .then(|| bool_setting_or(settings, ".ascii_mode", false));
+                let allow_rime_in_secure_fields =
+                    bool_setting_or(settings, ".allow_rime_in_secure_fields", false);
+                (global_ascii, allow_rime_in_secure_fields)
+            }
             None => (None, false),
         };
         Ok(Self {
@@ -235,6 +300,10 @@ impl Engine {
         })
     }
 
+    /// 校验并处理一个客户端信封，必要时创建、路由或销毁输入会话。
+    ///
+    /// 过期连接、缺失或无效令牌、未打开的上下文以及跨上下文操作均以协议失败拒绝。
+    /// 成功处理会更新会话修订号，并分别向客户端和渲染器发布结果；原生会话操作不得并发。
     fn message(
         &mut self,
         client_id: u64,
@@ -701,6 +770,9 @@ impl Engine {
         }
     }
 
+    /// 仅将匹配当前活动会话令牌和修订号的渲染器操作交给 Rime。
+    ///
+    /// 断开连接、失焦或版本过期的事件会被忽略；有效操作递增会话修订号并发布新状态。
     fn renderer_event(&mut self, event: RendererEvent) {
         let Some(client) = self.clients.get_mut(&event.session_id) else {
             tracing::debug!(
@@ -734,6 +806,9 @@ impl Engine {
 }
 
 impl Processor<Work> for Engine {
+    /// 在工作线程串行分派客户端消息和渲染器事件。
+    ///
+    /// 消息处理后先重算连接的输入活跃度，再释放请求租约，以免回收器观察到过期状态。
     fn process(&mut self, work: Work) {
         match work {
             Work::Message {
@@ -752,6 +827,9 @@ impl Processor<Work> for Engine {
         }
     }
 
+    /// 处理能力变化、最新宿主布局和断连会话的清理。
+    ///
+    /// 每轮仅消费活动上下文的最新布局；版本不匹配的几何不会解除新组合的等待状态。
     fn idle(&mut self) {
         // Capability changes wake this worker. Restore inline text immediately
         // after a renderer disconnect; do not wait for the next keystroke.

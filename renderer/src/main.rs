@@ -1,34 +1,22 @@
-#![cfg_attr(windows, windows_subsystem = "windows")]
+//! Windows 渲染器程序入口：区分主题预览与实时呈现并启动相应服务。
+//!
+//! 进程实例按运行模式分别互斥。
+#![windows_subsystem = "windows"]
 
-#[cfg(windows)]
-use weasel_theme_support::appearance;
-#[cfg(windows)]
-mod backend;
-mod theme_dll;
-#[cfg(windows)]
-use weasel_theme_support::bindings;
-#[cfg(windows)]
-use weasel_theme_support::d2d_bindings;
-#[cfg(windows)]
+use weasel_theme_api as theme_api;
+use weasel_theme_support::{appearance, bindings, d2d_bindings, presentation};
+
 mod diagnostics;
-#[cfg(windows)]
 mod notifications;
-#[cfg(windows)]
-use weasel_theme_support::presentation;
-#[cfg(windows)]
 mod preview;
-#[cfg(windows)]
 mod preview_window;
-#[cfg(windows)]
 mod rpc;
 mod state;
-#[cfg(windows)]
 mod theme_adapter;
-use weasel_theme_api as theme_api;
-#[cfg(windows)]
+mod theme_dll;
 mod ui_runtime;
 
-#[cfg(windows)]
+/// 解析启动参数、取得模式专属进程实例并运行预览或实时渲染服务。
 fn main() {
     let preview = match weasel_common::service_owner::take_launch_args(std::env::args_os().skip(1))
         .map_err(|error| error.to_string())
@@ -64,9 +52,4 @@ fn main() {
         std::process::exit(1);
     }
     diagnostics::record(format_args!("stopped"));
-}
-
-#[cfg(not(windows))]
-fn main() {
-    eprintln!("weasel-renderer is supported on Windows only");
 }

@@ -1,5 +1,8 @@
-//! 实例私有资源。句柄单调分配、不复用；帧持有强引用，release 不会破坏已提交画面。
-//! 配额按资源实际存活时间计费，而非只数句柄表，防止 release 后用画面引用绕过限额。
+//! 管理单个主题实例创建的字体、文本布局和图像资源，并注册对应的 guest 导入函数。
+//!
+//! 句柄按实例单调递增且不复用。绘制命令持有资源的强引用，因此释放句柄只会阻止后续
+//! 查询和提交，不会使已经提交的帧失效；字节数和资源数配额则一直计到最后一个强引用
+//! 被丢弃，避免借助在途帧绕过限额。
 use crate::abi::{ErrorCode, ResourceMetric};
 use crate::{
     d2d_bindings::*,
@@ -18,33 +21,59 @@ use wasmtime::{Caller, Linker};
 use windows_core::Interface;
 use windows_strings::{HSTRING, w};
 
+/// ABI 返回码：调用参数或资源内容不合法。
 pub const INVALID_ARGUMENT: i32 = ErrorCode::InvalidArgument as i32;
+/// ABI 返回码：句柄不存在、已释放或资源类型不匹配。
 pub const INVALID_HANDLE: i32 = ErrorCode::InvalidHandle as i32;
+/// ABI 返回码：实例资源配额耗尽或句柄编号溢出。
 pub const RESOURCE_LIMIT: i32 = ErrorCode::ResourceLimit as i32;
+/// ABI 返回码：原生资源创建或内部操作失败。
 pub const INTERNAL_ERROR: i32 = ErrorCode::Internal as i32;
+/// 单个实例可同时持有的资源估算字节数上限。
 const MAX_BYTES: usize = 32 * 1024 * 1024;
+/// 单次编码图像输入的最大字节数。
 const MAX_ENCODED: usize = 8 * 1024 * 1024;
+/// 单个实例可同时持有的资源数量上限。
 const MAX_COUNT: usize = 512;
 
+/// 资源实际内容；变体决定该句柄可用于哪些查询和绘制操作。
 #[derive(Debug)]
 pub enum Kind {
+    /// DirectWrite 字体格式对象。
     Font(IDWriteTextFormat),
+    /// DirectWrite 文本布局及预先计算的宽、高和首行基线。
     Layout {
+        /// 原生布局对象，由拥有它的资源保持存活。
         layout: IDWriteTextLayout,
+        /// 依次为包含尾随空白的宽度、布局高度和首行基线，单位为 DIP。
         metrics: [f32; 3],
+        /// 创建此布局所用的字体；此强引用保证字体至少与布局同寿命。
         _font: Arc<Resource>,
     },
+    /// 解码后的 BGRA 预乘 Alpha 像素。
     Image {
+        /// 每像素四字节，顺序为 B、G、R、A，RGB 已按 Alpha 预乘。
         pixels: Vec<u8>,
+        /// 解码后的像素宽度。
         width: u32,
+        /// 解码后的像素高度。
         height: u32,
     },
 }
+/// 具备共享所有权的实例资源。
+///
+/// 资源由句柄表及已提交的绘制命令共同持有。最后一个 `Arc` 被释放时才返还记账配额。
+/// 相等性按对象身份判定。内部配额使用 `Rc<Cell<_>>`，因此资源属于实例所在的线程，
+/// 不可跨线程共享。
 #[derive(Debug)]
 pub struct Resource {
+    /// 此资源在所属实例中的句柄；句柄不会复用。
     pub id: i32,
+    /// 资源类型及其原生对象或像素数据。
     pub kind: Kind,
+    /// 该资源向实例字节配额计入的估算大小。
     bytes: usize,
+    /// 所属 `Resources` 的共享配额计数；资源释放时递减。
     budget: Rc<(Cell<usize>, Cell<usize>)>,
 }
 impl PartialEq for Resource {
@@ -53,20 +82,30 @@ impl PartialEq for Resource {
     }
 }
 impl Drop for Resource {
+    /// 最后一个所有者释放资源时返还字节数和资源数配额。
     fn drop(&mut self) {
         self.budget.0.set(self.budget.0.get() - self.bytes);
         self.budget.1.set(self.budget.1.get() - 1);
     }
 }
 #[derive(Default)]
+/// 单个主题实例的资源表、分配器和资源配额。
+///
+/// 状态由实例所属线程独占访问；配额计数不是原子操作，不能并发修改。
 pub struct Resources {
+    /// 当前可由 guest 句柄访问的资源；移除表项不会使其他强引用失效。
     table: HashMap<i32, Arc<Resource>>,
+    /// 最近分配的句柄编号；从零开始递增且溢出时拒绝分配。
     next: i32,
+    /// 所有存活资源共同更新的（字节数，资源数）计数。
     budget: Rc<(Cell<usize>, Cell<usize>)>,
+    /// 延迟创建并在本实例内复用的 DirectWrite 工厂。
     write: Option<IDWriteFactory>,
+    /// 只读资源文件的根目录；加载时仍会规范化并检查路径边界。
     pub asset_root: Option<PathBuf>,
 }
 impl Resources {
+    /// 获取共享 DirectWrite 工厂，首次调用时创建并缓存。
     fn factory(&mut self) -> Result<IDWriteFactory, i32> {
         if let Some(factory) = &self.write {
             return Ok(factory.clone());
@@ -76,6 +115,7 @@ impl Resources {
         self.write = Some(factory.clone());
         Ok(factory)
     }
+    /// 检查新增资源是否会突破存活资源的字节数或数量上限。
     fn capacity(&self, bytes: usize) -> Result<(), i32> {
         if bytes > MAX_BYTES.saturating_sub(self.budget.0.get()) || self.budget.1.get() >= MAX_COUNT
         {
@@ -84,6 +124,7 @@ impl Resources {
             Ok(())
         }
     }
+    /// 分配新句柄并记账；容量不足或句柄溢出时不插入资源。
     fn insert(&mut self, kind: Kind, bytes: usize) -> Result<i32, i32> {
         self.capacity(bytes)?;
         self.next = self.next.checked_add(1).ok_or(RESOURCE_LIMIT)?;
@@ -100,9 +141,14 @@ impl Resources {
         );
         Ok(self.next)
     }
+    /// 按句柄取得强引用；句柄已释放或不存在时返回 `INVALID_HANDLE`。
     pub fn get(&self, handle: i32) -> Result<Arc<Resource>, i32> {
         self.table.get(&handle).cloned().ok_or(INVALID_HANDLE)
     }
+    /// 创建无换行字体格式。
+    ///
+    /// 字体名、字号和字重先经过边界校验；输入不合法返回 `INVALID_ARGUMENT`，
+    /// DirectWrite 创建失败返回 `INTERNAL_ERROR`，配额不足返回 `RESOURCE_LIMIT`。
     pub(crate) fn font(&mut self, name: &str, size: f32, weight: i32) -> Result<i32, i32> {
         if name.is_empty()
             || name.len() > 512
@@ -130,6 +176,11 @@ impl Resources {
             .map_err(|_| INTERNAL_ERROR)?;
         self.insert(Kind::Font(format), 4096)
     }
+    /// 按已有字体和 guest 文本创建布局并缓存布局度量。
+    ///
+    /// 尺寸必须是有限且大于零的 DIP，换行标志只能为 0 或 1。字体句柄必须指向
+    /// `Font`；布局会强持有该字体。非法参数、句柄、配额和 DirectWrite 错误分别映射为
+    /// `INVALID_ARGUMENT`、`INVALID_HANDLE`、`RESOURCE_LIMIT` 和 `INTERNAL_ERROR`。
     pub(crate) fn layout(
         &mut self,
         font: i32,
@@ -196,6 +247,10 @@ impl Resources {
             charge,
         )
     }
+    /// 解码静态 PNG，并转换为 BGRA 预乘 Alpha 格式后记入资源表。
+    ///
+    /// 拒绝动画、零尺寸及超过边界的图像；编码/格式错误返回 `INVALID_ARGUMENT`，
+    /// 尺寸或配额超限返回 `RESOURCE_LIMIT`。
     pub(crate) fn image(&mut self, bytes: &[u8]) -> Result<i32, i32> {
         if bytes.len() > MAX_ENCODED {
             return Err(RESOURCE_LIMIT);
@@ -248,6 +303,11 @@ impl Resources {
             size,
         )
     }
+    /// 从实例资源根目录加载相对 PNG 路径。
+    ///
+    /// 仅接受以 `.png` 结尾且不含绝对路径、盘符、备用数据流或父目录段的名称；
+    /// 规范化后还必须位于资源根目录内。文件读取/根目录不可用使用内部哨兵错误，
+    /// 编码大小超限返回 `RESOURCE_LIMIT`，图像内容校验交由 [`Self::image`] 完成。
     fn load_image(&mut self, name: &str) -> Result<i32, i32> {
         // 仅允许 .wasm 同名 .assets 目录内的相对 PNG；拒绝绝对路径、ADS 和父目录。
         if name.is_empty()
@@ -282,6 +342,11 @@ impl Resources {
     }
 }
 
+/// 将资源创建、查询、绘制和释放操作绑定到主题 ABI 导入命名空间。
+///
+/// 用户输入及资源配额错误通过 ABI 返回码或 Wasmtime 错误传递；注册失败由调用方处理。
+/// 度量查询仅适用于布局和图像的支持字段；绘制会校验句柄类型及样式，释放只移除句柄表
+/// 中的所有权，已有帧仍可通过其强引用完成回放。
 pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
     linker.func_wrap(
         IMPORT_MODULE,

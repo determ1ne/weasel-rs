@@ -1,17 +1,22 @@
+//! 为 TSF 组合文本提供显示属性，并把该属性应用到宿主文本范围。
 use super::*;
 
 #[implement(ITfDisplayAttributeInfo)]
+/// 实现 TSF 的显示属性信息接口；该属性只读，描述当前输入组合。
 pub(super) struct DisplayAttributeInfo {
+    /// 保持模块加载，避免 COM 对象存活时卸载实现代码。
     _module: ModuleLease,
 }
 
 impl DisplayAttributeInfo {
+    /// 创建独立的 COM 显示属性对象。
     pub(super) fn new() -> Self {
         Self {
             _module: ModuleLease::new(),
         }
     }
 
+    /// 构造 TSF 使用的输入属性样式；颜色沿用宿主默认值并显示点状下划线。
     fn attribute() -> TF_DISPLAYATTRIBUTE {
         let default_color = || TF_DA_COLOR {
             r#type: TF_CT_NONE,
@@ -29,16 +34,19 @@ impl DisplayAttributeInfo {
 }
 
 impl ITfDisplayAttributeInfo_Impl for DisplayAttributeInfo_Impl {
+    /// 返回此属性在服务注册时使用的稳定 GUID。
     fn GetGUID(&self) -> Result<GUID> {
         boundary::guard(None, || Ok(GUID_WEASEL_DISPLAY_ATTRIBUTE))
     }
 
+    /// 返回供 TSF 属性 UI 使用的说明文本。
     fn GetDescription(&self) -> Result<windows_core::BSTR> {
         boundary::guard(None, || {
             Ok(windows_core::BSTR::from("weasel-rs composition input"))
         })
     }
 
+    /// 将属性值写入 TSF 提供的输出指针；空指针作为 COM 参数错误返回。
     fn GetAttributeInfo(&self, pda: *mut TF_DISPLAYATTRIBUTE) -> Result<()> {
         boundary::guard(None, || {
             if pda.is_null() {
@@ -51,22 +59,28 @@ impl ITfDisplayAttributeInfo_Impl for DisplayAttributeInfo_Impl {
         })
     }
 
+    /// 属性由服务固定定义，不接受 TSF 对其进行修改。
     fn SetAttributeInfo(&self, _pda: *const TF_DISPLAYATTRIBUTE) -> Result<()> {
         boundary::guard(None, || not_implemented())
     }
 
+    /// 固定属性没有可重置的用户配置。
     fn Reset(&self) -> Result<()> {
         boundary::guard(None, || not_implemented())
     }
 }
 
 #[implement(IEnumTfDisplayAttributeInfo)]
+/// 枚举本服务唯一的输入显示属性，游标可原子地供 COM 调用访问。
 pub(super) struct DisplayAttributeEnumerator {
+    /// `0` 表示尚未返回属性，`1` 表示已耗尽。
     index: AtomicU32,
+    /// 枚举器存活期间保持实现模块加载。
     _module: ModuleLease,
 }
 
 impl DisplayAttributeEnumerator {
+    /// 创建位于首项之前的枚举器。
     pub(super) fn new() -> Self {
         Self {
             index: AtomicU32::new(0),
@@ -76,6 +90,7 @@ impl DisplayAttributeEnumerator {
 }
 
 impl IEnumTfDisplayAttributeInfo_Impl for DisplayAttributeEnumerator_Impl {
+    /// 克隆当前游标位置；克隆后的枚举器独立推进。
     fn Clone(&self) -> Result<IEnumTfDisplayAttributeInfo> {
         boundary::guard(None, || {
             Ok(DisplayAttributeEnumerator {
@@ -86,6 +101,7 @@ impl IEnumTfDisplayAttributeInfo_Impl for DisplayAttributeEnumerator_Impl {
         })
     }
 
+    /// 按 COM 枚举约定返回至多一个属性；不足请求数量时以 `S_FALSE` 表示。
     fn Next(
         &self,
         ulcount: u32,
@@ -120,13 +136,12 @@ impl IEnumTfDisplayAttributeInfo_Impl for DisplayAttributeEnumerator_Impl {
                 }
             }
 
-            // IEnumTfDisplayAttributeInfo has only one input attribute.  A
-            // partial or exhausted enumeration is reported as S_FALSE, matching
-            // the Weasel and Mozc implementations.
+            // 此枚举器只有一个输入属性；部分满足或已耗尽均以 S_FALSE 返回。
             Err(Error::from_hresult(S_FALSE))
         })
     }
 
+    /// 将游标恢复到唯一属性之前。
     fn Reset(&self) -> Result<()> {
         boundary::guard(None, || {
             self.index.store(0, Ordering::Release);
@@ -134,6 +149,7 @@ impl IEnumTfDisplayAttributeInfo_Impl for DisplayAttributeEnumerator_Impl {
         })
     }
 
+    /// 跳过任意正数项都会耗尽这个单项枚举器。
     fn Skip(&self, ulcount: u32) -> Result<()> {
         boundary::guard(None, || {
             if ulcount != 0 {
@@ -145,6 +161,7 @@ impl IEnumTfDisplayAttributeInfo_Impl for DisplayAttributeEnumerator_Impl {
 }
 
 impl TextService {
+    /// 向 TSF 注册显示属性 GUID；注册失败只记录诊断，不阻断服务激活。
     pub(super) fn register_display_attribute(&self) -> Result<()> {
         let category_mgr = match unsafe {
             bindings::CoCreateInstance::<_, ITfCategoryMgr>(
@@ -177,6 +194,9 @@ impl TextService {
         Ok(())
     }
 
+    /// 在有效编辑会话中把已注册属性写入指定范围。
+    ///
+    /// `ec` 必须由当前 TSF 编辑会话提供；TSF 属性调用失败会记录并原样返回错误。
     pub(super) fn set_display_attribute(
         &self,
         context: &ITfContext,
@@ -222,6 +242,7 @@ impl TextService {
         }
     }
 
+    /// 清除范围上的显示属性，调用方必须传入当前编辑会话的 cookie。
     pub(super) fn clear_display_attribute(
         &self,
         context: &ITfContext,
@@ -252,6 +273,7 @@ impl TextService {
         }
     }
 
+    /// 尽力设置显示属性；显示效果失败不会改变文本编辑流程的结果。
     pub(super) fn set_display_attribute_best_effort(
         &self,
         context: &ITfContext,
@@ -261,6 +283,7 @@ impl TextService {
         let _ = self.set_display_attribute(context, ec, range);
     }
 
+    /// 尽力清除显示属性；清理失败由底层记录，不向调用方传播。
     pub(super) fn clear_display_attribute_best_effort(
         &self,
         context: &ITfContext,

@@ -1,53 +1,136 @@
-//! Bounded UI worker lifecycle and toolkit-independent snapshot dispatch.
+//! 管理主题 UI 工作线程，并把有界、可合并的快照更新分发给主题后端。
+
 #![allow(unsafe_op_in_unsafe_fn)]
 use crate::{
-    backend::theme_candidates,
     bindings::Windows::Win32::*,
     state::{Mailbox, Owner},
     theme_api::{ThemeBackend, ThemeFactory, UiMode},
 };
 use std::{
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex, OnceLock, mpsc},
     thread,
     time::Duration,
 };
-use weasel_common::message::{RenderSnapshot, RendererEvent};
+use weasel_common::{
+    comrt::WinRtApartment,
+    message::{RenderSnapshot, RendererEvent},
+};
 
 const WM_RENDERER_UPDATE: u32 = WM_APP as u32 + 10;
 const WM_RENDERER_QUIT: u32 = WM_APP as u32 + 11;
 const WM_RENDERER_THEME: u32 = WM_APP as u32 + 12;
 
+/// 加载首选主题及 ten 回退主题的可用工厂。
+///
+/// DLL 只从 renderer 所在目录的 `themes` 子目录加载；成功或失败结果均缓存到进程退出。
+fn theme_candidates(preferred: &str) -> Vec<&'static dyn ThemeFactory> {
+    static ELEVEN: OnceLock<Result<crate::theme_dll::Factory, String>> = OnceLock::new();
+    static TEN: OnceLock<Result<crate::theme_dll::Factory, String>> = OnceLock::new();
+    static ABC: OnceLock<Result<crate::theme_dll::Factory, String>> = OnceLock::new();
+    static VOID: OnceLock<Result<crate::theme_dll::Factory, String>> = OnceLock::new();
+    static WASM: OnceLock<Result<crate::theme_dll::Factory, String>> = OnceLock::new();
+    let preferred = match preferred {
+        "eleven" => "eleven",
+        "ten" => "ten",
+        "abc" => "abc",
+        "void" => "void",
+        "wasm" => "wasm",
+        _ => "ten",
+    };
+    std::iter::once(preferred)
+        .chain((preferred != "ten").then_some("ten"))
+        .filter_map(|name| {
+            let slot = match name {
+                "eleven" => &ELEVEN,
+                "ten" => &TEN,
+                "abc" => &ABC,
+                "void" => &VOID,
+                "wasm" => &WASM,
+                _ => unreachable!("candidate names are normalized above"),
+            };
+            let loaded = slot.get_or_init(|| {
+                let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+                let directory = executable
+                    .parent()
+                    .ok_or("renderer has no executable directory")?;
+                let path = directory
+                    .join("themes")
+                    .join(format!("weasel_theme_{name}.dll"));
+                crate::theme_dll::Factory::load(name, &path)
+            });
+            match loaded {
+                Ok(factory) => Some(factory as &'static dyn ThemeFactory),
+                Err(error) => {
+                    crate::notifications::theme_unavailable(name, error);
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// 判断消息是否为发给线程队列的运行时控制消息，而不是窗口过程消息。
 fn is_thread_message(message: &MSG, kind: u32) -> bool {
     message.hwnd.0.is_null() && message.message == kind
 }
 
+/// 控制 UI 工作线程的命令。
+///
+/// 渲染快照和断开操作带有来源所有者；邮箱会拒绝过期所有者的更新。`Quit`
+/// 关闭邮箱并请求线程退出。
 pub enum UiCommand {
+    /// 用该所有者的最新快照更新候选窗。
     Render(Owner, RenderSnapshot),
+    /// 清除指定所有者当前的候选窗状态。
     Disconnect(Owner),
+    /// 丢弃待处理快照并请求 UI 线程退出。
     Quit,
 }
 
+/// 可从非 UI 线程发送命令的轻量句柄。
+///
+/// 邮箱受互斥锁保护；渲染更新会合并为最新待处理快照，并通过线程消息唤醒
+/// UI 循环。句柄不拥有工作线程，因此可安全克隆供多个发送方使用。
 #[derive(Clone)]
 pub struct UiCommandSender {
+    /// 线程间共享的有界状态邮箱。
     mailbox: Arc<Mutex<Mailbox>>,
+    /// 接收线程消息的 UI 工作线程 ID。
     thread_id: u32,
 }
 
+/// 已启动的主题 UI 及其通信端点。
+///
+/// 丢弃句柄会尝试关闭线程；显式调用 [`UiHandle::close`] 可取得超时或线程
+/// 错误。事件接收端和完成通知分别用于处理主题动作及观察工作线程结束状态。
 pub struct UiHandle {
+    /// 所选主题向运行时声明的能力。
     pub capabilities: crate::theme_api::ThemeCapabilities,
+    /// 实际启动的主题名称，可能是回退后选中的主题。
     pub theme: &'static str,
+    /// 向该实例的 UI 线程发送命令的共享句柄。
     commands: UiCommandSender,
+    /// 主题产生的事件；队列容量固定，拥塞时主题动作可能被丢弃。
     pub events: tokio::sync::mpsc::Receiver<(Owner, RendererEvent)>,
+    /// UI 工作线程结束时发送的结果。
     pub finished: tokio::sync::oneshot::Receiver<Result<(), String>>,
+    /// 唯一拥有 UI 工作线程 join 句柄的一方。
     thread: Option<thread::JoinHandle<()>>,
 }
 
+/// 为主题回调绑定当前所有者，并将事件送回运行时。
 #[derive(Clone)]
 struct EventSender {
+    /// 回调所属的渲染所有者，用于拒绝过期事件。
     pub owner: Owner,
+    /// 有界事件队列的发送端。
     sender: tokio::sync::mpsc::Sender<(Owner, RendererEvent)>,
 }
 
+/// 在给定期限内等待 UI 线程结束，再回收其 join 句柄。
+///
+/// 超时不会强制中断线程，因为线程可能仍持有只能在原 apartment 销毁的资源；
+/// 调用方必须将此类失败视为当前进程无法安全继续切换后端。
 fn join_ui_thread(thread: thread::JoinHandle<()>, timeout: Duration) -> Result<(), String> {
     use std::os::windows::io::AsRawHandle;
     let status = unsafe {
@@ -62,11 +145,15 @@ fn join_ui_thread(thread: thread::JoinHandle<()>, timeout: Duration) -> Result<(
     thread.join().map_err(|_| "UI thread panicked".to_owned())
 }
 
+/// 区分可尝试下一个主题的初始化失败和必须终止启动的运行时故障。
 enum AttemptError {
+    /// 当前主题已完成清理，可安全继续回退。
     Failed(String),
+    /// 线程可能仍运行或运行时已不可用，继续启动另一后端不安全。
     Fatal(String),
 }
 
+/// 按注册顺序尝试主题；普通失败会记录并继续，致命失败立即终止。
 fn select_first<T>(
     candidates: &[&'static dyn ThemeFactory],
     mut attempt: impl FnMut(&'static dyn ThemeFactory) -> Result<T, AttemptError>,
@@ -93,18 +180,75 @@ fn select_first<T>(
     ))
 }
 
+/// 校验 renderer 自己消费的全局字段，并逐项恢复内置默认值。
+///
+/// broker 只负责合并 JSON；主题专属字段仍交给主题解析器。这里仅处理会在主题创建
+/// 前影响所有后端的字段，避免一个错误类型让所有候选主题同时启动失败。
+fn normalized_renderer_settings(
+    config: &weasel_common::settings::ConfigSnapshot,
+) -> weasel_common::settings::ConfigSnapshot {
+    let Some(mut root) = config.query(".").ok().flatten().cloned() else {
+        return config.clone();
+    };
+    let defaults: serde_json::Value = serde_json::from_str(include_str!("../../weasel.json"))
+        .expect("embedded settings must be valid JSON");
+    let Some(root_object) = root.as_object_mut() else {
+        return weasel_common::settings::ConfigSnapshot::new(defaults);
+    };
+    let defaults = defaults
+        .as_object()
+        .expect("embedded settings root must be an object");
+    let mut warnings = Vec::new();
+    let checks = [
+        (
+            "inline_preedit",
+            root_object
+                .get("inline_preedit")
+                .is_some_and(serde_json::Value::is_boolean),
+        ),
+        (
+            "themeSettings",
+            root_object
+                .get("themeSettings")
+                .is_some_and(serde_json::Value::is_object),
+        ),
+    ];
+    for (name, valid) in checks {
+        if !valid {
+            root_object.insert(
+                name.into(),
+                defaults
+                    .get(name)
+                    .expect("embedded renderer setting must exist")
+                    .clone(),
+            );
+            warnings.push(format!("{name} has an invalid type"));
+        }
+    }
+    if !warnings.is_empty() {
+        crate::notifications::invalid_configuration(&warnings.join("; "));
+    }
+    weasel_common::settings::ConfigSnapshot::new(root)
+}
+
 impl UiHandle {
+    /// 启动首个可用主题，并在初始化失败时按候选顺序回退。
+    ///
+    /// 每次尝试最多等待启动握手十秒。只有确认失败线程已完成清理后才会
+    /// 尝试下一主题；等待超时视为致命错误，以免两个原生后端并行存活。
     pub fn start(
         theme: &str,
         mode: UiMode,
         config: &weasel_common::settings::ConfigSnapshot,
     ) -> Result<Self, String> {
+        let config = normalized_renderer_settings(config);
         let candidates: Vec<_> = theme_candidates(theme).into_iter().collect();
         select_first(&candidates, |registration| {
-            Self::start_attempt(registration, mode, config)
+            Self::start_attempt(registration, mode, &config)
         })
     }
 
+    /// 在独立 UI 线程启动单个主题，并等待其完成初始化握手。
     fn start_attempt(
         registration: &'static dyn ThemeFactory,
         mode: UiMode,
@@ -172,10 +316,15 @@ impl UiHandle {
         })
     }
 
+    /// 克隆可跨线程使用的命令发送端。
     pub fn command_sender(&self) -> UiCommandSender {
         self.commands.clone()
     }
 
+    /// 请求线程退出，并最多等待两秒。
+    ///
+    /// 成功关闭后再次调用是无操作。若线程超时或其完成结果为错误，返回错误；
+    /// 超时不会中断仍在运行的 UI 线程。
     pub fn close(&mut self) -> Result<(), String> {
         if let Some(worker) = self.thread.take() {
             let wake = self.commands.send(UiCommand::Quit);
@@ -190,6 +339,7 @@ impl UiHandle {
 }
 
 impl Drop for UiHandle {
+    /// 尽力关闭 UI 线程；析构路径无法向调用方报告关闭错误。
     fn drop(&mut self) {
         let _ = self.close();
     }
@@ -204,6 +354,11 @@ impl UiCommandSender {
         }
     }
 
+    /// 校验并提交命令，必要时向 UI 线程投递一次唤醒消息。
+    ///
+    /// 多个待处理渲染更新会折叠为最新状态，因此消息数量不随生产速度增长。
+    /// 邮箱锁覆盖状态变更和唤醒投递；UI 线程取出状态后会先释放该锁再调用后端。
+    /// 无效快照、锁中毒或唤醒失败会返回错误；对过期所有者的命令则安全忽略。
     pub fn send(&self, command: UiCommand) -> Result<(), String> {
         let mut mailbox = self
             .mailbox
@@ -241,6 +396,7 @@ impl UiCommandSender {
         Ok(())
     }
 
+    /// 检查给定所有者是否仍是邮箱中的活动所有者。
     pub fn is_owner(&self, owner: Owner) -> bool {
         self.mailbox
             .lock()
@@ -248,33 +404,36 @@ impl UiCommandSender {
     }
 }
 
-struct Apartment;
-impl Drop for Apartment {
-    fn drop(&mut self) {
-        unsafe {
-            RoUninitialize();
-        }
-    }
-}
-
 struct Presentation {
+    /// 用于主题通知和诊断的注册名称。
     theme_name: &'static str,
+    /// 控制主题是否支持驻留或内嵌预编辑等行为。
     capabilities: crate::theme_api::ThemeCapabilities,
+    /// 仅由创建它的 UI 线程调用和销毁的主题后端。
     backend: Box<dyn ThemeBackend>,
+    /// 将主题动作绑定到当前所有者后转发给运行时。
     events: EventSender,
+    /// 最近一次输入快照；用于内容比较以及外观变化后的重新渲染。
     last: Option<RenderSnapshot>,
+    /// 主题事件携带的内容代号；内容改变时递增以使旧回调失效。
     content_id: u64,
 }
 
 impl Presentation {
+    /// 判断候选视图是否应显示，或因主题支持驻留且输入活动而保留。
     fn should_render(&self, view: &crate::theme_api::CandidateView) -> bool {
         crate::presentation::is_visible(view) || (self.capabilities.resident && view.active)
     }
 
+    /// 隐藏后端并立即取出、报告它产生的通知。
     fn hide(&mut self) {
         self.backend.hide();
         crate::notifications::drain(self.theme_name, self.backend.as_mut());
     }
+    /// 应用某个所有者的新快照；所有者切换会先隐藏旧内容并清空旧快照。
+    ///
+    /// 内容未变时保留 `content_id`，仅几何变化不使回调身份失效；内容变化时
+    /// 递增代号。不可见或无效锚点由可见性策略拦截，后端错误会在通知排空后返回。
     fn apply(&mut self, owner: Owner, snapshot: Option<RenderSnapshot>) -> Result<(), String> {
         if self.events.owner != owner {
             self.hide();
@@ -315,6 +474,10 @@ impl Presentation {
         Ok(())
     }
 
+    /// 刷新主题外观，并仅在邮箱所有者仍匹配时重绘最近快照。
+    ///
+    /// 所有者已切换或断开时，不把旧输入重新显示出来；后端每次调用后都会排空
+    /// 通知，即使该调用返回错误也是如此。
     fn refresh(&mut self, current_owner: Option<Owner>) -> Result<(), String> {
         {
             let result = self.backend.refresh_appearance();
@@ -342,6 +505,7 @@ impl Presentation {
     }
 }
 
+/// 在专属 STA 线程上创建主题并运行 Win32 消息循环。
 fn run_ui(
     registration: &'static dyn ThemeFactory,
     mode: UiMode,
@@ -351,10 +515,7 @@ fn run_ui(
     ready: &mpsc::SyncSender<Result<u32, String>>,
 ) -> Result<(), String> {
     unsafe {
-        RoInitialize(RO_INIT_SINGLETHREADED)
-            .ok()
-            .map_err(|e| e.to_string())?;
-        let _apartment = Apartment;
+        let _apartment = WinRtApartment::initialize_sta().map_err(|e| e.to_string())?;
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let config =
             config.with_theme_defaults(registration.name(), registration.default_settings()?)?;

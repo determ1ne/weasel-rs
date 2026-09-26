@@ -1,6 +1,7 @@
-//! UI-thread GPU presentation. Window dimensions are pixels; panel dimensions are DIPs.
-//! The returned render target is valid only until `end_draw`; do not call its
-//! BeginDraw/EndDraw or replace its atlas-offset transform.
+//! 在 UI 线程上创建并维护 Windows Composition 与 D2D 呈现资源。
+//! 窗口尺寸以物理像素计，面板尺寸和图层几何以 DIP 计，并按 DPI 转换。
+//! [`Presenter::begin_draw`] 返回的目标只在配对的 [`Presenter::end_draw`] 前有效；
+//! 调用方不得自行调用目标的 BeginDraw/EndDraw，也不得覆盖表面提供的图集偏移变换。
 use crate::d2d_bindings::{Windows, *};
 use crate::layers::{LayerMotion, LayerOperation, LayerProperty, LayerScene};
 use Windows::Foundation::Size;
@@ -12,22 +13,37 @@ use Windows::UI::Composition::{
 };
 use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 use std::{collections::HashMap, time::Instant};
+use weasel_common::comrt::WinRtApartment;
 use windows_core::{Interface, Result};
 use windows_numerics::{Matrix3x2, Vector2, Vector3};
 
 #[derive(Clone)]
+/// 一层装饰内容对应的原生视觉、绘图表面及可复用状态快照。
+///
+/// 克隆会增加底层 COM 对象引用；缓存只在成功提交整场景后替换。`generation`
+/// 标识层实例，换代时必须重新关联子视觉并停止旧实例动画。
 struct Decoration {
+    /// 层实例代数；同 ID 但代数不同表示销毁后重建。
     generation: u64,
+    /// 显示层位图的 SpriteVisual，可独立应用偏移、缩放、透明度动画。
     visual: SpriteVisual,
+    /// 承载子视觉和静态裁剪的父容器，裁剪不随子视觉变换。
     container: ContainerVisual,
+    /// 相对装饰根节点、以 DIP 表示的可选裁剪区域。
     clip: Option<crate::protocol::Rect>,
+    /// 子视觉显示的 Composition 绘图表面。
     surface: CompositionDrawingSurface,
+    /// 生成当前表面的命令快照，用于判断是否需要重绘。
     commands: Vec<crate::protocol::DrawCommand>,
+    /// 表面逻辑尺寸，单位为 DIP。
     size: (f32, f32),
+    /// 创建当前表面时使用的 DPI；变化时需重新绘制并更新裁剪。
     dpi: u32,
+    /// 每个视觉属性最近提交的运动描述，用于识别重复命令并延续动画。
     motions: HashMap<LayerProperty, LayerMotion>,
 }
 
+/// 将协议层属性映射为 Composition 可寻址的动画属性名。
 fn property_name(property: LayerProperty) -> windows_core::HSTRING {
     match property {
         LayerProperty::Opacity => "Opacity",
@@ -39,6 +55,10 @@ fn property_name(property: LayerProperty) -> windows_core::HSTRING {
     .into()
 }
 
+/// 停止指定属性上的动画，并设置它的静态值。
+///
+/// 对 Offset 和 Scale 只写入一个轴，以免覆盖另一轴正在运行的动画；Composition
+/// 错误直接返回。
 fn set_value(visual: &SpriteVisual, property: LayerProperty, value: f32) -> Result<()> {
     visual.StopAnimation(&property_name(property))?;
     match property {
@@ -48,8 +68,10 @@ fn set_value(visual: &SpriteVisual, property: LayerProperty, value: f32) -> Resu
     }
 }
 
-// 写回整个 Offset/Scale 会同时触碰其他轴，且 getter 不是动画的实时采样值。
-// 用常量表达式只设置指定子属性，保留另一轴的动画；没有逐帧 WASM 回调。
+/// 通过常量表达式仅设置 Offset 或 Scale 的一个轴。
+///
+/// 不读写整个向量：getter 不提供动画的实时采样值，而整向量写入会干扰另一轴的
+/// 动画。表达式由原生 compositor 求值，不需要逐帧回调 WASM。
 fn set_axis(visual: &SpriteVisual, property: LayerProperty, value: f32) -> Result<()> {
     let expression = visual
         .Compositor()?
@@ -58,28 +80,15 @@ fn set_axis(visual: &SpriteVisual, property: LayerProperty, value: f32) -> Resul
     visual.StartAnimation(&property_name(property), &expression)
 }
 
-struct Apartment(PhantomData<Rc<()>>);
-impl Apartment {
-    fn new() -> Result<Self> {
-        // S_FALSE also increments the apartment's initialization count.
-        unsafe {
-            RoInitialize(RO_INIT_SINGLETHREADED).ok()?;
-        }
-        Ok(Self(PhantomData))
-    }
-}
-impl Drop for Apartment {
-    fn drop(&mut self) {
-        unsafe {
-            RoUninitialize();
-        }
-    }
-}
-
+/// 本模块创建的 DispatcherQueue 及其线程 apartment 所有权。
+///
+/// 若线程已有队列则不会构造此对象，也不会关闭外部队列。字段顺序保证控制器先
+/// 释放，随后释放 apartment 令牌。
 struct OwnedQueue {
+    /// 队列控制器；析构时请求异步关闭本模块拥有的队列。
     controller: DispatcherQueueController,
     // Released after the controller, including on thread teardown.
-    _apartment: Apartment,
+    _apartment: WinRtApartment,
 }
 impl Drop for OwnedQueue {
     fn drop(&mut self) {
@@ -95,11 +104,15 @@ thread_local! {
     static QUEUE: RefCell<Option<OwnedQueue>> = const { RefCell::new(None) };
 }
 
+/// 确保当前线程存在 DispatcherQueue。
+///
+/// 复用线程已存在的队列；否则创建并在线程局部槽中保留控制器及 apartment，避免
+/// Presenter 因设备重建而销毁仍被其他 Composition 客户端使用的队列。
 fn ensure_queue() -> Result<()> {
     if DispatcherQueue::GetForCurrentThread().is_ok() {
         return Ok(());
     }
-    let apartment = Apartment::new()?;
+    let apartment = WinRtApartment::initialize_sta()?;
     let controller: DispatcherQueueController = unsafe {
         CreateDispatcherQueueController(DispatcherQueueOptions {
             dwSize: size_of::<DispatcherQueueOptions>() as u32,
@@ -117,11 +130,18 @@ fn ensure_queue() -> Result<()> {
     Ok(())
 }
 
+/// Composition 绘图表面的一次 BeginDraw/EndDraw 配对及其异常清理守卫。
 struct SurfaceDraw {
+    /// 与本次 BeginDraw 配对的互操作接口。
     interop: ICompositionDrawingSurfaceInterop,
+    /// 标记 EndDraw 是否已调用；即使 EndDraw 报错也不能重试。
     ended: bool,
 }
 impl SurfaceDraw {
+    /// 开始绘制表面并设置 DPI 与 Composition 返回的图集偏移变换。
+    ///
+    /// 返回的目标借助共享底层接口引用表面绘图上下文，只应在守卫结束前使用。创建
+    /// 目标转换失败时，守卫析构仍会结束已经开始的绘制。
     fn begin(surface: &CompositionDrawingSurface, dpi: u32) -> Result<(Self, ID2D1RenderTarget)> {
         let interop: ICompositionDrawingSurfaceInterop = surface.cast()?;
         let mut offset = POINT::default();
@@ -145,6 +165,7 @@ impl SurfaceDraw {
         }
         Ok((guard, target))
     }
+    /// 结束本次绘制且只调用一次 EndDraw；返回系统报告的结束错误。
     fn finish(mut self) -> Result<()> {
         self.ended = true;
         let result = unsafe { self.interop.EndDraw().ok() };
@@ -153,6 +174,7 @@ impl SurfaceDraw {
     }
 }
 impl Drop for SurfaceDraw {
+    /// 遇到提前返回或 panic 时尽力配对 EndDraw，避免表面停留在绘制状态。
     fn drop(&mut self) {
         if !self.ended {
             unsafe {
@@ -162,39 +184,71 @@ impl Drop for SurfaceDraw {
     }
 }
 
+/// 将 D2D 内容、面板装饰与背景绑定到一个 HWND 的 Composition 呈现器。
+///
+/// 所有 COM 对象和方法调用都限于创建它的 UI 线程。绘制事务期间只能调用
+/// [`Self::end_draw`]；其他要求空闲状态的操作会以 `E_UNEXPECTED` 失败。Presenter
+/// 不拥有 HWND，析构时只解除 Composition target 的根视觉。
 pub struct Presenter {
+    /// 正在进行的内容表面绘制事务；存在时呈现器处于非空闲状态。
     drawing: Option<SurfaceDraw>,
+    /// 按层 ID 保存最近成功提交的原生装饰对象及其缓存状态。
     decorations: HashMap<u32, Decoration>,
+    /// 装饰层父节点，裁剪区域按窗口内容区设置。
     decoration_root: ContainerVisual,
+    /// 当前装饰层从底到顶的 ID 顺序快照。
     decoration_order: Vec<u32>,
+    /// HWND 的 Composition target；持有底层目标但不取得窗口所有权。
     target: DesktopWindowTarget,
+    /// 管理内容、背景、阴影和装饰根节点的顶层视觉。
     root: ContainerVisual,
+    /// 绘制主内容表面的视觉。
     content: SpriteVisual,
+    /// 使用面板形状遮罩呈现背景材质的视觉。
     backdrop: SpriteVisual,
+    /// 最近成功应用的背景样式；相同样式可跳过重复配置。
     backdrop_style: Option<crate::protocol::BackdropStyle>,
+    /// 创建呈现器时绑定的 HWND，用于启用系统背景材质。
     hwnd: HWND,
+    /// 承载投影效果的视觉。
     shadow_visual: SpriteVisual,
+    /// 面板投影及其形状遮罩配置。
     shadow: DropShadow,
+    /// 主内容绘制目标，像素格式为预乘 Alpha BGRA。
     surface: CompositionDrawingSurface,
+    /// 面板轮廓遮罩，同时用于阴影和背景材质裁切。
     mask: CompositionDrawingSurface,
+    /// 必须与 D2D/D3D 设备及 compositor 同寿命的 Composition 图形设备。
     _graphics: CompositionGraphicsDevice,
+    /// 拥有视觉树和表面的 compositor。
     _compositor: Compositor,
+    /// 为 Composition 图形设备提供的 D2D 设备。
     _d2d: ID2D1Device,
+    /// 为 D2D 设备提供 DXGI 设备的 D3D 设备。
     _d3d: ID3D11Device,
+    /// 创建 D2D 设备所用的单线程工厂。
     _factory: ID2D1Factory1,
+    /// 当前 DPI，零值输入规范化为 1。
     dpi: u32,
+    /// 面板表面与遮罩当前的物理像素尺寸。
     surface_size: (u32, u32),
+    /// 已成功应用的面板样式、DIP 尺寸和请求 DPI 缓存。
     panel: Option<(crate::protocol::PanelStyle, f32, f32, u32)>,
+    /// 仅用于类型系统，禁止将线程绑定的 Presenter 发送到其他线程。
     _ui_thread: PhantomData<Rc<()>>,
     // Rust drops fields in declaration order: COM resources must go first.
-    _apartment: Apartment,
+    _apartment: WinRtApartment,
 }
 
 impl Presenter {
-    /// The caller owns the HWND and pumps its UI-thread message loop.
+    /// 为已有窗口创建 GPU、Composition 目标及初始视觉树。
+    ///
+    /// 调用方拥有 `hwnd`，并负责在其 UI 线程运行消息循环；构造器在当前线程初始化
+    /// WinRT apartment 和调度队列。`width`、`height` 是像素，超出表面限制时返回
+    /// `E_INVALIDARG`，其余系统创建错误原样返回。
     pub fn new(hwnd: HWND, dpi: u32, width: u32, height: u32) -> Result<Self> {
         check_pixels(width, height)?;
-        let apartment = Apartment::new()?;
+        let apartment = WinRtApartment::initialize_sta()?;
         ensure_queue()?;
         let mut d3d = None;
         unsafe {
@@ -280,6 +334,10 @@ impl Presenter {
         Ok(presenter)
     }
 
+    /// 更新顶层视觉的像素尺寸和呈现 DPI。
+    ///
+    /// 绘制事务未结束时拒绝执行；像素尺寸超限返回 `E_INVALIDARG`。DPI 改变会使
+    /// 背景缓存失效，以便下次设置时按新比例重建。
     pub fn resize(&mut self, width: u32, height: u32, dpi: u32) -> Result<()> {
         self.idle()?;
         check_pixels(width, height)?;
@@ -294,6 +352,11 @@ impl Presenter {
         Ok(())
     }
 
+    /// 应用面板几何、圆角、投影和内容偏移，并重绘面板形状遮罩。
+    ///
+    /// `width`、`height` 及样式几何以 DIP 表示，表面尺寸向上取整到物理像素。非法
+    /// 数值、非正尺寸、零 DPI 或超限表面返回 `E_INVALIDARG`。提交开始前会使旧缓存
+    /// 失效；部分 COM 更新失败后不会把旧样式误记为有效。
     pub fn set_panel(
         &mut self,
         style: &crate::protocol::PanelStyle,
@@ -426,6 +489,10 @@ impl Presenter {
         Ok(())
     }
 
+    /// 为面板设置系统背景材质或纯色回退，并使用面板遮罩裁切。
+    ///
+    /// 禁用时移除背景画刷；启用时系统材质不可用会记录一次警告并创建回退色画刷。
+    /// 只有完整应用成功才更新样式缓存；COM 配置错误返回调用方。
     pub fn set_backdrop(&mut self, style: crate::protocol::BackdropStyle) -> Result<()> {
         if self.backdrop_style == Some(style) {
             return Ok(());
@@ -484,6 +551,10 @@ impl Presenter {
         Ok(())
     }
 
+    /// 开始主内容表面的绘制事务并返回 D2D 目标。
+    ///
+    /// 调用者必须随后且仅随后调用一次 [`Self::end_draw`]；在事务期间不得调用其他
+    /// 需要空闲状态的呈现操作。目标不得逃逸到事务生命周期之外，也不得自行结束绘制。
     pub fn begin_draw(&mut self) -> Result<ID2D1RenderTarget> {
         self.idle()?;
         let (draw, target) = SurfaceDraw::begin(&self.surface, self.dpi)?;
@@ -491,6 +562,9 @@ impl Presenter {
         Ok(target)
     }
 
+    /// 停止所有装饰视觉动画并从视觉树和缓存中移除装饰层。
+    ///
+    /// 若停止动画或修改视觉树失败，立即返回系统错误；仅在清理步骤成功后清空缓存。
     pub fn clear_layers(&mut self) -> Result<()> {
         self.idle()?;
         for layer in self.decorations.values() {
@@ -504,6 +578,15 @@ impl Presenter {
         Ok(())
     }
 
+    /// 准备并提交装饰层场景，成功后替换本地层缓存。
+    ///
+    /// 先验证场景并在脱离可见树的表面上完成必要重绘，再提交视觉属性和顺序。相同
+    /// 代数且内容未变的层复用表面、视觉及仍在运行的动画。绘制回调只在此调用期间
+    /// 借用目标；准备失败不会提交新缓存，COM 提交部分失败则清除装饰树以避免缓存
+    /// 谎报状态。无效场景返回 `E_INVALIDARG`，绘制事务未结束返回 `E_UNEXPECTED`。
+    ///
+    /// 偏移动画按当前 DPI 换算为像素，其他属性保持无量纲。过期动画落为终值；活动
+    /// 动画按截止时间设置原生时长，不依赖逐帧宿主回调。
     pub fn set_layers(
         &mut self,
         scene: &LayerScene,
@@ -712,6 +795,10 @@ impl Presenter {
         Ok(())
     }
 
+    /// 结束 [`Self::begin_draw`] 开始的事务，并将表面提交给 Composition。
+    ///
+    /// 没有进行中的事务时返回 `E_UNEXPECTED`。即使底层 EndDraw 失败，事务守卫也已
+    /// 消耗，不能再次结束同一事务。
     pub fn end_draw(&mut self) -> Result<()> {
         self.drawing
             .take()
@@ -720,11 +807,13 @@ impl Presenter {
     }
 
     #[cfg(test)]
+    /// 返回测试断言所需层的视觉和表面引用；调用者取得的是额外 COM 引用。
     pub(crate) fn layer_objects(&self, id: u32) -> (SpriteVisual, CompositionDrawingSurface) {
         let layer = &self.decorations[&id];
         (layer.visual.clone(), layer.surface.clone())
     }
 
+    /// 要求不处于 BeginDraw/EndDraw 之间；活动事务返回 `E_UNEXPECTED`。
     fn idle(&self) -> Result<()> {
         if self.drawing.is_some() {
             Err(windows_core::Error::from_hresult(E_UNEXPECTED))
@@ -734,6 +823,10 @@ impl Presenter {
     }
 }
 
+/// 限制绘图表面的单边尺寸和总像素数，避免创建超大 GPU 资源。
+///
+/// 单边最大 16,384 像素，总量最大 16 Mi 像素；超限返回 `E_INVALIDARG`。零尺寸由此
+/// 函数接受，具体调用方可另行要求正尺寸。
 fn check_pixels(width: u32, height: u32) -> Result<()> {
     if width > 16_384 || height > 16_384 || u64::from(width) * u64::from(height) > 16 * 1024 * 1024
     {
@@ -744,6 +837,7 @@ fn check_pixels(width: u32, height: u32) -> Result<()> {
 }
 
 impl Drop for Presenter {
+    /// 若仍有绘制事务，先由守卫尽力结束；随后解除 HWND target 的根视觉。
     fn drop(&mut self) {
         drop(self.drawing.take());
         let _ = self.target.SetRoot(None);
