@@ -227,7 +227,7 @@ export component SettingsWindow inherits Window {
                                 Text { text: "自动检查更新"; font-size: 17px; font-weight: 600; }
                                 Text { text: "WinSparkle · 当前用户"; font-size: 12px; opacity: 0.65; }
                                 Text {
-                                    text: root.update-status != "" ? root.update-status : "定期检查新版本；关闭后仍可从托盘手动检查。此项不写入 weasel.custom.json，重新启动托盘中的算法服务后生效。";
+                                    text: root.update-status != "" ? root.update-status : "定期检查新版本。";
                                     font-size: 12px;
                                     opacity: 0.75;
                                     wrap: word-wrap;
