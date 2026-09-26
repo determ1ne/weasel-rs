@@ -149,6 +149,7 @@
     {
       "name": "Capability",
       "doc": "能力位，可按位或组合；host拒绝未知位。",
+      "flags": true,
       "values": {
         "None": 0,
         "Preedit": 1,

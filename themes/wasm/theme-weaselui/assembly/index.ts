@@ -1,17 +1,16 @@
-import { FrameResult, EventKind, Capability, ABI_VERSION, ErrorCode } from "@weasel-rs/sdk-as/assembly";
-// 主题生成绘制命令；窗口、DPI、配置合并与 JSON 解析由宿主负责。
 import {
-  View, readView, draw, measure, roundedRect, set_size,
-  send_action, ACTION_ITEM, FONT_TEXT, FONT_NUMBER, FONT_COMMENT,
-  MOUSE_DOWN, MOUSE_UP, MOUSE_CANCEL, MOUSE_LEAVE, ERR_OK, ERR_BAD_VIEW,
+  ABI_VERSION, Action, Capability, ErrorCode, EventKind, FrameResult, PointerPhase,
+  View, draw_text, measure_text, readView, roundedRect, send_action, set_size,
 } from "@weasel-rs/sdk-as/assembly";
+// 主题生成绘制命令；窗口、DPI、配置合并与 JSON 解析由宿主负责。
 
 // 配置合并后、init 前探测能力；支持编码和候选预览两种 preedit。
 
 
 import { loadConfig, loadColors, colors, PAD, ROW_HEIGHT, GAP, TEXT_SIZE, LABEL_SIZE, COMMENT_SIZE,
   RADIUS, OUTER_RADIUS, MIN_WIDTH, MAX_WIDTH, PAD_Y, ROW_GAP, BORDER, LABEL_GAP,
-  PADDING, MIN_HEIGHT, MAX_HEIGHT, TEXT_HEIGHT, LABEL_HEIGHT, COMMENT_HEIGHT, HORIZONTAL, PREVIEW, label } from "./style";
+  PADDING, MIN_HEIGHT, MAX_HEIGHT, TEXT_HEIGHT, LABEL_HEIGHT, COMMENT_HEIGHT, HORIZONTAL, PREVIEW,
+  TEXT_FONT, LABEL_FONT, COMMENT_FONT, label } from "./style";
 
 let view: View | null = null;
 let width: f32 = MIN_WIDTH;
@@ -54,13 +53,14 @@ function layout(v: View): void {
   for (let i = 0; i < v.items.length; i++) {
     const item = v.items[i];
     const number = label(i);
-    const numberWidth = measure(number, FONT_NUMBER, LABEL_SIZE);
+    const numberWidth = measure_text(LABEL_FONT, number, LABEL_SIZE);
     labels.push(number);
     labelWidths.push(numberWidth);
     labelWidth = Mathf.max(labelWidth, numberWidth);
-    const primary = measure(item.primary, FONT_TEXT, TEXT_SIZE);
+    const primary = measure_text(TEXT_FONT, item.primary, TEXT_SIZE);
     primaryWidths.push(primary);
-    const comment = item.secondary.length > 0 ? GAP + measure(item.secondary, FONT_COMMENT, COMMENT_SIZE) : <f32>0;
+    const comment = item.secondary.length > 0
+      ? GAP + measure_text(COMMENT_FONT, item.secondary, COMMENT_SIZE) : <f32>0;
     itemWidths.push(2 * PADDING + numberWidth + LABEL_GAP + primary + comment);
     contentWidth = Mathf.max(contentWidth, primary + comment);
   }
@@ -79,12 +79,12 @@ function layout(v: View): void {
         preeditText.charCodeAt(cursor) >= 0xdc00 && preeditText.charCodeAt(cursor) <= 0xdfff) cursor--;
     preeditBefore = preeditText.substring(0, cursor);
     preeditAfter = preeditText.substring(cursor);
-    caretX = measure(preeditBefore, FONT_TEXT, TEXT_SIZE);
-    if (!PREVIEW) caretWidth = measure("^", FONT_TEXT, TEXT_SIZE);
+    caretX = measure_text(TEXT_FONT, preeditBefore, TEXT_SIZE);
+    if (!PREVIEW) caretWidth = measure_text(TEXT_FONT, "^", TEXT_SIZE);
   }
   // ^ 独占水平槽位并向下偏移，不能覆盖后面的编码字符。
-  preeditWidth = PREVIEW ? measure(preeditText, FONT_TEXT, TEXT_SIZE)
-    : caretX + caretWidth + measure(preeditAfter, FONT_TEXT, TEXT_SIZE);
+  preeditWidth = PREVIEW ? measure_text(TEXT_FONT, preeditText, TEXT_SIZE)
+    : caretX + caretWidth + measure_text(TEXT_FONT, preeditAfter, TEXT_SIZE);
   preeditHeight = TEXT_HEIGHT + (PREVIEW ? 0 : TEXT_SIZE * 0.35);
   candidateY = PAD_Y + (v.hasPreedit ? preeditHeight + 2 * PADDING + GAP : 0);
   let candidatesWidth: f32 = 2 * PADDING + labelWidth + LABEL_GAP + contentWidth;
@@ -121,13 +121,13 @@ function paint(): void {
     if (!PREVIEW && preeditWidth > 0) roundedRect(PAD, PAD_Y, preeditWidth + 2 * PADDING,
       preeditHeight + 2 * PADDING, RADIUS, colors.hilited_back);
     if (PREVIEW) {
-      draw(preeditText, PAD + PADDING, PAD_Y + PADDING, FONT_TEXT, TEXT_SIZE, colors.text);
+      draw_text(TEXT_FONT, preeditText, PAD + PADDING, PAD_Y + PADDING, TEXT_SIZE, colors.text);
     } else {
-      draw(preeditBefore, PAD + PADDING, PAD_Y + PADDING, FONT_TEXT, TEXT_SIZE, colors.hilited_text);
-      draw("^", PAD + PADDING + caretX, PAD_Y + PADDING + TEXT_SIZE * 0.35,
-        FONT_TEXT, TEXT_SIZE, colors.hilited_text);
-      draw(preeditAfter, PAD + PADDING + caretX + caretWidth, PAD_Y + PADDING,
-        FONT_TEXT, TEXT_SIZE, colors.hilited_text);
+      draw_text(TEXT_FONT, preeditBefore, PAD + PADDING, PAD_Y + PADDING, TEXT_SIZE, colors.hilited_text);
+      draw_text(TEXT_FONT, "^", PAD + PADDING + caretX, PAD_Y + PADDING + TEXT_SIZE * 0.35,
+        TEXT_SIZE, colors.hilited_text);
+      draw_text(TEXT_FONT, preeditAfter, PAD + PADDING + caretX + caretWidth, PAD_Y + PADDING,
+        TEXT_SIZE, colors.hilited_text);
     }
   }
   for (let i = 0; i < v.items.length; i++) {
@@ -139,22 +139,25 @@ function paint(): void {
     const textX = rect.x + PADDING + numberWidth + LABEL_GAP;
     const selected = i == highlighted && item.enabled;
     if (selected) roundedRect(rect.x, y, rect.w, ROW_HEIGHT, RADIUS, colors.hilited_candidate_back_color);
-    draw(labels[i], rect.x + PADDING, y + (ROW_HEIGHT - LABEL_HEIGHT) / 2,
-      FONT_NUMBER, LABEL_SIZE, selected ? colors.hilited_label_color : colors.label_color);
-    draw(item.primary, textX, y + (ROW_HEIGHT - TEXT_HEIGHT) / 2,
-      FONT_TEXT, TEXT_SIZE, selected ? colors.hilited_candidate_text_color : colors.candidate_text_color);
-    if (item.secondary.length > 0) draw(item.secondary, textX + primaryWidths[i] + GAP,
-      y + (ROW_HEIGHT - COMMENT_HEIGHT) / 2, FONT_COMMENT, COMMENT_SIZE,
+    draw_text(LABEL_FONT, labels[i], rect.x + PADDING, y + (ROW_HEIGHT - LABEL_HEIGHT) / 2,
+      LABEL_SIZE, selected ? colors.hilited_label_color : colors.label_color);
+    draw_text(TEXT_FONT, item.primary, textX, y + (ROW_HEIGHT - TEXT_HEIGHT) / 2,
+      TEXT_SIZE, selected ? colors.hilited_candidate_text_color : colors.candidate_text_color);
+    if (item.secondary.length > 0) draw_text(COMMENT_FONT, item.secondary,
+      textX + primaryWidths[i] + GAP, y + (ROW_HEIGHT - COMMENT_HEIGHT) / 2, COMMENT_SIZE,
       selected ? colors.hilited_comment_text_color : colors.comment_text_color);
   }
 }
 
 export function theme_abi_version(): i32 { return ABI_VERSION; }
 export function theme_capabilities(): i32 { return Capability.Preedit; }
-export function theme_create(_mode: i32, dark: i32): i32 { loadConfig(dark != 0); return ERR_OK; }
+export function theme_create(_mode: i32, dark: i32): i32 {
+  loadConfig(dark != 0);
+  return ErrorCode.Success;
+}
 function render(): i32 {
   const next = readView();
-  if (next == null) return ERR_BAD_VIEW;
+  if (next == null) return ErrorCode.InvalidArgument;
   view = next;
   hover = -1;
   pressed = -1;
@@ -169,7 +172,7 @@ function mouse(kind: i32, x: f32, y: f32): i32 {
   const v = view;
   if (v == null) return FrameResult.Keep;
   let row: i32 = -1;
-  if (kind != MOUSE_LEAVE && kind != MOUSE_CANCEL) {
+  if (kind != PointerPhase.Leave && kind != PointerPhase.Cancel) {
     for (let i = 0; i < rects.length; i++) {
       const r = rects[i];
       if (visibleRect(r) &&
@@ -178,12 +181,12 @@ function mouse(kind: i32, x: f32, y: f32): i32 {
     }
   }
   if (hover != row) { hover = row; paint(); result = FrameResult.Present; }
-  if (kind == MOUSE_DOWN) pressed = row;
-  if (kind == MOUSE_LEAVE || kind == MOUSE_CANCEL) pressed = -1;
-  if (kind == MOUSE_UP) {
+  if (kind == PointerPhase.Down) pressed = row;
+  if (kind == PointerPhase.Leave || kind == PointerPhase.Cancel) pressed = -1;
+  if (kind == PointerPhase.Up) {
     const target = pressed;
     pressed = -1;
-    if (row >= 0 && row == target) send_action(ACTION_ITEM, row);
+    if (row >= 0 && row == target) send_action(Action.Item, row);
   }
   return result;
 }

@@ -1,17 +1,16 @@
 import * as defaults from "./defaults";
-import { options, settings, BOOLEAN, STRING, NUMBER, OBJECT, report_notice, set_font, line_height, set_panel } from "@weasel-rs/sdk-as/assembly";
+import { DataKind, options, settings, report_notice, set_font, line_height, set_panel } from "@weasel-rs/sdk-as/assembly";
 
 function warn(path: string): void {
-  const bytes = String.UTF8.encode("invalid weaselui config " + path + "; using default");
-  report_notice(changetype<i32>(bytes), bytes.byteLength);
+  report_notice("invalid weaselui config " + path + "; using default");
 }
 // options 已由宿主合并默认值与用户覆盖；这里只校验字段，不自行解析 JSON。
 // 缺失字段静默回退，类型或范围错误记录日志后回退。
 function dimension(key: string, fallback: f32, minimum: f64 = 0, maximum: f64 = 4096): f32 {
   const path = "/layout/" + key;
-  if (options.kind(path) == 0) return fallback;
+  if (options.kind(path) == DataKind.Missing) return fallback;
   const value = options.number(path, -1);
-  if (options.kind(path) != NUMBER || !isFinite(value) || value < minimum || value > maximum) {
+  if (options.kind(path) != DataKind.Number || !isFinite(value) || value < minimum || value > maximum) {
     warn(path); return fallback;
   }
   return <f32>value;
@@ -20,12 +19,12 @@ function dimension(key: string, fallback: f32, minimum: f64 = 0, maximum: f64 = 
 let darkMode: bool = false;
 function color(key: string, fallback: u32): u32 {
   let path = "/color/" + key;
-  if (options.kind(path) == 0) return fallback;
+  if (options.kind(path) == DataKind.Missing) return fallback;
   // 单色兼容旧配置；对象按宿主传入的外观选择分支，缺失或无效分支记录日志。
-  if (options.kind(path) == OBJECT) path += darkMode ? "/dark" : "/light";
+  if (options.kind(path) == DataKind.Object) path += darkMode ? "/dark" : "/light";
   let text = options.string(path);
   if (text.startsWith("#")) text = text.substring(1);
-  if (options.kind(path) != STRING || (text.length != 6 && text.length != 8)) {
+  if (options.kind(path) != DataKind.String || (text.length != 6 && text.length != 8)) {
     warn(path); return fallback;
   }
   let value: u32 = 0;
@@ -80,22 +79,25 @@ export let MIN_WIDTH: f32 = defaults.LAYOUT_MIN_WIDTH;
 export let MAX_WIDTH: f32 = defaults.LAYOUT_MAX_WIDTH == 0 ? 8192 : defaults.LAYOUT_MAX_WIDTH;
 export let MIN_HEIGHT: f32 = defaults.LAYOUT_MIN_HEIGHT;
 export let MAX_HEIGHT: f32 = defaults.LAYOUT_MAX_HEIGHT == 0 ? 8192 : defaults.LAYOUT_MAX_HEIGHT;
+export let TEXT_FONT: i32 = -1;
+export let LABEL_FONT: i32 = -1;
+export let COMMENT_FONT: i32 = -1;
 
-function font(slot: i32, key: string, fallback: string): void {
+function font(slot: i32, key: string, fallback: string): i32 {
   const path = "/" + key;
   let family = options.string(path, fallback);
-  if (options.kind(path) != 0 && (options.kind(path) != STRING || family.length == 0 || family.length > 64)) {
+  if (options.kind(path) != DataKind.Missing &&
+      (options.kind(path) != DataKind.String || family.length == 0 || family.length > 64)) {
     warn(path); family = fallback;
   }
-  const bytes = String.UTF8.encode(family);
-  set_font(slot, changetype<i32>(bytes), bytes.byteLength);
+  return set_font(slot, family, 400);
 }
 // 配置字号为 pt，绘制接口使用 DIP：1pt = 96/72 DIP，不在主题中乘显示器 DPI。
 function point(key: string, fallback: f32): f32 {
   const path = "/" + key;
-  if (options.kind(path) == 0) return fallback * 4 / 3;
+  if (options.kind(path) == DataKind.Missing) return fallback * 4 / 3;
   const value = options.number(path, -1);
-  if (options.kind(path) != NUMBER || !isFinite(value) || value < 3 || value > 384) {
+  if (options.kind(path) != DataKind.Number || !isFinite(value) || value < 3 || value > 384) {
     warn(path); return fallback * 4 / 3;
   }
   return <f32>(value * 4 / 3);
@@ -105,21 +107,27 @@ export function label(index: i32): string {
 }
 // 初始化时读取一次配置、设置字体并测量行高，绘制路径只消费已校验的值。
 export function loadConfig(dark: bool): void {
-  HORIZONTAL = options.kind("/horizontal") == 0 ? defaults.HORIZONTAL : options.boolean("/horizontal");
-  if (options.kind("/horizontal") != 0 && options.kind("/horizontal") != BOOLEAN) {
+  HORIZONTAL = options.kind("/horizontal") == DataKind.Missing
+    ? defaults.HORIZONTAL : options.boolean("/horizontal");
+  if (options.kind("/horizontal") != DataKind.Missing &&
+      options.kind("/horizontal") != DataKind.Bool) {
     warn("/horizontal"); HORIZONTAL = defaults.HORIZONTAL;
   }
   const preeditType = settings.string("/preedit_type", "composition");
   PREVIEW = preeditType == "preview";
-  if ((settings.kind("/preedit_type") != 0 && settings.kind("/preedit_type") != STRING) ||
+  if ((settings.kind("/preedit_type") != DataKind.Missing &&
+       settings.kind("/preedit_type") != DataKind.String) ||
       (preeditType != "composition" && preeditType != "preview")) warn("global preedit_type");
-  font(0, "font_face", defaults.FONT_FACE); font(1, "label_font_face", defaults.LABEL_FONT_FACE); font(2, "comment_font_face", defaults.COMMENT_FONT_FACE);
+  TEXT_FONT = font(0, "font_face", defaults.FONT_FACE);
+  LABEL_FONT = font(1, "label_font_face", defaults.LABEL_FONT_FACE);
+  COMMENT_FONT = font(2, "comment_font_face", defaults.COMMENT_FONT_FACE);
   TEXT_SIZE = point("font_point", defaults.FONT_POINT); LABEL_SIZE = point("label_font_point", defaults.LABEL_FONT_POINT); COMMENT_SIZE = point("comment_font_point", defaults.COMMENT_FONT_POINT);
-  TEXT_HEIGHT = line_height(0, TEXT_SIZE);
-  LABEL_HEIGHT = line_height(1, LABEL_SIZE);
-  COMMENT_HEIGHT = line_height(2, COMMENT_SIZE);
+  TEXT_HEIGHT = line_height(TEXT_FONT, TEXT_SIZE);
+  LABEL_HEIGHT = line_height(LABEL_FONT, LABEL_SIZE);
+  COMMENT_HEIGHT = line_height(COMMENT_FONT, COMMENT_SIZE);
   LABEL_FORMAT = options.string("/label_format", defaults.LABEL_FORMAT);
-  if ((options.kind("/label_format") != 0 && options.kind("/label_format") != STRING) ||
+  if ((options.kind("/label_format") != DataKind.Missing &&
+       options.kind("/label_format") != DataKind.String) ||
       LABEL_FORMAT.length > 64 || LABEL_FORMAT.indexOf("%s") < 0) {
     warn("/label_format"); LABEL_FORMAT = defaults.LABEL_FORMAT;
   }

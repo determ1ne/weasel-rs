@@ -40,14 +40,9 @@ export async function createHost(bytes, options = {}, settings = {}) {
         if (cap >= b.length) memory().set(b, dst);
         return b.length;
       },
-      set_font: () => {},
-      set_text_glow: () => {},
-      line_height: (_slot, size) => size * 1.4,
-      measure_text: (p, n, _font, size) => Array.from(read(p,n)).reduce((w,c) => w + (c.codePointAt(0) > 0x2e7f ? size : size * 0.55), 0),
       fill_rect: (x, y, w, h, color) => calls.fills.push({x,y,w,h,color: color >>> 0}),
       fill_rounded_rect: (x,y,w,h,radius,color) => calls.rounded.push({x,y,w,h,radius,color: color >>> 0}),
       stroke_rect: (x,y,w,h,color,width) => calls.strokes.push({x,y,w,h,color: color >>> 0,width}),
-      draw_text: (p,n,x,y,font,size,color) => calls.texts.push({text:read(p,n),x,y,font,size,color: color >>> 0}),
       set_corner_radius: radius => {
         if (!bounded(radius, 0)) throw new Error("invalid window corner radius");
         panel = { ...panel, corner_radius: radius };

@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 //! 与宿主 ABI 对齐的版本号、字段编号和语义枚举。
 //!
-//! 这些枚举的 `repr(i32)` 数值属于 ABI 合约；主题应使用变体而非自行假定编号。
+//! 这些枚举和位集合的整数值属于 ABI 合约；主题应使用命名项而非自行假定编号。
 /// 当前主题 ABI 版本；导出 `theme_abi_version` 时返回此值。
 pub const ABI_VERSION: i32 = 2;
 /// 只读快照整数属性。ItemEnabled使用候选index，其余index必须为0。AsciiMode/TotalItemCount的-1表示未知。
@@ -302,22 +302,43 @@ impl TryFrom<i32> for LogLevel {
 }
 
 /// 能力位，可按位或组合；host拒绝未知位。
-#[repr(i32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Capability {
-    None = 0,
-    Preedit = 1,
-    Resident = 2,
+pub struct Capability(i32);
+#[allow(non_upper_case_globals)]
+impl Capability {
+    pub const None: Self = Self(0);
+    pub const Preedit: Self = Self(1);
+    pub const Resident: Self = Self(2);
+    pub const fn bits(self) -> i32 {
+        self.0
+    }
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+    pub const fn from_bits(value: i32) -> Option<Self> {
+        if value & !3 == 0 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+}
+impl core::ops::BitOr for Capability {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+impl core::ops::BitOrAssign for Capability {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
 }
 impl TryFrom<i32> for Capability {
     type Error = i32;
     fn try_from(value: i32) -> Result<Self, i32> {
-        match value {
-            0 => Ok(Self::None),
-            1 => Ok(Self::Preedit),
-            2 => Ok(Self::Resident),
-            _ => Err(value),
-        }
+        Self::from_bits(value).ok_or(value)
     }
 }
 

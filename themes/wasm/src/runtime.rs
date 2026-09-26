@@ -963,10 +963,10 @@ impl WasmRuntime {
             .get_typed_func::<(), i32>(&mut store, EXPORT_CAPABILITIES)
             .map_err(&export_error)?
             .call(&mut store, ())
-            .map_err(err_string)? as u32;
-        if capabilities & !((Capability::Preedit as u32) | (Capability::Resident as u32)) != 0 {
+            .map_err(err_string)?;
+        let Some(capabilities) = Capability::from_bits(capabilities) else {
             return Err("unsupported theme capability bits".into());
-        }
+        };
         store.data_mut().declaration_query = false;
         let event_fn = instance
             .get_typed_func(&mut store, "theme_event")
@@ -987,8 +987,8 @@ impl WasmRuntime {
             instance,
             init_fn,
             event_fn,
-            resident: capabilities & Capability::Resident as u32 != 0,
-            preedit: capabilities & Capability::Preedit as u32 != 0,
+            resident: capabilities.contains(Capability::Resident),
+            preedit: capabilities.contains(Capability::Preedit),
         })
     }
 
@@ -1637,6 +1637,8 @@ mod tests {
         );
         assert!(WasmRuntime::new(&make(&[metadata, metadata], "i32.const 0", "")).is_err());
         assert!(WasmRuntime::new(&make(&["not json"], "i32.const 0", "")).is_err());
+        let combined = WasmRuntime::new(&make(&[], "i32.const 3", "")).unwrap();
+        assert!(combined.preedit && combined.resident);
         assert!(WasmRuntime::new(&make(&[], "i32.const 4", "")).is_err());
         assert!(
             WasmRuntime::new(&make(&[], "call $host i32.const 0", ""))
@@ -1841,10 +1843,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "build SDK first with npm run asbuild:release"]
-    fn sdk_sample_theme_end_to_end() {
+    #[ignore = "build SDK fixture first with npm test"]
+    fn sdk_fixture_end_to_end() {
         let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk-as/build/release.wasm");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk-as/build/sdk-test.wasm");
         let bytes = std::fs::read(path).expect("build SDK first");
         let mut state = HostState::default();
         state.options = serde_json::json!({"fontSize": 20});
@@ -1879,7 +1881,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "build and package theme-orbit first; see its README"]
+    #[ignore = "build and package theme-orbit first"]
     fn orbit_animation_and_interaction_contract() {
         let bytes = std::fs::read(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

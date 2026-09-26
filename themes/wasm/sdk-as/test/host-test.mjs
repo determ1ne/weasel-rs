@@ -1,8 +1,8 @@
-// SDK example using the same in-memory fixture as external themes.
+// SDK integration fixture using the same in-memory host as external themes.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createHost } from "./host.mjs";
-const host = await createHost(readFileSync(new URL("../build/release.wasm", import.meta.url)), {fontSize:20});
+const host = await createHost(readFileSync(new URL("../build/sdk-test.wasm", import.meta.url)), {fontSize:20});
 const {exports: theme, calls} = host;
 assert.equal(theme.abi_version(), 2);
 assert.equal(theme.init(0,1), 0);

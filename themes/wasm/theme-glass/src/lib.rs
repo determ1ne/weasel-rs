@@ -5,9 +5,11 @@
 //! 支持预编辑文本；无效或过大的快照会被拒绝，且不会保留上一帧可点击的候选。
 use std::cell::{Cell, RefCell};
 use weasel_wasm_sdk::{
-    ABI_VERSION, Action, BackdropStyle, ErrorCode, EventKind, FONT_TEXT_BOLD, FrameResult,
-    PointerPhase, draw_glow, line_height, measure, send_action, set_backdrop, set_panel, set_size,
+    ABI_VERSION, Action, BackdropStyle, ErrorCode, EventKind, FrameResult, PointerPhase,
+    draw_text_glow, line_height, measure_text, send_action, set_backdrop, set_font, set_panel,
+    set_size,
 };
+use weasel_wasm_sdk::draw::FontSlot;
 
 const PAD: f32 = 8.0;
 const PAD_Y: f32 = 4.0;
@@ -35,6 +37,14 @@ struct Item {
     width: f32,
 }
 
+#[derive(Clone, Copy)]
+struct Fonts {
+    text: FontSlot,
+    number: FontSlot,
+    comment: FontSlot,
+    bold: FontSlot,
+}
+
 #[derive(Default)]
 struct View {
     items: Vec<Item>,
@@ -45,6 +55,7 @@ struct View {
 
 thread_local! {
     static VIEW: RefCell<View> = RefCell::new(View::default());
+    static FONTS: Cell<Option<Fonts>> = const { Cell::new(None) };
     // draw_text 接收布局框左上角而非基线；初始化时按实际行高计算居中偏移。
     static TEXT_Y: Cell<[f32; 3]> = const { Cell::new([0.0; 3]) };
 }
@@ -68,40 +79,41 @@ fn paint_body(v: &View) {
     });
     set_size(v.width, PAD_Y * 2.0 + ROW);
     let offsets = TEXT_Y.with(Cell::get);
+    let fonts = FONTS.with(Cell::get).expect("theme fonts must be initialized");
     // 只提交文字，不画选中背景。玻璃参数由宿主缓存，不会每次重建效果图。
     for (i, item) in v.items.iter().enumerate() {
         let y = PAD_Y;
         let font = if v.selected == Some(i) && item.enabled {
-            FONT_TEXT_BOLD
+            fonts.bold
         } else {
-            0
+            fonts.text
         };
         let color = if item.enabled { 0xff000000 } else { 0xff707070 };
-        draw_glow(
+        draw_text_glow(
+            fonts.number,
             &(i + 1).to_string(),
             item.x + 6.0,
             y + offsets[1],
-            1,
             SMALL_SIZE,
             color,
             3.0,
             0xffffffff,
         );
-        draw_glow(
+        draw_text_glow(
+            font,
             &item.text,
             item.x + TEXT_X,
             y + offsets[0],
-            font,
             TEXT_SIZE,
             color,
             3.0,
             0xffffffff,
         );
-        draw_glow(
+        draw_text_glow(
+            fonts.comment,
             &item.comment,
             item.x + TEXT_X + COMMENT_GAP + item.text_width,
             y + offsets[2],
-            2,
             SMALL_SIZE,
             color,
             3.0,
@@ -124,14 +136,28 @@ pub extern "C" fn theme_capabilities() -> u32 {
 /// 初始化主题的行高布局状态；返回零表示成功，非零值为 ABI 错误码。
 #[unsafe(no_mangle)]
 pub extern "C" fn theme_create(_mode: i32, _dark: i32) -> i32 {
+    let fonts = Fonts {
+        text: set_font(0, "Microsoft YaHei UI", 400),
+        number: set_font(1, "Segoe UI", 400),
+        comment: set_font(2, "Microsoft YaHei UI", 400),
+        bold: set_font(3, "Microsoft YaHei UI", 700),
+    };
     let mut offsets = [0.0; 3];
-    for (slot, size) in [TEXT_SIZE, SMALL_SIZE, SMALL_SIZE].into_iter().enumerate() {
-        let height = line_height(slot as i32, size);
+    for (index, (font, size)) in [
+        (fonts.text, TEXT_SIZE),
+        (fonts.number, SMALL_SIZE),
+        (fonts.comment, SMALL_SIZE),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let height = line_height(font, size);
         if !height.is_finite() || height <= 0.0 || height > ROW {
             return ErrorCode::InvalidArgument as i32;
         }
-        offsets[slot] = (ROW - height) / 2.0;
+        offsets[index] = (ROW - height) / 2.0;
     }
+    FONTS.with(|value| value.set(Some(fonts)));
     TEXT_Y.with(|value| value.set(offsets));
     0
 }
@@ -151,19 +177,21 @@ fn read_view() -> Option<View> {
         width: PAD * 2.0,
         ..View::default()
     };
+    let fonts = FONTS.with(Cell::get)?;
     for (i, item) in snapshot.items.into_iter().enumerate() {
         let text = item.primary;
         let comment = item.secondary;
         // 两种字重共用一个预留槽位，鼠标命中区域与绘制宽度保持一致。
         let text_width =
-            measure(&text, 0, TEXT_SIZE).max(measure(&text, FONT_TEXT_BOLD, TEXT_SIZE));
+            measure_text(fonts.text, &text, TEXT_SIZE)
+                .max(measure_text(fonts.bold, &text, TEXT_SIZE));
         let width = TEXT_X
             + text_width
             + 6.0
             + if comment.is_empty() {
                 0.0
             } else {
-                COMMENT_GAP + measure(&comment, 2, SMALL_SIZE)
+                COMMENT_GAP + measure_text(fonts.comment, &comment, SMALL_SIZE)
             };
         let x = v.width - PAD + if i == 0 { 0.0 } else { GAP };
         if !width.is_finite() || x + width + PAD > MAX_WIDTH {

@@ -5,37 +5,52 @@
 //! 应直接使用 [`crate::resources`] 的 `Result` API。
 use crate::{Font, TextLayout};
 use std::{cell::RefCell, collections::HashMap};
+
+/// 主题定义的字体槽句柄。
+///
+/// 槽位编号只用于标识 SDK 内部缓存；主题应保存 [`set_font`] 的返回值，并把该句柄传给
+/// 测量和绘制函数，而不是在各处传播裸整数或约定全局槽位含义。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FontSlot(i32);
+
+#[derive(Clone)]
+struct FontSpec {
+    family: String,
+    weight: i32,
+}
+
 #[derive(Default)]
 struct Cache {
-    families: HashMap<i32, String>,
+    specs: HashMap<i32, FontSpec>,
     fonts: HashMap<(i32, u32), Font>,
     layouts: HashMap<(i32, u32, String), TextLayout>,
 }
 thread_local! {static CACHE:RefCell<Cache>=RefCell::new(Cache::default());}
-fn with_layout<T>(text: &str, font: i32, size: f32, operation: impl FnOnce(&TextLayout) -> T) -> T {
+
+fn with_layout<T>(
+    text: &str,
+    font: FontSlot,
+    size: f32,
+    operation: impl FnOnce(&TextLayout) -> T,
+) -> T {
     CACHE.with(|cell| {
         let mut cache = cell.borrow_mut();
-        let key = (font, size.to_bits());
+        let key = (font.0, size.to_bits());
         if !cache.fonts.contains_key(&key) {
             if cache.fonts.len() >= 64 {
                 cache.layouts.clear();
                 cache.fonts.clear();
             }
-            let family_slot = if font == 4 { 0 } else { font };
-            let family = cache
-                .families
-                .get(&family_slot)
-                .map(String::as_str)
-                .unwrap_or(match font {
-                    1 => "Segoe UI",
-                    3 => "Segoe MDL2 Assets",
-                    _ => "Microsoft YaHei UI",
-                });
-            let created = Font::new(family, size, if font == 4 { 700 } else { 400 })
-                .expect("font resource creation");
+            let spec = cache
+                .specs
+                .get(&font.0)
+                .cloned()
+                .expect("font slot must be configured with set_font");
+            let created =
+                Font::new(&spec.family, size, spec.weight).expect("font resource creation");
             cache.fonts.insert(key, created);
         }
-        let text_key = (font, size.to_bits(), text.to_owned());
+        let text_key = (font.0, size.to_bits(), text.to_owned());
         if !cache.layouts.contains_key(&text_key) {
             if cache.layouts.len() >= 128 {
                 cache.layouts.clear();
@@ -47,36 +62,45 @@ fn with_layout<T>(text: &str, font: i32, size: f32, operation: impl FnOnce(&Text
         operation(&cache.layouts[&text_key])
     })
 }
-/// 将字体槽位 `0..=3` 映射到字体族名称，并清空派生的字体与文本布局缓存。
+/// 将任意非负槽位映射到字体族和字重，并返回供测量、绘制使用的强类型句柄。
 ///
-/// 槽位 4 固定表示粗体，不可通过此函数配置；常在创建阶段设置，避免动画事件反复失效缓存。
-pub fn set_font(slot: i32, family: &str) {
-    assert!((0..=3).contains(&slot));
+/// 字重范围与 [`Font::new`] 相同，为 `1..=999`。主题通常在创建阶段调用并保存返回值；
+/// 再次配置同一槽位会使现有字体和布局缓存失效。
+pub fn set_font(slot: i32, family: &str, weight: i32) -> FontSlot {
+    assert!(slot >= 0, "font slot must be non-negative");
+    assert!((1..=999).contains(&weight), "font weight must be 1..=999");
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
         c.layouts.clear();
         c.fonts.clear();
-        c.families.insert(slot, family.into());
+        c.specs.insert(
+            slot,
+            FontSpec {
+                family: family.into(),
+                weight,
+            },
+        );
     });
+    FontSlot(slot)
 }
 /// 测量单行/不换行文本的布局宽度，单位为 DIP；相同文本和参数会复用缓存。
-pub fn measure(text: &str, font: i32, size: f32) -> f32 {
+pub fn measure_text(font: FontSlot, text: &str, size: f32) -> f32 {
     with_layout(text, font, size, TextLayout::width)
 }
 /// 返回用于测量的拉丁字母与中日韩字符样本 `M中` 的布局高度，单位为 DIP。
-pub fn line_height(font: i32, size: f32) -> f32 {
+pub fn line_height(font: FontSlot, size: f32) -> f32 {
     with_layout("M中", font, size, TextLayout::height)
 }
 /// 使用缓存布局绘制文本，不添加外发光。
-pub fn draw(text: &str, x: f32, y: f32, font: i32, size: f32, color: u32) {
-    draw_glow(text, x, y, font, size, color, 0.0, 0);
+pub fn draw_text(font: FontSlot, text: &str, x: f32, y: f32, size: f32, color: u32) {
+    draw_text_glow(font, text, x, y, size, color, 0.0, 0);
 }
 /// 使用缓存布局绘制文本及外发光；颜色采用非预乘 `0xAARRGGBB`。
-pub fn draw_glow(
+pub fn draw_text_glow(
+    font: FontSlot,
     text: &str,
     x: f32,
     y: f32,
-    font: i32,
     size: f32,
     color: u32,
     radius: f32,

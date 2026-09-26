@@ -17,12 +17,18 @@ if (!Array.isArray(abi.enums) || !Array.isArray(abi.functions)) fail("declaratio
 unique(abi.enums.map(e=>e.name), "enum");
 unique(abi.functions.map(f=>f.name), "function");
 for (const e of abi.enums) {
-  keys(e, ["name","doc","values"]);
+  keys(e, Object.hasOwn(e, "flags") ? ["name","doc","flags","values"] : ["name","doc","values"]);
   if (!identifier(e.name) || typeof e.doc !== "string") fail("enum name/doc");
+  if (Object.hasOwn(e, "flags") && typeof e.flags !== "boolean") fail("enum flags " + e.name);
   if (!e.values || typeof e.values !== "object" || Array.isArray(e.values) || !Object.keys(e.values).length) fail("enum values");
   unique(Object.values(e.values), e.name + " value");
   for (const [name,value] of Object.entries(e.values)) {
     if (!identifier(name) || !Number.isInteger(value) || value < -2147483648 || value > 2147483647) fail(e.name + "." + name);
+  }
+  if (e.flags) {
+    if (!Object.values(e.values).includes(0) || Object.values(e.values).some(value => value < 0 || (value !== 0 && (value & (value - 1)) !== 0))) {
+      fail(e.name + " flags must contain zero and positive single-bit values");
+    }
   }
 }
 for (const f of abi.functions) {
@@ -38,18 +44,33 @@ for (const f of abi.functions) {
 }
 const header = "// Generated from themes/wasm/abi.json. DO NOT EDIT.\n";
 const doc = (text,prefix) => text ? text.split("\n").map(line=>prefix+line).join("\n")+"\n" : "";
-const rsTypes = header+"#![allow(dead_code)]\n"+
-  "//! 与宿主 ABI 对齐的版本号、字段编号和语义枚举。\n"+
-  "//!\n"+
-  "//! 这些枚举的 `repr(i32)` 数值属于 ABI 合约；主题应使用变体而非自行假定编号。\n"+
-  "/// 当前主题 ABI 版本；导出 `theme_abi_version` 时返回此值。\n"+
-  `pub const ABI_VERSION: i32 = ${abi.version};\n`+
-  abi.enums.map(e=>doc(e.doc,"/// ")+
+const rustEnum = e => {
+  if (!e.flags) return doc(e.doc,"/// ")+
     "#[repr(i32)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n"+
     `pub enum ${e.name} {\n`+Object.entries(e.values).map(([n,v])=>`    ${n} = ${v},`).join("\n")+"\n}\n"+
     `impl TryFrom<i32> for ${e.name} {\n    type Error = i32;\n    fn try_from(value: i32) -> Result<Self, i32> {\n        match value {\n`+
     Object.entries(e.values).map(([n,v])=>`            ${v} => Ok(Self::${n}),`).join("\n")+
-    "\n            _ => Err(value),\n        }\n    }\n}\n").join("\n");
+    "\n            _ => Err(value),\n        }\n    }\n}\n";
+  const known = Object.values(e.values).reduce((bits,value)=>bits|value,0);
+  return doc(e.doc,"/// ")+
+    "#[repr(transparent)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n"+
+    `pub struct ${e.name}(i32);\n`+
+    `#[allow(non_upper_case_globals)]\nimpl ${e.name} {\n`+
+    Object.entries(e.values).map(([n,v])=>`    pub const ${n}: Self = Self(${v});`).join("\n")+
+    `\n    pub const fn bits(self) -> i32 {\n        self.0\n    }\n`+
+    `    pub const fn contains(self, other: Self) -> bool {\n        (self.0 & other.0) == other.0\n    }\n`+
+    `    pub const fn from_bits(value: i32) -> Option<Self> {\n        if value & !${known} == 0 {\n            Some(Self(value))\n        } else {\n            None\n        }\n    }\n}\n`+
+    `impl core::ops::BitOr for ${e.name} {\n    type Output = Self;\n    fn bitor(self, rhs: Self) -> Self {\n        Self(self.0 | rhs.0)\n    }\n}\n`+
+    `impl core::ops::BitOrAssign for ${e.name} {\n    fn bitor_assign(&mut self, rhs: Self) {\n        self.0 |= rhs.0;\n    }\n}\n`+
+    `impl TryFrom<i32> for ${e.name} {\n    type Error = i32;\n    fn try_from(value: i32) -> Result<Self, i32> {\n        Self::from_bits(value).ok_or(value)\n    }\n}\n`;
+};
+const rsTypes = header+"#![allow(dead_code)]\n"+
+  "//! 与宿主 ABI 对齐的版本号、字段编号和语义枚举。\n"+
+  "//!\n"+
+  "//! 这些枚举和位集合的整数值属于 ABI 合约；主题应使用命名项而非自行假定编号。\n"+
+  "/// 当前主题 ABI 版本；导出 `theme_abi_version` 时返回此值。\n"+
+  `pub const ABI_VERSION: i32 = ${abi.version};\n`+
+  abi.enums.map(rustEnum).join("\n");
 const asTypes = header+`export const ABI_VERSION:i32 = ${abi.version};\n`+
   abi.enums.map(e=>doc(e.doc,"// ")+`export enum ${e.name} {\n`+
     Object.entries(e.values).map(([n,v])=>`  ${n} = ${v},`).join("\n")+"\n}\n").join("\n");

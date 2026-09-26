@@ -1,15 +1,11 @@
-import { FrameResult, EventKind, Capability, ABI_VERSION, ErrorCode } from "@weasel-rs/sdk-as/assembly";
 import {
-  ACTION_DISMISS, ACTION_ITEM, ACTION_NEXT, ERR_BAD_VIEW, ERR_OK,
-  FONT_NUMBER, FONT_TEXT, FONT_TEXT_BOLD, MOUSE_DOWN, MOUSE_CANCEL, MOUSE_LEAVE,
-  MOUSE_MOVE, MOUSE_UP, View, begin_drag, draw, fill_rect, line_height, measure,
-  options, roundedRect, send_action, set_fixed_position, set_font,
-  set_panel, set_size, set_visible, stroke_rect,
+  ABI_VERSION, Action, Capability, ErrorCode, EventKind, FrameResult, PointerPhase, View,
+  begin_drag, draw_text, fill_rect, line_height, measure_text, options, readView, roundedRect,
+  send_action, set_fixed_position, set_font, set_panel, set_size, set_visible, stroke_rect,
 } from "@weasel-rs/sdk-as/assembly";
 import {
   FONT_FACE, FONT_SIZE, POSITION_X, POSITION_Y, WIDTH,
 } from "./defaults";
-import { readView } from "@weasel-rs/sdk-as/assembly";
 
 const HEIGHT: f32 = 72.0;
 const HEADER: f32 = 36.0;
@@ -21,6 +17,9 @@ const PAD: f32 = 10.0;
 let width: f32 = WIDTH;
 let fontSize: f32 = FONT_SIZE;
 let textY: f32 = 0.0;
+let textFont: i32 = -1;
+let numberFont: i32 = -1;
+let boldFont: i32 = -1;
 let view: View | null = null;
 let dismissed: bool = false;
 let previousAscii: bool = true;
@@ -44,12 +43,14 @@ function configure(): void {
   const x = clamp(<f32>options.number("/position_x", POSITION_X), -8192.0, 8192.0);
   const y = clamp(<f32>options.number("/position_y", POSITION_Y), -8192.0, 8192.0);
   const family = options.string("/font_face", FONT_FACE);
-  const bytes = String.UTF8.encode(family.length > 0 ? family : FONT_FACE);
-  set_font(FONT_TEXT, changetype<i32>(bytes), bytes.byteLength);
+  const resolved = family.length > 0 ? family : FONT_FACE;
+  textFont = set_font(0, resolved, 400);
+  numberFont = set_font(1, "Segoe UI", 400);
+  boldFont = set_font(2, resolved, 700);
   set_fixed_position(x, y);
   set_panel(3.0, 7.0, 0.0, 2.0, 0x48005984);
   set_size(width, HEIGHT);
-  textY = (HEADER - line_height(FONT_TEXT, fontSize)) / 2.0;
+  textY = (HEADER - line_height(textFont, fontSize)) / 2.0;
 }
 
 // 用少量色带模拟参考图的浅蓝玻璃高光，不依赖位图资源。
@@ -86,7 +87,7 @@ function paintClose(): void {
   roundedRect(x, CLOSE_Y, CLOSE_W, CLOSE_H, 13, 0xff61bfe9);
   roundedRect(x + 2, CLOSE_Y + 2, CLOSE_W - 4, CLOSE_H - 4, 11, outer);
   fill_rect(x + 7, CLOSE_Y + 4, CLOSE_W - 14, 2, 0x80ffffff);
-  draw("×", x + 6.5, CLOSE_Y - 1.0, FONT_TEXT_BOLD, 23, 0xff087ebc);
+  draw_text(boldFont, "×", x + 6.5, CLOSE_Y - 1.0, 23, 0xff087ebc);
 }
 
 function paintContent(): void {
@@ -97,34 +98,34 @@ function paintContent(): void {
   paintClose();
 
   if (current.hasPreedit && current.preedit.length > 0) {
-    draw(current.preedit, PAD, 3 + textY, FONT_TEXT_BOLD, fontSize, 0xff111111);
+    draw_text(boldFont, current.preedit, PAD, 3 + textY, fontSize, 0xff111111);
     let cursor = min(max(current.preeditCursor, 0), current.preedit.length);
     if (cursor > 0 && cursor < current.preedit.length &&
         current.preedit.charCodeAt(cursor) >= 0xdc00 &&
         current.preedit.charCodeAt(cursor) <= 0xdfff) cursor--;
-    const caret = PAD + measure(current.preedit.substring(0, cursor), FONT_TEXT_BOLD, fontSize);
+    const caret = PAD + measure_text(boldFont, current.preedit.substring(0, cursor), fontSize);
     fill_rect(caret, 8, 1.4, 20, 0xff167dad);
   }
 
   let x = PAD;
-  const y = HEADER + (HEIGHT - HEADER - line_height(FONT_TEXT, fontSize)) / 2.0 - 1.0;
+  const y = HEADER + (HEIGHT - HEADER - line_height(textFont, fontSize)) / 2.0 - 1.0;
   const right = width - 28.0;
   for (let i = 0; i < current.items.length && i < 9; i++) {
     const item = current.items[i];
     const label = (current.pageStart + i + 1).toString() + ".";
-    const labelWidth = measure(label, FONT_NUMBER, fontSize - 1);
-    const textWidth = measure(item.primary, i == current.selectedIndex ? FONT_TEXT_BOLD : FONT_TEXT, fontSize);
+    const labelWidth = measure_text(numberFont, label, fontSize - 1);
+    const itemFont = i == current.selectedIndex ? boldFont : textFont;
+    const textWidth = measure_text(itemFont, item.primary, fontSize);
     const itemWidth = labelWidth + textWidth + 12.0;
     if (x + itemWidth > right) break;
     const color: u32 = item.enabled ? 0xff202020 : 0xff808080;
-    draw(label, x, y + 1, FONT_NUMBER, fontSize - 1, color);
-    draw(item.primary, x + labelWidth + 2, y,
-      i == current.selectedIndex ? FONT_TEXT_BOLD : FONT_TEXT, fontSize, color);
+    draw_text(numberFont, label, x, y + 1, fontSize - 1, color);
+    draw_text(itemFont, item.primary, x + labelWidth + 2, y, fontSize, color);
     hits.push(new Hit(x, itemWidth, i));
     x += itemWidth;
   }
   if (current.canPageNext || current.items.length > 0) {
-    draw("▶", width - 20, HEADER + 7, FONT_TEXT, 13, 0xff101010);
+    draw_text(textFont, "▶", width - 20, HEADER + 7, 13, 0xff101010);
   }
 }
 
@@ -137,12 +138,12 @@ export function theme_capabilities(): i32 { return Capability.Preedit | Capabili
 export function theme_create(_mode: i32, _dark: i32): i32 {
   configure();
   set_visible(0);
-  return ERR_OK;
+  return ErrorCode.Success;
 }
 
 function render(): i32 {
   const next = readView();
-  if (next == null) return ERR_BAD_VIEW;
+  if (next == null) return ErrorCode.InvalidArgument;
   view = next;
   const chinese = next.active && next.hasAsciiMode && !next.asciiMode;
   if (!chinese) {
@@ -186,11 +187,11 @@ function mouse(kind: i32, x: f32, y: f32): i32 {
       if (x >= hits[i].x && x < hits[i].x + hits[i].w) { item = hits[i].index; break; }
     }
   }
-  if (kind == MOUSE_MOVE && hoverClose != close) {
+  if (kind == PointerPhase.Move && hoverClose != close) {
     hoverClose = close;
     paintContent(); result = FrameResult.Present;
   }
-  if (kind == MOUSE_DOWN) {
+  if (kind == PointerPhase.Down) {
     // 上层输入区（关闭按钮除外）作为整条状态栏的拖动把手。
     if (y >= 0 && y < HEADER && !close) {
       pressedClose = false;
@@ -203,7 +204,7 @@ function mouse(kind: i32, x: f32, y: f32): i32 {
     pressedNext = next;
     pressedItem = item;
     if (close) paintContent(); result = FrameResult.Present;
-  } else if (kind == MOUSE_UP) {
+  } else if (kind == PointerPhase.Up) {
     const closeClick = pressedClose && close;
     const nextClick = pressedNext && next;
     const itemClick = pressedItem >= 0 && pressedItem == item;
@@ -215,13 +216,13 @@ function mouse(kind: i32, x: f32, y: f32): i32 {
 
     set_visible(0); result = FrameResult.Present;
 
-      send_action(ACTION_DISMISS, 0);
+      send_action(Action.Dismiss, 0);
     } else if (nextClick && view!.canPageNext) {
-      send_action(ACTION_NEXT, 0);
+      send_action(Action.Next, 0);
     } else if (itemClick) {
-      send_action(ACTION_ITEM, item);
+      send_action(Action.Item, item);
     }
-  } else if (kind == MOUSE_LEAVE || kind == MOUSE_CANCEL) {
+  } else if (kind == PointerPhase.Leave || kind == PointerPhase.Cancel) {
     hoverClose = false;
     pressedClose = false;
     pressedNext = false;

@@ -20,8 +20,6 @@ const value = (scope, p, n) => {
 const host = {
   ...createViewHost(() => view, () => new Uint8Array(memory.buffer)),
   ...createResourceHost(string, t => calls.push(["text",t.text,t.x,t.y,t.font,t.size,t.color,t.glow,t.glow_color])),
-  set_text_glow(radius, color) { assert.equal(radius, 3); assert.equal(color >>> 0, 0xffffffff); },
-  line_height(slot, size) { return size * 1.4; },
   data_kind(s, p, n) {
     const v = value(s, p, n);
     return v === undefined ? 0 : v === null ? 1 : typeof v === 'boolean' ? 2 :
@@ -34,8 +32,6 @@ const host = {
     if (bytes.length <= capacity) new Uint8Array(memory.buffer, dst, bytes.length).set(bytes);
     return bytes.length;
   },
-  measure_text(p, n, font, size) { return [...string(p, n)].length * size / 2; },
-  draw_text(p, n, ...args) { calls.push(['text', string(p, n), ...args]); },
   fill_rounded_rect(...args) { calls.push(['rounded', ...args]); },
   set_panel(...args) { calls.push(['panel', ...args]); },
   set_backdrop(...args) { calls.push(['backdrop', ...args]); },

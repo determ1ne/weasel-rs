@@ -3,7 +3,9 @@
 //! 绘制命令在每次事件开始时重置；返回 `FrameResult::Present` 才会提交主画面，且普通
 //! 主画面 Present 会替换整帧。变换和裁剪只影响绘制，不会改变表面几何或命中区域；
 //! 每次 push 都必须配对 pop，即使本次事件最终返回 `Keep` 也须恢复栈平衡。
-pub use crate::graphics::{draw, draw_glow, line_height, measure, set_font};
+pub use crate::graphics::{
+    FontSlot, draw_text, draw_text_glow, line_height, measure_text, set_font,
+};
 use crate::raw;
 /// 推入局部到父坐标的仿射变换 `[m11, m12, m21, m22, dx, dy]`。
 ///

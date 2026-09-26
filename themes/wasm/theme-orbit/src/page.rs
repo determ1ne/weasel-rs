@@ -1,7 +1,7 @@
 //! 候选页绘制与翻页过渡：每页携带自己的文字布局和命中数据，翻页时最多保留一张旧页。
 use crate::{style::Palette, text::TextCache};
 use weasel_wasm_sdk::{
-    draw::{draw, line_height, pop_draw_state, push_clip, rounded_rect},
+    draw::{FontSlot, draw_text, line_height, pop_draw_state, push_clip, rounded_rect},
     interaction::hit_region,
     layers::{layer_clip, layer_interactive, layer_z_index, with_layer},
 };
@@ -35,7 +35,15 @@ impl Page {
     ///
     /// 图层内容在动画期间保持不变，裁剪、层级和交互状态由宿主合成器承载；`hover` 仅
     /// 改变当前帧的强调样式，不影响候选数据或动画时间线。
-    pub fn paint(&self, id: i32, bounds: [f32; 4], size: f32, p: &Palette, hover: i32) {
+    pub fn paint(
+        &self,
+        id: i32,
+        bounds: [f32; 4],
+        size: f32,
+        number_font: FontSlot,
+        p: &Palette,
+        hover: i32,
+    ) {
         let [left, top, width, height] = bounds;
         // 内容只绘制一次，位移/透明度由合成器推进。裁剪属于静止父容器。
         with_layer(id, left + width, top + height, || {
@@ -56,11 +64,11 @@ impl Page {
                     rounded_rect(x + 8.0, y + h - 4.0, w - 16.0, 2.0, 1.0, p.accent);
                 }
                 push_clip([x + 5.0, y, w - 10.0, h]);
-                draw(
+                draw_text(
+                    number_font,
                     &(i + 1).to_string(),
                     x + 8.0,
-                    y + (h - line_height(1, small)) / 2.0,
-                    1,
+                    y + (h - line_height(number_font, small)) / 2.0,
                     small,
                     p.muted,
                 );

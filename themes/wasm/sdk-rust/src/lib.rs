@@ -1,4 +1,3 @@
-#![doc = include_str!("guide.md")]
 //! 面向 WASM 主题作者的 Rust SDK。优先从 `lifecycle`、`config`、`view`、`draw`、
 //! `surface`、`interaction` 等分组模块导入；`raw` 仅用于需要直接调用宿主 ABI 的高级场景。
 //! 主题应先在创建入口读取并缓存配置和资源，再在事件入口读取快照、构建完整画面，
@@ -36,11 +35,6 @@ pub use resources::{Font, Image, TextLayout};
 pub use surface::*;
 /// 当前事件中的只读视图快照。
 pub use view::View;
-/// 旧主题使用的粗体字体槽位编号。
-pub const FONT_TEXT_BOLD: i32 = 4;
-/// 旧主题使用的关闭面板动作编号。
-pub const ACTION_DISMISS: i32 = Action::Dismiss as i32;
-
 /// 请求一次后续动画事件；通常优先使用 [`animation::request_frame`]。
 pub fn request_frame() {
     unsafe {

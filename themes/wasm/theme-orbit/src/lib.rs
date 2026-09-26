@@ -13,7 +13,8 @@ use style::Style;
 use weasel_wasm_sdk::{
     animation::{cancel_wakeup, request_wakeup},
     draw::{
-        draw, fill_rect, line_height, measure, pop_draw_state, push_clip, rounded_rect, set_font,
+        FontSlot, draw_text, fill_rect, line_height, measure_text, pop_draw_state, push_clip,
+        rounded_rect, set_font,
     },
     interaction::{Action, PointerPhase, hit_region, pointer_layer, pointer_region, send_action},
     layers::{
@@ -40,6 +41,7 @@ const MOTION_STEP: f64 = 100.0;
 /// 保留一个旧页，直到过渡截止后释放。`motion_time` 记录累计可见时长，隐藏时暂停相位。
 struct State {
     style: Style,
+    fonts: Fonts,
     moon: Image,
     page: page::Page,
     transition: Option<page::Transition>,
@@ -54,6 +56,12 @@ struct State {
     page_start: Option<u32>,
     palette_dirty: bool,
 }
+
+#[derive(Clone, Copy)]
+struct Fonts {
+    text: FontSlot,
+    number: FontSlot,
+}
 thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
 
 /// 返回此主题实现的宿主 ABI 版本。
@@ -64,7 +72,7 @@ pub extern "C" fn theme_abi_version() -> u32 {
 /// 声明主题使用的能力位，供宿主在创建前协商。
 #[unsafe(no_mangle)]
 pub extern "C" fn theme_capabilities() -> u32 {
-    Capability::Preedit as u32
+    Capability::Preedit.bits() as u32
 }
 
 /// 初始化字体、配置和首个候选页；失败时返回对应错误码。
@@ -73,8 +81,10 @@ pub extern "C" fn theme_create(_mode: i32, dark: i32) -> i32 {
     let Ok(moon) = Image::from_png(include_bytes!(concat!(env!("OUT_DIR"), "/moon.png"))) else {
         return ErrorCode::InvalidArgument as i32;
     };
-    set_font(0, "Microsoft YaHei UI");
-    set_font(1, "Segoe UI");
+    let fonts = Fonts {
+        text: set_font(0, "Microsoft YaHei UI", 400),
+        number: set_font(1, "Segoe UI", 400),
+    };
     let style = Style::read();
     let page = match page::Page::new(style.font_size) {
         Ok(text) => text,
@@ -83,6 +93,7 @@ pub extern "C" fn theme_create(_mode: i32, dark: i32) -> i32 {
     STATE.with(|state| {
         *state.borrow_mut() = Some(State {
             style,
+            fonts,
             moon,
             page,
             transition: None,
@@ -219,8 +230,8 @@ impl State {
         self.page.text.update(&view.items)?;
         let size = self.style.font_size;
         let small = (size - 3.0).max(11.0);
-        let text_height = line_height(0, size);
-        let row = text_height.max(line_height(1, small)) + 10.0;
+        let text_height = line_height(self.fonts.text, size);
+        let row = text_height.max(line_height(self.fonts.number, small)) + 10.0;
         if !row.is_finite() || row > 100.0 {
             return Err(ErrorCode::InvalidArgument as i32);
         }
@@ -248,7 +259,9 @@ impl State {
         let pre_width = view
             .preedit
             .as_ref()
-            .map_or(0.0, |p| measure(&p.text, 0, size).min(MAX_ROW) + 24.0);
+            .map_or(0.0, |p| {
+                measure_text(self.fonts.text, &p.text, size).min(MAX_ROW) + 24.0
+            });
         let width = (used.max(pre_width) + 54.0).max(260.0);
         let paging = view.can_page_previous || view.can_page_next;
         let bottom = if cells.is_empty() {
@@ -283,7 +296,7 @@ impl State {
         if let Some(preedit) = &view.preedit {
             push_clip([12.0, TOP + 4.0, width - 70.0, pre_height - 4.0]);
             let py = TOP + (pre_height - text_height) / 2.0;
-            draw(&preedit.text, 14.0, py, 0, size, p.text);
+            draw_text(self.fonts.text, &preedit.text, 14.0, py, size, p.text);
             // cursor_utf16 以UTF-16单元计；不能当UTF-8下标截取中文或emoji。
             let mut units = 0;
             let prefix: String = preedit
@@ -294,7 +307,7 @@ impl State {
                     units <= preedit.cursor_utf16
                 })
                 .collect();
-            let cx = 14.0 + measure(&prefix, 0, size);
+            let cx = 14.0 + measure_text(self.fonts.text, &prefix, size);
             fill_rect(cx, py + 2.0, 1.5, text_height - 4.0, p.accent);
             pop_draw_state();
             fill_rect(12.0, TOP + pre_height, width - 72.0, 1.0, p.border);
@@ -320,9 +333,17 @@ impl State {
         }
         // 只替换内容，不在普通 View/hover 中重新启动原生动画。
         if let Some(t) = &self.transition {
-            t.old.paint(page::OUTGOING, bounds, size, &p, -1);
+            t.old
+                .paint(page::OUTGOING, bounds, size, self.fonts.number, &p, -1);
         }
-        self.page.paint(page::CURRENT, bounds, size, &p, self.hover);
+        self.page.paint(
+            page::CURRENT,
+            bounds,
+            size,
+            self.fonts.number,
+            &p,
+            self.hover,
+        );
         if changed_page {
             let t = self.transition.as_ref().unwrap();
             layer_set(page::OUTGOING, LayerProperty::OffsetX, t.old_offset);
@@ -359,11 +380,11 @@ impl State {
                 (PREVIOUS, "‹", view.can_page_previous, width - 78.0),
                 (NEXT, "›", view.can_page_next, width - 48.0),
             ] {
-                draw(
+                draw_text(
+                    self.fonts.number,
                     label,
                     x + 8.0,
-                    bottom + (22.0 - line_height(1, 18.0)) / 2.0,
-                    1,
+                    bottom + (22.0 - line_height(self.fonts.number, 18.0)) / 2.0,
                     18.0,
                     if enabled { p.accent } else { p.muted },
                 );

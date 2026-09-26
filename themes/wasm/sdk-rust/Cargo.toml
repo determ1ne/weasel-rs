@@ -7,18 +7,6 @@ license = "BSD-3-Clause"
 # Guest package, deliberately separate from the native Windows workspace.
 [workspace]
 
-[[example]]
-name = "minimal"
-crate-type = ["cdylib"]
-
 [profile.release]
 panic = "abort"
 lto = true
-
-[[example]]
-name = "animated"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "layer-pulse"
-crate-type = ["cdylib"]
