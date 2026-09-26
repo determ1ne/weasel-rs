@@ -9,9 +9,10 @@ Var ProcessHandle
 Var ProcessName
 Var ProcessPass
 Var ProcessId
+Var ProcessTerminate
 Var ScanPassLimit
 
-; ScanResult: 0 = clear, 10 = service running, 20 = settings open, 1 = error.
+; ScanResult: 0 = clear, 10 = service running, 1 = error.
 ; This installer is x86-unicode, so PROCESSENTRY32W is 556 bytes even on x64.
 ; Never terminate by filename alone: query and terminate the same open handle.
 !macro DefineScanApplicationProcesses PREFIX
@@ -26,6 +27,14 @@ Function ${PREFIX}ScanApplicationProcesses
       StrCpy $ProcessName "weasel-renderer.exe"
     ${ElseIf} $ProcessPass == 3
       StrCpy $ProcessName "weasel-settings.exe"
+    ${EndIf}
+    ; The settings executable cannot participate in the broker's graceful
+    ; shutdown. Always stop the path-verified installed instance immediately;
+    ; service processes still require ScanMode=1 before they are terminated.
+    StrCpy $ProcessTerminate 0
+    ${If} $ScanMode == 1
+    ${OrIf} $ProcessPass == 3
+      StrCpy $ProcessTerminate 1
     ${EndIf}
     StrCpy $ProcessHandle 0
     System::Call 'kernel32::CreateToolhelp32Snapshot(i 2, i 0) p.s'
@@ -48,9 +57,9 @@ Function ${PREFIX}ScanApplicationProcesses
     System::Call '*$ProcessEntry(i, i, i.r1, i, i, i, i, i, i, &w260.r2)'
     StrCpy $ProcessId $1
     StrCmp $2 $ProcessName 0 scan_next
-    ; QUERY_LIMITED_INFORMATION | SYNCHRONIZE (+ TERMINATE after consent).
+    ; QUERY_LIMITED_INFORMATION | SYNCHRONIZE (+ TERMINATE when requested).
     StrCpy $0 0x101000
-    ${If} $ScanMode == 1
+    ${If} $ProcessTerminate == 1
       IntOp $0 $0 | 1
     ${EndIf}
     System::Call 'kernel32::OpenProcess(i r0, i 0, i r1) p.s ?e'
@@ -63,13 +72,7 @@ Function ${PREFIX}ScanApplicationProcesses
     System::Call 'kernel32::QueryFullProcessImageNameW(p $ProcessHandle, i 0, w .r3, *i r4) i.r0'
     StrCmp $0 0 scan_entry_error
     StrCmp $3 "$INSTDIR\$ProcessName" 0 scan_close_process
-    ; Never discard an editor's unsaved configuration, including a process
-    ; that appeared after the read-only scan.
-    ${If} $ProcessPass == 3
-      StrCpy $ScanResult 20
-      Goto scan_close_process
-    ${EndIf}
-    ${If} $ScanMode == 0
+    ${If} $ProcessTerminate == 0
       StrCpy $ScanResult 10
     ${Else}
       System::Call 'kernel32::WaitForSingleObject(p $ProcessHandle, i 0) i.r0'

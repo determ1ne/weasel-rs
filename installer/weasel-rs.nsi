@@ -204,7 +204,6 @@ Function StopApplicationProcesses
   StrCpy $ScanMode 0
   Call ScanApplicationProcesses
   StrCmp $ScanResult 0 processes_stopped
-  StrCmp $ScanResult 20 settings_open
   StrCmp $ScanResult 10 0 process_error
   StrCmp $ForceStopUnregisteredInstall 1 force_stop
   ; Use the bundled new broker, because an old installed broker may not know
@@ -220,7 +219,6 @@ Function StopApplicationProcesses
   StrCpy $ScanMode 0
   Call ScanApplicationProcesses
   StrCmp $ScanResult 0 processes_stopped
-  StrCmp $ScanResult 20 settings_open
   StrCmp $ScanResult 10 0 process_error
   MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "算法服务未能正常退出。是否强制结束仍在运行的小狼毫RS服务进程？" /SD IDNO IDYES force_stop
   SetErrorLevel 1
@@ -229,18 +227,12 @@ Function StopApplicationProcesses
   !insertmacro InstallLog "INFO: 正在强制结束未退出的小狼毫RS服务进程"
   StrCpy $ScanMode 1
   Call ScanApplicationProcesses
-  StrCmp $ScanResult 20 settings_open
   StrCmp $ScanResult 0 0 process_error
   StrCpy $ScanMode 0
   Call ScanApplicationProcesses
   StrCmp $ScanResult 0 processes_stopped
-  StrCmp $ScanResult 20 settings_open
   process_error:
     MessageBox MB_OK|MB_ICONSTOP "无法检查或结束小狼毫RS 进程，请手动退出相关程序后重试。" /SD IDOK
-    SetErrorLevel 1
-    Abort
-  settings_open:
-    MessageBox MB_OK|MB_ICONEXCLAMATION "设置应用仍在运行。请保存修改并关闭设置应用，然后重新运行安装程序。" /SD IDOK
     SetErrorLevel 1
     Abort
   processes_stopped:
@@ -698,9 +690,9 @@ FunctionEnd
 ; Run only after the user confirms uninstallation. Do not block the confirm
 ; page just because the broker is still running.
 Function un.StopApplicationProcesses
-  ; The settings editor may contain unsaved changes. Leave it alone; its files
-  ; can be removed on reboot if necessary.
-  StrCpy $ScanPassLimit 3
+  ; Settings has no broker-managed graceful shutdown path, so the shared scan
+  ; force-stops its path-verified process before handling the service family.
+  StrCpy $ScanPassLimit 4
   StrCpy $ScanMode 0
   Call un.ScanApplicationProcesses
   StrCmp $ScanResult 0 uninstall_processes_stopped
