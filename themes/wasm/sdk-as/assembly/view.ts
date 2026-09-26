@@ -1,4 +1,4 @@
-import { ViewField, ViewStringField } from "./types";
+import { ModeIndicatorReason, ViewField, ViewStringField } from "./types";
 // Host snapshot adapter. No JSON parser or fixed-address transfer arena.
 import { view_i64 as integer, view_string as copy } from "./raw";
 
@@ -25,6 +25,10 @@ export class View {
   active: bool = false;
   hasAsciiMode: bool = false;
   asciiMode: bool = true;
+  hasModeIndicator: bool = false;
+  modeIndicatorId: i64 = 0;
+  modeIndicatorAscii: bool = false;
+  modeIndicatorReason: ModeIndicatorReason = ModeIndicatorReason.Focus;
   visible: bool = true;
   anchorValid: bool = false;
   anchorLeft: i32 = 0;
@@ -52,6 +56,12 @@ export function readView(): View | null {
   const ascii = integer(ViewField.AsciiMode,0);
   v.hasAsciiMode = ascii >= 0;
   v.asciiMode = ascii != 0;
+  v.hasModeIndicator = integer(ViewField.HasModeIndicator,0) != 0;
+  if (v.hasModeIndicator) {
+    v.modeIndicatorId = integer(ViewField.ModeIndicatorId,0);
+    v.modeIndicatorAscii = integer(ViewField.ModeIndicatorAscii,0) != 0;
+    v.modeIndicatorReason = <ModeIndicatorReason>integer(ViewField.ModeIndicatorReason,0);
+  }
   v.selectedIndex = <i32>integer(ViewField.SelectedIndex,0);
   v.pageStart = <i32>integer(ViewField.PageStart,0);
   v.totalItemCount = <i32>integer(ViewField.TotalItemCount,0);

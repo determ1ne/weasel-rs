@@ -235,7 +235,7 @@ impl TextService {
 }
 
 /// 将 TSF 状态查询解释为可编辑性；查询失败时采取放行按键的保守策略。
-fn context_is_writable(status: Result<bindings::TF_STATUS>) -> bool {
+pub(super) fn context_is_writable(status: Result<bindings::TF_STATUS>) -> bool {
     status
         .map(|status| status.dwDynamicFlags & bindings::TF_SD_READONLY == 0)
         .unwrap_or(false)

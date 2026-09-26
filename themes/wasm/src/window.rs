@@ -17,7 +17,9 @@
 
 use crate::appearance::{self};
 use crate::d2d_bindings::*;
-use crate::presentation::{is_visible, popup_position, preview_position};
+use crate::presentation::{
+    is_mode_indicator_visible, is_visible, popup_position, preview_position,
+};
 use crate::protocol::{
     ACTION_DISMISS, ACTION_EMOJI, ACTION_ITEM, ACTION_NEXT, ACTION_PREVIOUS, DrawCommand,
     MOUSE_DOWN, MOUSE_LEAVE, MOUSE_MOVE, MOUSE_UP, PlacementStyle,
@@ -649,7 +651,9 @@ impl Window {
         let moved = {
             let app = self.app.borrow();
             app.content.as_ref().is_some_and(|c| {
-                (is_visible(snapshot) || (app.runtime.resident() && snapshot.active))
+                (is_visible(snapshot)
+                    || (app.runtime.resident() && snapshot.active)
+                    || (app.runtime.mode_indicator() && is_mode_indicator_visible(snapshot)))
                     && same_content(&c.last, snapshot)
             })
         };
@@ -668,7 +672,9 @@ impl Window {
         self.health()?;
         let accepted = {
             let app = self.app.borrow();
-            is_visible(snapshot) || (app.runtime.resident() && snapshot.active)
+            is_visible(snapshot)
+                || (app.runtime.resident() && snapshot.active)
+                || (app.runtime.mode_indicator() && is_mode_indicator_visible(snapshot))
         };
         if !accepted {
             self.hide();

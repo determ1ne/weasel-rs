@@ -16,6 +16,16 @@ pub fn is_visible(snapshot: &CandidateView) -> bool {
         && snapshot.anchor.as_ref().is_some_and(|anchor| anchor.valid)
 }
 
+/// 判断快照是否包含位于有效插入点附近的中英文模式提示。
+///
+/// 此函数只判断主题输入模型，不决定主题是否声明了对应能力；能力门控由 Renderer
+/// 和具体主题工厂共同完成。
+pub fn is_mode_indicator_visible(snapshot: &CandidateView) -> bool {
+    snapshot.mode_indicator.is_some()
+        && snapshot.active
+        && snapshot.anchor.as_ref().is_some_and(|anchor| anchor.valid)
+}
+
 /// 将独立预览窗口居中放在主显示器工作区内；预览没有插入点锚点可供定位。
 ///
 /// `width`、`height` 和返回坐标均为物理像素；无法取得显示器信息时返回屏幕原点。

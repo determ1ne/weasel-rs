@@ -1,5 +1,6 @@
 // Generated from themes/wasm/abi.json. DO NOT EDIT.
-export const ViewField = Object.freeze({"ContentId":0,"Active":1,"Visible":2,"AsciiMode":3,"ItemCount":4,"SelectedIndex":5,"PageStart":6,"TotalItemCount":7,"CanPagePrevious":8,"CanPageNext":9,"HasPreedit":10,"CursorUtf16":11,"HasSnapshot":12,"ItemEnabled":13,"AnchorValid":14,"AnchorLeft":15,"AnchorTop":16,"AnchorRight":17,"AnchorBottom":18});
+export const ViewField = Object.freeze({"ContentId":0,"Active":1,"Visible":2,"AsciiMode":3,"ItemCount":4,"SelectedIndex":5,"PageStart":6,"TotalItemCount":7,"CanPagePrevious":8,"CanPageNext":9,"HasPreedit":10,"CursorUtf16":11,"HasSnapshot":12,"ItemEnabled":13,"AnchorValid":14,"AnchorLeft":15,"AnchorTop":16,"AnchorRight":17,"AnchorBottom":18,"HasModeIndicator":19,"ModeIndicatorId":20,"ModeIndicatorAscii":21,"ModeIndicatorReason":22});
+export const ModeIndicatorReason = Object.freeze({"Focus":1,"UserSwitch":2});
 export const ViewStringField = Object.freeze({"Primary":0,"Secondary":1,"Preedit":2});
 export const ConfigScope = Object.freeze({"Module":1,"Global":2});
 export const DataKind = Object.freeze({"Missing":0,"Null":1,"Bool":2,"Number":3,"String":4,"Array":5,"Object":6});
@@ -11,7 +12,7 @@ export const FrameResult = Object.freeze({"Keep":0,"Present":1});
 export const ErrorCode = Object.freeze({"Success":0,"NotFound":-1,"InvalidArgument":-2,"InvalidHandle":-3,"ResourceLimit":-6,"Internal":-7});
 export const Mode = Object.freeze({"Live":0,"Preview":1});
 export const LogLevel = Object.freeze({"Trace":0,"Debug":1,"Info":2,"Warn":3,"Error":4});
-export const Capability = Object.freeze({"None":0,"Preedit":1,"Resident":2});
+export const Capability = Object.freeze({"None":0,"Preedit":1,"Resident":2,"ModeIndicator":4});
 export const LayerProperty = Object.freeze({"Opacity":0,"OffsetX":1,"OffsetY":2,"ScaleX":3,"ScaleY":4});
 export const Easing = Object.freeze({"Linear":0,"SmoothStep":1,"EaseIn":2,"EaseOut":3});
 export const LayerStop = Object.freeze({"Current":0,"End":1});

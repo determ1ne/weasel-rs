@@ -268,6 +268,7 @@ impl TextService {
         let states = self.lock(&self.contexts)?.clone();
         for state in states {
             if Some(state.id) == previous {
+                self.lock(&state.layout)?.cancel_indicator();
                 self.send_context_action(&state, ContextAction::Blur, false)?;
             }
         }
@@ -410,6 +411,10 @@ impl TextService {
                         self.remember_input_mode(ascii)?;
                     }
                     self.refresh_language_bar()?;
+                }
+                if let Some(request_id) = response.mode_indicator_request_id {
+                    // 提示定位失败不影响键入，也不应把 TIP 置为故障状态。
+                    let _ = self.request_mode_indicator_layout(&state, request_id);
                 }
                 if response::has_edit_payload(&response) {
                     response::validate(&response)?;

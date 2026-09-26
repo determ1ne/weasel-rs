@@ -71,6 +71,9 @@ pub struct ThemeCapabilities {
     /// 状态，在输入上下文不再活动时收起驻留 UI。
     #[serde(default)]
     pub resident: bool,
+    /// 后端能否显示由宿主定时、位于插入点附近的中英文模式提示。
+    #[serde(default)]
+    pub mode_indicator: bool,
 }
 
 impl ThemeCapabilities {
@@ -78,7 +81,28 @@ impl ThemeCapabilities {
     pub const CANDIDATES_ONLY: Self = Self {
         preedit: false,
         resident: false,
+        mode_indicator: false,
     };
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+/// 中英文模式提示的触发来源。
+pub enum ModeIndicatorReason {
+    /// 新的可编辑上下文获得焦点。
+    Focus,
+    /// 用户操作使最终模式发生变化。
+    UserSwitch,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+/// 由宿主统一管理生命周期的短暂中英文模式提示。
+pub struct ModeIndicator {
+    /// 不透明提示标识；相同标识的布局刷新不得重新开始计时。
+    pub id: u64,
+    /// `false` 表示中文，`true` 表示英文。
+    pub ascii_mode: bool,
+    /// 触发提示的原因。
+    pub reason: ModeIndicatorReason,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -125,6 +149,8 @@ pub struct CandidateView {
     pub active: bool,
     /// 当前 Rime ASCII 模式；`None` 表示引擎无法确定模式，不能据此假定为任一模式。
     pub ascii_mode: Option<bool>,
+    /// 独立于候选内容的短暂模式提示；其期限和取消由 Renderer 管理。
+    pub mode_indicator: Option<ModeIndicator>,
     /// 当前快照是否要求展示 UI。
     pub visible: bool,
     /// 候选 UI 的定位锚点；缺省或无效锚点表示没有可用的定位几何信息。
@@ -152,6 +178,13 @@ pub fn same_content(a: &CandidateView, b: &CandidateView) -> bool {
     a.content_id == b.content_id
         && a.active == b.active
         && a.ascii_mode == b.ascii_mode
+        && match (&a.mode_indicator, &b.mode_indicator) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                a.id == b.id && a.ascii_mode == b.ascii_mode && a.reason == b.reason
+            }
+            _ => false,
+        }
         && a.preedit == b.preedit
         && a.items == b.items
         && a.selected_index == b.selected_index

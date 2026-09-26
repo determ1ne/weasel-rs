@@ -18,8 +18,8 @@ pub use Windows::UI::Xaml::Media::{
     AcrylicBackgroundSource, AcrylicBrush, FontFamily, SolidColorBrush,
 };
 pub use Windows::UI::Xaml::{
-    CornerRadius, ElementTheme, GridLength, GridUnitType, HorizontalAlignment, Thickness,
-    VerticalAlignment,
+    CornerRadius, ElementTheme, GridLength, GridUnitType, HorizontalAlignment, TextAlignment,
+    Thickness, VerticalAlignment, Visibility,
 };
 pub use Windows::Win32::{
     CreateWindowExW, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,

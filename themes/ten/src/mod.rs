@@ -35,6 +35,8 @@ struct Graphics {
     text: IDWriteTextFormat,
     /// 候选次要文本格式。
     comment: IDWriteTextFormat,
+    /// 中英文模式提示格式。
+    mode: IDWriteTextFormat,
     /// 翻页和表情操作的图标格式。
     icon: IDWriteTextFormat,
     /// 与此 HWND 关联、可在设备丢失后丢弃并重建的绘制目标。
@@ -78,6 +80,7 @@ impl Graphics {
                     20.0,
                     DWRITE_TEXT_ALIGNMENT_LEADING,
                 )?,
+                mode: format(w!("Microsoft YaHei UI"), 25.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
                 icon: format(w!("Segoe MDL2 Assets"), 20.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
                 write,
                 target: None,
@@ -344,7 +347,7 @@ impl Window {
                     // monitor instead of anchoring to a rect.
                     app.content.as_ref().map(|c| {
                         let width = pixels(c.layout.width, dpi);
-                        let height = pixels(HEIGHT, dpi);
+                        let height = pixels(c.layout.height, dpi);
                         let (x, y) = crate::presentation::preview_position(width, height);
                         (x, y, width, height)
                     })
@@ -356,7 +359,7 @@ impl Window {
                             .filter(|a| a.valid)
                             .map(|anchor| {
                                 let width = pixels(c.layout.width, dpi);
-                                let height = pixels(HEIGHT, dpi);
+                                let height = pixels(c.layout.height, dpi);
                                 let (x, y) =
                                     crate::presentation::popup_position(anchor, width, height);
                                 (x, y, width, height)
@@ -446,10 +449,20 @@ impl Window {
             };
             target.Clear(Some(&color(p.background)));
             if let Some(c) = &app.content {
+                if let Some(indicator) = &c.snapshot.mode_indicator {
+                    text(
+                        target,
+                        &brush,
+                        &app.graphics.mode,
+                        if indicator.ascii_mode { "英" } else { "中" },
+                        rect(0.0, 0.0, c.layout.width, c.layout.height),
+                        p.text,
+                    );
+                }
                 for cell in &c.layout.cells {
                     let selected = matches!(cell.hit, Hit::Candidate(i) if i == c.snapshot.selected_index as usize);
                     let usable = enabled(&c.snapshot, cell.hit);
-                    let rect = rect(cell.left, 0.0, cell.right, HEIGHT);
+                    let rect = rect(cell.left, 0.0, cell.right, c.layout.height);
                     if selected || (usable && app.gesture.hovered == Some(cell.hit)) {
                         brush.SetColor(&color(if selected { p.active } else { p.hover }));
                         target.FillRectangle(&rect, &brush);
@@ -518,16 +531,21 @@ impl Window {
                 for cell in &c.layout.cells {
                     if matches!(cell.hit, Hit::Previous | Hit::Emoji) {
                         target.FillRectangle(
-                            &rect(cell.left, 0.0, cell.left + SCALE, HEIGHT),
+                            &rect(cell.left, 0.0, cell.left + SCALE, c.layout.height),
                             &brush,
                         );
                     }
                 }
                 for edge in [
                     rect(0.0, 0.0, c.layout.width, SCALE),
-                    rect(0.0, HEIGHT - SCALE, c.layout.width, HEIGHT),
-                    rect(0.0, 0.0, SCALE, HEIGHT),
-                    rect(c.layout.width - SCALE, 0.0, c.layout.width, HEIGHT),
+                    rect(
+                        0.0,
+                        c.layout.height - SCALE,
+                        c.layout.width,
+                        c.layout.height,
+                    ),
+                    rect(0.0, 0.0, SCALE, c.layout.height),
+                    rect(c.layout.width - SCALE, 0.0, c.layout.width, c.layout.height),
                 ] {
                     target.FillRectangle(&edge, &brush);
                 }
@@ -582,7 +600,8 @@ impl Window {
         let moved = {
             let mut app = self.app.borrow_mut();
             if let Some(content) = app.content.as_mut()
-                && crate::presentation::is_visible(snapshot)
+                && (crate::presentation::is_visible(snapshot)
+                    || crate::presentation::is_mode_indicator_visible(snapshot))
                 && crate::theme_api::same_content(&content.snapshot, snapshot)
             {
                 content.snapshot = snapshot.clone();
@@ -598,7 +617,9 @@ impl Window {
         }
         self.cancel();
         self.health()?;
-        if !snapshot.visible || !snapshot.anchor.as_ref().is_some_and(|a| a.valid) {
+        if !(crate::presentation::is_visible(snapshot)
+            || crate::presentation::is_mode_indicator_visible(snapshot))
+        {
             self.hide();
             return Ok(());
         }
@@ -624,10 +645,15 @@ impl Window {
                 primary_widths.push(primary);
                 widths.push(primary + secondary);
             }
+            let layout = if snapshot.mode_indicator.is_some() {
+                Layout::mode_indicator()
+            } else {
+                Layout::new(widths)
+            };
             app.content = Some(Content {
                 snapshot: snapshot.clone(),
                 events: events.clone(),
-                layout: Layout::new(widths),
+                layout,
                 primary_widths,
             });
         }
@@ -949,7 +975,10 @@ impl crate::theme_api::ThemeFactory for Factory {
     }
     /// 声明此主题只提供候选栏界面。
     fn capabilities(&self) -> crate::theme_api::ThemeCapabilities {
-        crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY
+        crate::theme_api::ThemeCapabilities {
+            mode_indicator: true,
+            ..crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY
+        }
     }
     /// 校验 ten 专属配置并创建对应模式的窗口后端。
     ///

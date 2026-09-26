@@ -174,6 +174,9 @@ impl Metadata {
                         value.is_string()
                     }
                     "hidden" | "readOnly" => value.is_boolean(),
+                    "choices" => value
+                        .as_array()
+                        .is_some_and(|items| items.iter().all(Value::is_string)),
                     _ => false,
                 };
                 if !safe {

@@ -5,7 +5,7 @@
 //! `None`。字符串在读取时复制，视图值可在当前回调中安全保存为主题自己的状态。
 use crate::{
     raw,
-    types::{ViewField, ViewStringField},
+    types::{ModeIndicatorReason, ViewField, ViewStringField},
 };
 
 /// 当前候选页中的一个条目；索引是页内索引，动作提交时绑定已展示快照。
@@ -24,6 +24,15 @@ pub struct Preedit {
     /// 光标相对 `text` 起点的 UTF-16 代码单元偏移，不是 UTF-8 字节数或字符数。
     pub cursor_utf16: u32,
 }
+/// 一次由宿主定位并统一计时的短暂中英文模式提示。
+pub struct ModeIndicator {
+    /// 不透明提示 ID；同一 ID 的几何刷新属于同一次展示。
+    pub id: u64,
+    /// `true` 为英文，`false` 为中文。
+    pub ascii_mode: bool,
+    /// 提示由焦点进入还是用户主动切换触发。
+    pub reason: ModeIndicatorReason,
+}
 /// 一次事件读取到的完整输入视图快照。
 pub struct View {
     /// 宿主快照内容标识，按 `u64` 位模式保留。
@@ -34,6 +43,8 @@ pub struct View {
     pub visible: bool,
     /// ASCII 模式状态；宿主未知时为 `None`。
     pub ascii_mode: Option<bool>,
+    /// 需要在插入点附近显示的短暂模式提示。
+    pub mode_indicator: Option<ModeIndicator>,
     /// 当前候选页条目；长度可能为零。
     pub items: Vec<Item>,
     /// 当前页中已选候选的页内索引。
@@ -94,6 +105,18 @@ impl View {
             ascii_mode: match integer(ViewField::AsciiMode) {
                 -1 => None,
                 v => Some(v != 0),
+            },
+            mode_indicator: if integer(ViewField::HasModeIndicator) != 0 {
+                Some(ModeIndicator {
+                    id: integer(ViewField::ModeIndicatorId) as u64,
+                    ascii_mode: integer(ViewField::ModeIndicatorAscii) != 0,
+                    reason: ModeIndicatorReason::try_from(
+                        integer(ViewField::ModeIndicatorReason) as i32,
+                    )
+                    .ok()?,
+                })
+            } else {
+                None
             },
             items,
             selected_index: integer(ViewField::SelectedIndex) as u32,

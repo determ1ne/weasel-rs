@@ -3,8 +3,13 @@
 //! 这里保留主题回调创建时的所有者、会话、上下文令牌和修订号，并在入队前
 //! 校验动作是否符合该快照，避免主题实现直接接触 IPC 类型或绕过运行时约束。
 use crate::state::Owner;
-use crate::theme_api::{Anchor, CandidateItem, CandidateView, EventSink, UiAction};
-use weasel_common::message::{RenderSnapshot, RendererEvent, RendererEventAction};
+use crate::theme_api::{
+    Anchor, CandidateItem, CandidateView, EventSink, ModeIndicator, ModeIndicatorReason, UiAction,
+};
+use weasel_common::message::{
+    ModeIndicatorReason as ProtoModeIndicatorReason, RenderSnapshot, RendererEvent,
+    RendererEventAction,
+};
 
 /// 将传输层快照复制为主题视图，并附加用于淘汰过期回调的内容代号。
 ///
@@ -22,6 +27,18 @@ pub fn view(snapshot: &RenderSnapshot, content_id: u64) -> CandidateView {
         content_id,
         active: snapshot.active,
         ascii_mode: snapshot.ascii_mode,
+        mode_indicator: snapshot.mode_indicator.as_ref().and_then(|indicator| {
+            let reason = match ProtoModeIndicatorReason::try_from(indicator.reason).ok()? {
+                ProtoModeIndicatorReason::Focus => ModeIndicatorReason::Focus,
+                ProtoModeIndicatorReason::UserSwitch => ModeIndicatorReason::UserSwitch,
+                ProtoModeIndicatorReason::Unspecified => return None,
+            };
+            Some(ModeIndicator {
+                id: indicator.id,
+                ascii_mode: indicator.ascii_mode,
+                reason,
+            })
+        }),
         visible: snapshot.visible,
         anchor: snapshot.anchor.as_ref().map(|r| Anchor {
             left: r.left,

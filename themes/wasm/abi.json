@@ -32,7 +32,19 @@
         "AnchorLeft": 15,
         "AnchorTop": 16,
         "AnchorRight": 17,
-        "AnchorBottom": 18
+        "AnchorBottom": 18,
+        "HasModeIndicator": 19,
+        "ModeIndicatorId": 20,
+        "ModeIndicatorAscii": 21,
+        "ModeIndicatorReason": 22
+      }
+    },
+    {
+      "name": "ModeIndicatorReason",
+      "doc": "中英文模式提示来源；仅在HasModeIndicator非零时读取。",
+      "values": {
+        "Focus": 1,
+        "UserSwitch": 2
       }
     },
     {
@@ -153,7 +165,8 @@
       "values": {
         "None": 0,
         "Preedit": 1,
-        "Resident": 2
+        "Resident": 2,
+        "ModeIndicator": 4
       }
     },
     {

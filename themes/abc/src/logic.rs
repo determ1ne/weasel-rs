@@ -13,6 +13,8 @@ pub const INPUT_WIDTH: f32 = 173.0;
 pub const INPUT_HEIGHT: f32 = 26.0;
 /// 候选窗固定宽度，单位为 DIP。
 pub const CANDIDATE_WIDTH: f32 = 127.0;
+/// 中英文模式提示窗的正方形边长，单位为 DIP。
+pub const MODE_INDICATOR_SIZE: f32 = 40.0;
 /// 输入窗与候选窗之间的间距，单位为 DIP。
 pub const GAP: f32 = 8.0;
 /// 窗口角色决定采用输入框还是候选列表布局。
@@ -22,6 +24,8 @@ pub enum Role {
     Input,
     /// 显示候选项和分页控件。
     Candidates,
+    /// 在独立正方形窗口中显示短暂的中英文模式提示。
+    ModeIndicator,
 }
 
 /// 将候选窗放在输入窗右侧；超出工作区右边界时改放左侧，并将坐标限制在工作区内。
@@ -93,12 +97,22 @@ impl Layout {
     ///
     /// 候选窗至少保留九行高度，但不会截断更多候选；输入框不创建交互单元。
     pub fn new(count: usize, role: Role) -> Self {
-        if role == Role::Input {
-            return Self {
-                cells: Vec::new(),
-                width: INPUT_WIDTH,
-                height: INPUT_HEIGHT,
-            };
+        match role {
+            Role::Input => {
+                return Self {
+                    cells: Vec::new(),
+                    width: INPUT_WIDTH,
+                    height: INPUT_HEIGHT,
+                };
+            }
+            Role::ModeIndicator => {
+                return Self {
+                    cells: Vec::new(),
+                    width: MODE_INDICATOR_SIZE,
+                    height: MODE_INDICATOR_SIZE,
+                };
+            }
+            Role::Candidates => {}
         }
         let rows = count.max(9);
         let text_bottom = ROW * rows as f32 + 1.0;
@@ -264,9 +278,12 @@ mod tests {
     fn independent_window_metrics_and_candidate_rows() {
         let input = Layout::new(9, Role::Input);
         let candidates = Layout::new(9, Role::Candidates);
+        let indicator = Layout::new(0, Role::ModeIndicator);
         assert_eq!((input.width, input.height), (173.0, 26.0));
         assert_eq!((candidates.width, candidates.height), (127.0, 169.0));
+        assert_eq!((indicator.width, indicator.height), (40.0, 40.0));
         assert!(input.cells.is_empty());
+        assert!(indicator.cells.is_empty());
         assert_eq!(candidates.hit(5.0, 5.0), Some(Hit::Candidate(0)));
         assert_eq!(candidates.hit(5.0, 21.0), Some(Hit::Candidate(1)));
         assert_eq!(candidates.hit(96.0, 152.0), Some(Hit::Previous));

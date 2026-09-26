@@ -21,6 +21,16 @@ export enum ViewField {
   AnchorTop = 16,
   AnchorRight = 17,
   AnchorBottom = 18,
+  HasModeIndicator = 19,
+  ModeIndicatorId = 20,
+  ModeIndicatorAscii = 21,
+  ModeIndicatorReason = 22,
+}
+
+// 中英文模式提示来源；仅在HasModeIndicator非零时读取。
+export enum ModeIndicatorReason {
+  Focus = 1,
+  UserSwitch = 2,
 }
 
 // 只读快照字符串属性。Primary/Secondary使用候选index，Preedit的index必须为0。
@@ -117,6 +127,7 @@ export enum Capability {
   None = 0,
   Preedit = 1,
   Resident = 2,
+  ModeIndicator = 4,
 }
 
 // 装饰层可动画属性；偏移为DIP，缩放以层左上角为原点。

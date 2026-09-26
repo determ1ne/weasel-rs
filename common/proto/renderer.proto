@@ -50,6 +50,17 @@ message RenderSnapshot {
   bool active = 14;
   // 当前中英文模式
   optional bool ascii_mode = 15;
+  // 无 composition 时显示在插入点附近的短暂中英文模式提示
+  ModeIndicator mode_indicator = 16;
+}
+
+// 一次有明确身份的中英文模式提示
+message ModeIndicator {
+  // 不透明标识；同一标识的布局刷新不得重新开始计时
+  uint64 id = 1;
+  // false 为中文模式，true 为英文模式
+  bool ascii_mode = 2;
+  ModeIndicatorReason reason = 3;
 }
 
 // 显示在候选窗中的 preedit 文本

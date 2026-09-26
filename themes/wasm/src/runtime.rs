@@ -867,6 +867,7 @@ pub struct WasmRuntime {
     event_fn: TypedFunc<(i32, i32, f32, f32, f64), i32>,
     resident: bool,
     preedit: bool,
+    mode_indicator: bool,
     destroy_fn: Option<TypedFunc<(), ()>>,
     initialized: bool,
 }
@@ -989,6 +990,7 @@ impl WasmRuntime {
             event_fn,
             resident: capabilities.contains(Capability::Resident),
             preedit: capabilities.contains(Capability::Preedit),
+            mode_indicator: capabilities.contains(Capability::ModeIndicator),
         })
     }
 
@@ -1367,6 +1369,11 @@ impl WasmRuntime {
         self.resident
     }
 
+    /// 主题是否声明能够绘制宿主定时的中英文模式提示。
+    pub fn mode_indicator(&self) -> bool {
+        self.mode_indicator
+    }
+
     /// 当前已提交展示状态的可见标志。
     pub fn visible(&self) -> bool {
         self.store.data().visible
@@ -1639,7 +1646,7 @@ mod tests {
         assert!(WasmRuntime::new(&make(&["not json"], "i32.const 0", "")).is_err());
         let combined = WasmRuntime::new(&make(&[], "i32.const 3", "")).unwrap();
         assert!(combined.preedit && combined.resident);
-        assert!(WasmRuntime::new(&make(&[], "i32.const 4", "")).is_err());
+        assert!(WasmRuntime::new(&make(&[], "i32.const 8", "")).is_err());
         assert!(
             WasmRuntime::new(&make(&[], "call $host i32.const 0", ""))
                 .unwrap_err()

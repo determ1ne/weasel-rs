@@ -280,6 +280,7 @@ fn pack_input(v: m::KeyEventResponse) -> Result<m::InputResult, RpcError> {
         }),
         ascii_mode: v.ascii_mode,
         allow_rime_in_secure_fields: v.allow_rime_in_secure_fields,
+        mode_indicator_request_id: v.mode_indicator_request_id,
     })
 }
 /// 将 RPC 输入结果还原为内部键事件响应，并校验其中的输入状态。
@@ -290,6 +291,7 @@ fn unpack_input(v: m::InputResult) -> Result<m::KeyEventResponse, RpcError> {
         eaten: v.handled,
         ascii_mode: v.ascii_mode,
         allow_rime_in_secure_fields: v.allow_rime_in_secure_fields,
+        mode_indicator_request_id: v.mode_indicator_request_id,
         ..Default::default()
     };
     if let Some(s) = v.state {

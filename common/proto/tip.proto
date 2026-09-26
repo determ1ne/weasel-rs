@@ -68,6 +68,17 @@ message LayoutUpdate {
   ContextToken token = 3;
   // 该布局是在对应输入 revision 已应用到宿主 composition 后测得的
   optional uint64 revision = 4;
+  // 非 composition 模式提示定位请求；仅与 Server 下发的同名请求标识匹配
+  optional uint64 mode_indicator_request_id = 5;
+}
+
+// 中英文模式提示产生的原因
+enum ModeIndicatorReason {
+  MODE_INDICATOR_REASON_UNSPECIFIED = 0;
+  // 新的可编辑上下文获得焦点
+  MODE_INDICATOR_REASON_FOCUS = 1;
+  // 用户操作使最终中英文模式发生变化
+  MODE_INDICATOR_REASON_USER_SWITCH = 2;
 }
 
 // 创建一个输入上下文
@@ -103,6 +114,8 @@ message InputResult {
   EditEffects effects = 5;
   optional bool ascii_mode = 6;
   optional bool allow_rime_in_secure_fields = 7;
+  // 请求 TIP 对当前选区执行一次插入点定位；结果通过 LayoutUpdate 回传
+  optional uint64 mode_indicator_request_id = 8;
 }
 
 // 某个 revision 对应的完整输入状态

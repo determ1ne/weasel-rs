@@ -81,6 +81,7 @@ impl ThemeFactory for Factory {
             // Individual guests opt in with `theme_capabilities`; declaring the
             // superset here lets renderer deliver mode-only snapshots.
             resident: true,
+            mode_indicator: true,
         }
     }
 

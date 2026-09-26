@@ -35,6 +35,25 @@
       "title": "共享中英文状态",
       "default": false
     },
+    "input_mode_indicator": {
+      "description": "控制何时在输入位置附近短暂显示当前中英文模式。同一输入区域内移动光标不会重复显示。",
+      "type": "string",
+      "enum": [
+        "focus_and_switch",
+        "switch_only",
+        "never"
+      ],
+      "title": "中英文模式提示",
+      "default": "switch_only"
+    },
+    "input_mode_indicator_duration_ms": {
+      "description": "模式提示从实际显示起保留的时间，单位为毫秒。",
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 10000,
+      "title": "模式提示时长",
+      "default": 800
+    },
     "allow_rime_in_secure_fields": {
       "description": "关闭时，密码等安全输入区域将绕过 Rime 并直接交给应用。仅当密码包含必须通过输入法转换的内容（例如中文）时才建议开启。",
       "type": "boolean",
@@ -214,6 +233,8 @@
     "preedit_type": "composition",
     "ascii_mode": false,
     "global_ascii_status": false,
+    "input_mode_indicator": "switch_only",
+    "input_mode_indicator_duration_ms": 800,
     "allow_rime_in_secure_fields": false,
     "themeSettings": {
       "abc": {},

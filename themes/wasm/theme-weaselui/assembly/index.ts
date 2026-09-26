@@ -48,6 +48,12 @@ function layout(v: View): void {
   labels = [];
   labelWidths = [];
   rects = [];
+  if (v.hasModeIndicator) {
+    width = 48;
+    height = 48;
+    set_size(width, height);
+    return;
+  }
   const itemWidths: f32[] = [];
   let contentWidth: f32 = 0;
   for (let i = 0; i < v.items.length; i++) {
@@ -115,6 +121,13 @@ function paint(): void {
   const border = Mathf.min(BORDER, Mathf.min(width, height) / 2);
   roundedRect(border, border, width - 2 * border, height - 2 * border,
     Mathf.max(0, OUTER_RADIUS - border), colors.back_color);
+  if (v.hasModeIndicator) {
+    const text = v.modeIndicatorAscii ? "英" : "中";
+    const textWidth = measure_text(TEXT_FONT, text, TEXT_SIZE);
+    draw_text(TEXT_FONT, text, (width - textWidth) / 2, (height - TEXT_HEIGHT) / 2,
+      TEXT_SIZE, colors.text);
+    return;
+  }
   const highlighted = hover >= 0 ? hover : v.selectedIndex;
   if (v.hasPreedit) {
     // 编码模式高亮输入段；预览模式显示有效候选，不绘制编码光标。
@@ -150,7 +163,9 @@ function paint(): void {
 }
 
 export function theme_abi_version(): i32 { return ABI_VERSION; }
-export function theme_capabilities(): i32 { return Capability.Preedit; }
+export function theme_capabilities(): i32 {
+  return Capability.Preedit | Capability.ModeIndicator;
+}
 export function theme_create(_mode: i32, dark: i32): i32 {
   loadConfig(dark != 0);
   return ErrorCode.Success;

@@ -96,7 +96,12 @@ pub(crate) fn spawn(
         loop {
             // External preedit needs capability negotiation before the first key.
             // Inline-only sessions retain the lazy, visible-snapshot connection.
-            if !eager && snapshots.borrow().as_ref().is_none_or(|s| !s.visible) {
+            if !eager
+                && snapshots
+                    .borrow()
+                    .as_ref()
+                    .is_none_or(|s| !s.visible && s.mode_indicator.is_none())
+            {
                 if snapshots.changed().await.is_err() {
                     return;
                 }
@@ -203,6 +208,7 @@ pub(crate) fn render_snapshot(
         can_page_previous: response.can_page_previous,
         can_page_next: response.can_page_next,
         token: response.token.clone(),
+        mode_indicator: None,
     }
 }
 

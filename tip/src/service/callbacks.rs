@@ -129,6 +129,7 @@ impl ITfTextLayoutSink_Impl for TextService_Impl {
             }
             // Completion and blur responses hide the candidates; idle layout is irrelevant.
             let _ = self.request_composition_layout(&state);
+            let _ = self.retry_mode_indicator_layout(&state);
             Ok(())
         })
     }

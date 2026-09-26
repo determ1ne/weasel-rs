@@ -141,6 +141,10 @@ export function createViewHost(snapshot, memory) {
         [ViewField.AnchorTop]:v.anchor?.top??0,
         [ViewField.AnchorRight]:v.anchor?.right??0,
         [ViewField.AnchorBottom]:v.anchor?.bottom??0,
+        [ViewField.HasModeIndicator]:!!v.mode_indicator,
+        [ViewField.ModeIndicatorId]:v.mode_indicator?.id??0,
+        [ViewField.ModeIndicatorAscii]:v.mode_indicator?.ascii_mode??false,
+        [ViewField.ModeIndicatorReason]:v.mode_indicator?.reason??0,
       };
       if (!(field in values)) throw new Error("invalid field");
       return BigInt.asIntN(64,BigInt(values[field]));

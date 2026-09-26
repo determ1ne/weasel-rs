@@ -34,6 +34,8 @@ struct Graphics {
     text: IDWriteTextFormat,
     /// 候选窗底部标签格式。
     label: IDWriteTextFormat,
+    /// 独立中英文模式提示窗使用的居中文字格式。
+    mode_indicator: IDWriteTextFormat,
     /// 与当前 HWND 关联的渲染目标；设备失效时设为 `None`。
     target: Option<ID2D1HwndRenderTarget>,
 }
@@ -64,6 +66,7 @@ impl Graphics {
                 factory,
                 text: format(w!("SimSun"), 16.0, DWRITE_TEXT_ALIGNMENT_LEADING)?,
                 label: format(w!("SimSun"), 12.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+                mode_indicator: format(w!("SimSun"), 16.0, DWRITE_TEXT_ALIGNMENT_CENTER)?,
                 write,
                 target: None,
             })
@@ -143,23 +146,30 @@ struct Window {
     positioning: Cell<bool>,
     /// 此窗口是否属于可交互的主题预览模式。
     preview: bool,
-    /// 输入框或候选窗，决定布局及交互策略。
+    /// 输入框、候选窗或模式提示窗，决定布局及交互策略。
     role: Role,
 }
 
-/// 主题后端持有两个 HWND 状态分配，并与原生回调共享其稳定地址。
+/// 主题后端持有三个 HWND 状态分配，并与原生回调共享其稳定地址。
 struct Abc {
     /// 输入框以候选窗为 owner；声明顺序确保输入框先于候选窗销毁。
     input: Rc<Window>,
+    /// 独立正方形模式提示窗；不依附会在提示期间隐藏的候选窗。
+    mode_indicator: Rc<Window>,
     /// 候选窗及其对应的状态。
     candidates: Rc<Window>,
 }
 
-/// 创建候选窗和其 owner 输入窗；任一窗口创建失败都会返回错误，已创建资源随即释放。
+/// 创建候选窗及其 owner 输入窗和模式提示窗；任一窗口创建失败都会返回错误。
 fn create(mode: UiMode, antialiasing: bool) -> Result<Box<dyn ThemeBackend>, String> {
     let candidates = create_window(mode, Role::Candidates, None, antialiasing)?;
     let input = create_window(mode, Role::Input, Some(candidates.hwnd.get()), antialiasing)?;
-    Ok(Box::new(Abc { input, candidates }))
+    let mode_indicator = create_window(mode, Role::ModeIndicator, None, antialiasing)?;
+    Ok(Box::new(Abc {
+        input,
+        mode_indicator,
+        candidates,
+    }))
 }
 
 /// 创建一个窗口及其状态，并在返回前验证渲染目标和窗口健康状态。
@@ -324,6 +334,17 @@ impl Window {
                 let app = self.app.borrow();
                 app.content.as_ref().and_then(|c| {
                     let candidate = Layout::new(c.snapshot.items.len(), Role::Candidates);
+                    if self.role == Role::ModeIndicator {
+                        let width = pixels(c.layout.width, dpi);
+                        let height = pixels(c.layout.height, dpi);
+                        let (x, y) = if self.preview {
+                            crate::presentation::preview_position(width, height)
+                        } else {
+                            let anchor = c.snapshot.anchor.as_ref().filter(|a| a.valid)?;
+                            crate::presentation::popup_position(anchor, width, height)
+                        };
+                        return Some((x, y, width, height));
+                    }
                     let input = c.snapshot.preedit.is_some();
                     let candidates = !c.snapshot.items.is_empty();
                     let candidate_offset = if input && candidates {
@@ -545,6 +566,18 @@ impl Window {
                         0x000080,
                     );
                 }
+                if self.role == Role::ModeIndicator
+                    && let Some(indicator) = &c.snapshot.mode_indicator
+                {
+                    text(
+                        target,
+                        &brush,
+                        &app.graphics.mode_indicator,
+                        if indicator.ascii_mode { "英" } else { "中" },
+                        rect(PAD, PAD, width - PAD, height - PAD),
+                        0x800080,
+                    );
+                }
                 for cell in &c.layout.cells {
                     let usable = enabled(&c.snapshot, cell.hit);
 
@@ -625,32 +658,46 @@ impl Window {
 }
 
 impl ThemeBackend for Abc {
-    /// 更新两个窗口；任一侧失败时立即隐藏整组界面并返回错误。
+    /// 在普通候选界面与独立模式提示窗之间切换；任一侧失败时隐藏整组界面。
     fn render(&mut self, snapshot: &CandidateView, events: &EventSink) -> Result<(), String> {
-        // Failure of either window hides the whole presentation.
-        let result = self
-            .candidates
-            .render(snapshot, events)
-            .and_then(|_| self.input.render(snapshot, events));
+        let show_indicator = crate::presentation::is_mode_indicator_visible(snapshot)
+            && !crate::presentation::is_visible(snapshot);
+        let result = if show_indicator {
+            // Hide the larger windows before exposing the transient square so a
+            // transition cannot briefly show both presentations.
+            self.input.hide();
+            self.candidates.hide();
+            self.mode_indicator.render(snapshot, events)
+        } else {
+            self.mode_indicator.hide();
+            self.candidates
+                .render(snapshot, events)
+                .and_then(|_| self.input.render(snapshot, events))
+        };
         if result.is_err() {
             self.hide();
         }
         result
     }
-    /// 隐藏输入窗和候选窗，并清除各自的交互与快照状态。
+    /// 隐藏三个窗口，并清除各自的交互与快照状态。
     fn hide(&mut self) {
         self.input.hide();
+        self.mode_indicator.hide();
         self.candidates.hide();
     }
-    /// 请求两个窗口重绘并检查其健康状态。
+    /// 请求三个窗口重绘并检查其健康状态。
     fn refresh_appearance(&mut self) -> Result<(), String> {
         self.input.invalidate();
+        self.mode_indicator.invalidate();
         self.candidates.invalidate();
         self.check_health()
     }
-    /// 按输入窗、候选窗顺序返回首个已记录的致命错误。
+    /// 按输入窗、模式提示窗、候选窗顺序返回首个已记录的致命错误。
     fn check_health(&mut self) -> Result<(), String> {
-        self.input.health().and_then(|_| self.candidates.health())
+        self.input
+            .health()
+            .and_then(|_| self.mode_indicator.health())
+            .and_then(|_| self.candidates.health())
     }
 }
 
@@ -668,7 +715,7 @@ impl Window {
         let moved = {
             let mut app = self.app.borrow_mut();
             if let Some(content) = app.content.as_mut()
-                && crate::presentation::is_visible(snapshot)
+                && self.is_visible(snapshot)
                 && crate::theme_api::same_content(&content.snapshot, snapshot)
             {
                 content.snapshot = snapshot.clone();
@@ -684,11 +731,7 @@ impl Window {
         }
         self.cancel();
         self.health()?;
-        if !snapshot.visible
-            || !snapshot.anchor.as_ref().is_some_and(|a| a.valid)
-            || (self.role == Role::Input && snapshot.preedit.is_none())
-            || (self.role == Role::Candidates && snapshot.items.is_empty())
-        {
+        if !self.is_visible(snapshot) {
             self.hide();
             return Ok(());
         }
@@ -721,6 +764,19 @@ impl Window {
         }
         self.invalidate();
         self.health()
+    }
+    /// 判断当前角色是否应消费并展示这份快照。
+    fn is_visible(&self, snapshot: &CandidateView) -> bool {
+        match self.role {
+            Role::Input => crate::presentation::is_visible(snapshot) && snapshot.preedit.is_some(),
+            Role::Candidates => {
+                crate::presentation::is_visible(snapshot) && !snapshot.items.is_empty()
+            }
+            Role::ModeIndicator => {
+                crate::presentation::is_mode_indicator_visible(snapshot)
+                    && !crate::presentation::is_visible(snapshot)
+            }
+        }
     }
     /// 清除当前内容、停止恢复定时器并隐藏 HWND。
     fn hide(&self) {
@@ -1017,6 +1073,7 @@ impl crate::theme_api::ThemeFactory for Factory {
         crate::theme_api::ThemeCapabilities {
             preedit: true,
             resident: false,
+            mode_indicator: true,
         }
     }
     /// 解析编译期嵌入的默认配置；配置无效时返回带主题上下文的错误。

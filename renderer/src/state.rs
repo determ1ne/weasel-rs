@@ -96,6 +96,17 @@ pub fn validate(snapshot: &RenderSnapshot) -> Result<(), String> {
     if snapshot.items.len() > MAX_ITEMS {
         return Err("snapshot exceeds 256 items".into());
     }
+    if let Some(indicator) = &snapshot.mode_indicator {
+        if indicator.id == 0
+            || !matches!(
+                weasel_common::message::ModeIndicatorReason::try_from(indicator.reason),
+                Ok(weasel_common::message::ModeIndicatorReason::Focus)
+                    | Ok(weasel_common::message::ModeIndicatorReason::UserSwitch)
+            )
+        {
+            return Err("invalid mode indicator".into());
+        }
+    }
     let mut bytes = 0;
     for item in &snapshot.items {
         for text in [&item.primary_text, &item.secondary_text, &item.kind] {
@@ -145,6 +156,13 @@ pub fn same_content(a: &RenderSnapshot, b: &RenderSnapshot) -> bool {
     a.session_id == b.session_id
         && a.active == b.active
         && a.ascii_mode == b.ascii_mode
+        && match (&a.mode_indicator, &b.mode_indicator) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                a.id == b.id && a.ascii_mode == b.ascii_mode && a.reason == b.reason
+            }
+            _ => false,
+        }
         && a.preedit == b.preedit
         && a.token == b.token
         && a.revision == b.revision

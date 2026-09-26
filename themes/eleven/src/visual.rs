@@ -72,8 +72,8 @@ mod icon_font_tests {
 
 use crate::bindings::{
     AcrylicBackgroundSource, AcrylicBrush, Border, Color, CornerRadius, ElementTheme, FontFamily,
-    HorizontalAlignment, Orientation, SolidColorBrush, StackPanel, TextBlock, Thickness,
-    UIColorType, UISettings, VerticalAlignment,
+    Grid, HorizontalAlignment, Orientation, SolidColorBrush, StackPanel, TextAlignment, TextBlock,
+    Thickness, UIColorType, UISettings, VerticalAlignment, Visibility,
 };
 
 /// eleven 候选窗的视觉配置和 UI 资源缓存。
@@ -90,6 +90,50 @@ pub struct CandidateTheme {
     palette: std::cell::Cell<Option<Palette>>,
     /// 已创建的候选字体族对象；外观刷新后清空。
     font: std::cell::RefCell<Option<FontFamily>>,
+}
+
+/// 中英文模式提示的独立 XAML 子树。
+///
+/// 该视图与候选面板共享同一个 Island 和宿主 HWND，但拥有自己的布局树，避免
+/// 候选使用的横向 `StackPanel`、列定义和最小宽度影响正方形提示的测量结果。
+pub struct ModeIndicatorVisual {
+    /// 覆盖在候选面板上的提示根节点。
+    panel: Grid,
+    /// 自然尺寸的“中”或“英”文字；不设置固定高度，以便真正垂直居中。
+    label: TextBlock,
+    /// 文字下方的主题强调色横条。
+    accent: Border,
+}
+
+impl ModeIndicatorVisual {
+    /// 创建并连接提示子树，初始保持折叠。
+    pub fn new() -> windows_core::Result<Self> {
+        let panel = Grid::new()?;
+        let content = StackPanel::new()?;
+        let label = TextBlock::new()?;
+        let accent = Border::new()?;
+
+        content.SetOrientation(Orientation::Vertical)?;
+        content.SetHorizontalAlignment(HorizontalAlignment::Center)?;
+        content.SetVerticalAlignment(VerticalAlignment::Center)?;
+        content.SetSpacing(0.0)?;
+        let children = content.Children()?;
+        children.Append(&label)?;
+        children.Append(&accent)?;
+        panel.Children()?.Append(&content)?;
+        panel.SetVisibility(Visibility::Collapsed)?;
+
+        Ok(Self {
+            panel,
+            label,
+            accent,
+        })
+    }
+
+    /// 返回可附加到外层展示容器的根元素。
+    pub fn panel(&self) -> &Grid {
+        &self.panel
+    }
 }
 
 impl CandidateTheme {
@@ -145,9 +189,11 @@ impl CandidateTheme {
     pub fn prepare(
         &self,
         root: &Border,
+        candidate_panel: &Grid,
         rows: &StackPanel,
         quick_action_panel: &Border,
         quick_actions: &StackPanel,
+        mode_indicator: &ModeIndicatorVisual,
     ) -> windows_core::Result<()> {
         let palette = self.palette.get().unwrap_or_else(|| {
             let mut palette = Palette::system();
@@ -191,6 +237,39 @@ impl CandidateTheme {
         })?;
         apply_panel_background(root, &palette, &panel_background)?;
 
+        candidate_panel.SetVisibility(Visibility::Visible)?;
+        mode_indicator.panel.SetVisibility(Visibility::Collapsed)?;
+        mode_indicator
+            .label
+            .SetFontFamily(&self.candidate_font()?)?;
+        mode_indicator.label.SetFontSize(self.config.font_size)?;
+        mode_indicator
+            .label
+            .SetTextAlignment(TextAlignment::Center)?;
+        mode_indicator
+            .label
+            .SetHorizontalAlignment(HorizontalAlignment::Center)?;
+        mode_indicator
+            .label
+            .SetVerticalAlignment(VerticalAlignment::Center)?;
+        mode_indicator
+            .label
+            .SetForeground(&self.brush(palette.foreground)?)?;
+        mode_indicator
+            .accent
+            .SetWidth((self.config.font_size * 1.15).max(16.0))?;
+        mode_indicator.accent.SetHeight(3.0)?;
+        mode_indicator
+            .accent
+            .SetMargin(thickness(0.0, 2.0, 0.0, 0.0))?;
+        mode_indicator.accent.SetCornerRadius(corner_radius(1.5))?;
+        mode_indicator
+            .accent
+            .SetHorizontalAlignment(HorizontalAlignment::Center)?;
+        mode_indicator
+            .accent
+            .SetBackground(&self.brush(palette.accent)?)?;
+
         rows.SetOrientation(Orientation::Horizontal)?;
         rows.SetPadding(thickness(2.0, 2.0, 2.0, 2.0))?;
         rows.SetSpacing(0.0)?;
@@ -217,14 +296,23 @@ impl CandidateTheme {
     pub fn render(
         &self,
         root: &Border,
+        candidate_panel: &Grid,
         rows: &StackPanel,
         quick_action_panel: &Border,
         quick_actions: &StackPanel,
+        mode_indicator: &ModeIndicatorVisual,
         snapshot: &CandidateView,
         events: &crate::theme_api::EventSink,
         revokers: &mut Vec<windows_core::EventRevoker>,
     ) -> windows_core::Result<()> {
-        self.prepare(root, rows, quick_action_panel, quick_actions)?;
+        self.prepare(
+            root,
+            candidate_panel,
+            rows,
+            quick_action_panel,
+            quick_actions,
+            mode_indicator,
+        )?;
         let palette = self.palette.get().unwrap_or_else(Palette::system);
         self.palette.set(Some(palette));
         let solid = |color| self.brush(color);
@@ -248,6 +336,28 @@ impl CandidateTheme {
         children.Clear()?;
         let action_children = quick_actions.Children()?;
         action_children.Clear()?;
+        if let Some(indicator) = &snapshot.mode_indicator {
+            let side = self.config.font_size * 1.8 + 10.0;
+            root.SetMinWidth(0.0)?;
+            root.SetWidth(side)?;
+            root.SetHeight(side)?;
+            candidate_panel.SetVisibility(Visibility::Collapsed)?;
+            mode_indicator.panel.SetVisibility(Visibility::Visible)?;
+            mode_indicator
+                .label
+                .SetText(&HSTRING::from(if indicator.ascii_mode {
+                    "英"
+                } else {
+                    "中"
+                }))?;
+            return Ok(());
+        }
+        root.SetWidth(f64::NAN)?;
+        root.SetHeight(f64::NAN)?;
+        root.SetMinWidth(140.0)?;
+        candidate_panel.SetVisibility(Visibility::Visible)?;
+        mode_indicator.panel.SetVisibility(Visibility::Collapsed)?;
+        quick_action_panel.SetVisibility(Visibility::Visible)?;
         append_action(
             quick_actions,
             "\u{EDD9}",

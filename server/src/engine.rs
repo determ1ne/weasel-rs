@@ -15,8 +15,11 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
-use weasel_common::message::{ContextToken, Failure, FailureCode, InputOpened};
+use weasel_common::message::{
+    ContextToken, Failure, FailureCode, InputOpened, ModeIndicator, ModeIndicatorReason,
+};
 use weasel_common::{
     message::{
         Envelope, KeyEventResponse, RenderRect, RenderSnapshot, RendererEvent, envelope::Payload,
@@ -26,6 +29,75 @@ use weasel_common::{
 
 /// 引擎工作队列的有界容量，用于限制待处理事件占用的内存。
 pub(crate) const QUEUE_CAPACITY: usize = 128;
+
+/// 等待 TIP 返回模式提示插入点的最长时间。
+///
+/// 该期限只防止迟到的布局结果重新唤起旧提示；实际显示时长由 Renderer
+/// 根据用户配置从收到新提示时开始计算。
+const MODE_INDICATOR_LAYOUT_TIMEOUT: Duration = Duration::from_millis(800);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 全局配置决定哪些模式变化需要显示短暂提示。
+enum InputModeIndicatorPolicy {
+    /// 获得可编辑焦点及用户主动切换时显示。
+    FocusAndSwitch,
+    /// 仅在用户主动切换且最终模式确实变化时显示。
+    SwitchOnly,
+    /// 从不显示。
+    Never,
+}
+
+impl InputModeIndicatorPolicy {
+    /// 从配置快照读取策略；非法值按发布默认值 `switch_only` 回退。
+    fn from_settings(settings: Option<&weasel_common::settings::ConfigSnapshot>) -> Self {
+        let Some(settings) = settings else {
+            return Self::SwitchOnly;
+        };
+        match settings.required::<String>(".input_mode_indicator") {
+            Ok(value) if value == "focus_and_switch" => Self::FocusAndSwitch,
+            Ok(value) if value == "switch_only" => Self::SwitchOnly,
+            Ok(value) if value == "never" => Self::Never,
+            Ok(value) => {
+                tracing::error!(
+                    value,
+                    fallback = "switch_only",
+                    "invalid input_mode_indicator; using fallback"
+                );
+                Self::SwitchOnly
+            }
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    fallback = "switch_only",
+                    "invalid input_mode_indicator; using fallback"
+                );
+                Self::SwitchOnly
+            }
+        }
+    }
+
+    /// 判断指定来源是否应创建模式提示。
+    fn allows(self, reason: ModeIndicatorReason) -> bool {
+        match self {
+            Self::FocusAndSwitch => true,
+            Self::SwitchOnly => reason == ModeIndicatorReason::UserSwitch,
+            Self::Never => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+/// 等待 TIP 返回插入点位置的模式提示请求。
+struct PendingModeIndicator {
+    /// 与布局回传匹配的不透明标识。
+    id: u64,
+    /// 已由 Rime 确认的最终模式。
+    ascii_mode: bool,
+    /// 触发来源，决定主题可采用的外观。
+    reason: ModeIndicatorReason,
+    /// 服务端接受布局结果的最后时刻。
+    expires_at: Instant,
+}
 
 /// 工作线程可处理的消息类型。
 pub(crate) enum Work {
@@ -68,6 +140,8 @@ struct ClientSession {
     waiting_for_layout: Option<u64>,
     /// 已接受的最新布局修订号，阻止旧几何覆盖新几何。
     latest_layout_revision: Option<u64>,
+    /// 等待 TIP 返回插入点位置的短暂模式提示。
+    pending_mode_indicator: Option<PendingModeIndicator>,
     /// 用于增量更新及连接能力切换的最近一次输入状态响应。
     last_response: KeyEventResponse,
 }
@@ -82,6 +156,8 @@ pub(crate) struct Engine {
     global_ascii: Option<bool>,
     /// 是否允许在安全输入框中使用 Rime，由配置快照初始化。
     allow_rime_in_secure_fields: bool,
+    /// 哪些输入模式变化应请求主题显示提示。
+    input_mode_indicator: InputModeIndicatorPolicy,
     /// 可选配置快照；缺省时使用每应用默认行为。
     settings: Option<weasel_common::settings::ConfigSnapshot>,
     // Field order is intentional: destroy every session before dropping the engine.
@@ -98,6 +174,39 @@ pub(crate) struct Engine {
     renderer: RendererPublisher,
     /// 下一次分配的会话标识；溢出时拒绝继续分配并触发断言。
     next_session: u64,
+    /// 下一次分配的模式提示标识；零保留为“无请求”。
+    next_mode_indicator: u64,
+}
+
+/// 分配非零且不回绕的模式提示标识。
+fn allocate_mode_indicator_id(next: &mut u64) -> u64 {
+    let id = *next;
+    *next = next
+        .checked_add(1)
+        .expect("mode indicator identity exhausted");
+    id
+}
+
+/// 为需要定位的提示建立单槽请求，并把请求标识写入 TIP 响应。
+fn request_mode_indicator(
+    client: &mut ClientSession,
+    response: &mut KeyEventResponse,
+    next_id: &mut u64,
+    policy: InputModeIndicatorPolicy,
+    reason: ModeIndicatorReason,
+    ascii_mode: bool,
+) {
+    if !policy.allows(reason) || response.composing {
+        return;
+    }
+    let id = allocate_mode_indicator_id(next_id);
+    client.pending_mode_indicator = Some(PendingModeIndicator {
+        id,
+        ascii_mode,
+        reason,
+        expires_at: Instant::now() + MODE_INDICATOR_LAYOUT_TIMEOUT,
+    });
+    response.mode_indicator_request_id = Some(id);
 }
 
 /// 为宿主生成响应副本；外置预编辑时保留提交和组合状态，但清空宿主组合范围。
@@ -277,6 +386,7 @@ impl Engine {
         crate::init_logging(&paths, "server")?;
         let rime = librime::Librime::load(&paths.executable_directory, &paths.user_data)?;
         tracing::info!("librime initialized on engine thread");
+        let input_mode_indicator = InputModeIndicatorPolicy::from_settings(settings.as_ref());
         let (global_ascii, allow_rime_in_secure_fields) = match settings.as_ref() {
             Some(settings) => {
                 let global_ascii = bool_setting_or(settings, ".global_ascii_status", false)
@@ -290,6 +400,7 @@ impl Engine {
         Ok(Self {
             global_ascii,
             allow_rime_in_secure_fields,
+            input_mode_indicator,
             settings,
             clients: HashMap::new(),
             rime,
@@ -297,6 +408,7 @@ impl Engine {
             active_client: None,
             renderer,
             next_session: 1,
+            next_mode_indicator: 1,
         })
     }
 
@@ -496,6 +608,7 @@ impl Engine {
                         anchor: Default::default(),
                         waiting_for_layout: None,
                         latest_layout_revision: None,
+                        pending_mode_indicator: None,
                         last_response: Default::default(),
                     },
                 );
@@ -539,6 +652,7 @@ impl Engine {
         match envelope.payload {
             Some(Payload::KeyEvent(key_event)) => {
                 let (response, snapshot) = {
+                    let next_mode_indicator = &mut self.next_mode_indicator;
                     let client = self
                         .clients
                         .get_mut(&client_id)
@@ -589,11 +703,28 @@ impl Engine {
                         }
                         if response.state_updated {
                             client.last_response = response.clone();
+                            client.last_response.mode_indicator_request_id = None;
                         }
                         if response.ascii_mode.is_some() {
                             client.last_response.ascii_mode = response.ascii_mode;
                         }
                         client.last_response.token = client.route.token.clone();
+                        if response.composing {
+                            client.pending_mode_indicator = None;
+                        } else if previous_ascii
+                            .zip(response.ascii_mode)
+                            .is_some_and(|(previous, next)| previous != next)
+                        {
+                            let ascii_mode = response.ascii_mode.expect("checked above");
+                            request_mode_indicator(
+                                client,
+                                &mut response,
+                                next_mode_indicator,
+                                self.input_mode_indicator,
+                                ModeIndicatorReason::UserSwitch,
+                                ascii_mode,
+                            );
+                        }
                         let snapshot = if client.waiting_for_layout.is_some() {
                             // The host edit has not supplied geometry for this
                             // composition. Do not send an intermediate frame
@@ -635,6 +766,7 @@ impl Engine {
             Some(Payload::ContextCommand(command)) => {
                 use weasel_common::message::ContextAction;
                 let (response, snapshot) = {
+                    let next_mode_indicator = &mut self.next_mode_indicator;
                     let client = self
                         .clients
                         .get_mut(&client_id)
@@ -669,6 +801,7 @@ impl Engine {
                             client.anchor = Default::default();
                             client.waiting_for_layout = None;
                             client.latest_layout_revision = None;
+                            client.pending_mode_indicator = None;
                         }
                         let was_active = self.active_client == Some(client_id);
                         match action {
@@ -691,6 +824,7 @@ impl Engine {
                         {
                             client.session.set_ascii_mode(ascii);
                         }
+                        let previous_ascii = client.last_response.ascii_mode;
                         let mut response = match (action, command.ascii_mode) {
                             (ContextAction::SetAscii, None) => {
                                 failure(
@@ -728,14 +862,45 @@ impl Engine {
                         {
                             client.waiting_for_layout = None;
                         }
+                        if matches!(
+                            action,
+                            ContextAction::Blur
+                                | ContextAction::Cancel
+                                | ContextAction::Submit
+                                | ContextAction::HostTerminated
+                        ) || response.composing
+                        {
+                            client.pending_mode_indicator = None;
+                        }
                         if response.state_updated {
                             client.last_response = response.clone();
+                            client.last_response.mode_indicator_request_id = None;
                         }
                         if response.ascii_mode.is_some() {
                             client.last_response.ascii_mode = response.ascii_mode;
                         }
                         // Focus acknowledgements must not replay the previous commit.
                         client.last_response.token = client.route.token.clone();
+                        let indicator = match action {
+                            ContextAction::Focus => response
+                                .ascii_mode
+                                .map(|ascii| (ModeIndicatorReason::Focus, ascii)),
+                            ContextAction::ToggleAscii => previous_ascii
+                                .zip(response.ascii_mode)
+                                .filter(|(previous, next)| previous != next)
+                                .map(|(_, ascii)| (ModeIndicatorReason::UserSwitch, ascii)),
+                            _ => None,
+                        };
+                        if let Some((reason, ascii_mode)) = indicator {
+                            request_mode_indicator(
+                                client,
+                                &mut response,
+                                next_mode_indicator,
+                                self.input_mode_indicator,
+                                reason,
+                                ascii_mode,
+                            );
+                        }
                         let snapshot = if self.active_client == Some(client_id) {
                             Some(render_snapshot(
                                 client_id,
@@ -870,32 +1035,57 @@ impl Processor<Work> for Engine {
                 .connection
                 .take_layout_for(client.route.token.as_ref())
         {
-            let matching = layout_matches_pending(
-                update.revision,
-                client.waiting_for_layout,
-                client.latest_layout_revision,
-            );
-            if matching {
-                if let Some(revision) = update.revision {
-                    client.latest_layout_revision = Some(revision);
-                }
-                let anchor = update.anchor.unwrap_or_default();
-                let became_ready = client.waiting_for_layout.is_some() && anchor.valid;
-                if became_ready {
-                    client.waiting_for_layout = None;
-                }
-                if client.anchor != anchor || became_ready {
-                    client.anchor = anchor;
-                    if client.waiting_for_layout.is_none()
-                        && (!client.last_response.candidates.is_empty()
-                            || client.last_response.external_preedit)
-                    {
-                        self.renderer.publish(render_snapshot(
+            if let Some(request_id) = update.mode_indicator_request_id {
+                if let Some(pending) = client
+                    .pending_mode_indicator
+                    .filter(|pending| pending.id == request_id)
+                {
+                    client.pending_mode_indicator = None;
+                    let now = Instant::now();
+                    let anchor = update.anchor.unwrap_or_default();
+                    if now < pending.expires_at && anchor.valid && !client.last_response.composing {
+                        let mut snapshot = render_snapshot(
                             client_id,
                             client.revision,
                             &client.last_response,
-                            &client.anchor,
-                        ));
+                            &anchor,
+                        );
+                        snapshot.mode_indicator = Some(ModeIndicator {
+                            id: pending.id,
+                            ascii_mode: pending.ascii_mode,
+                            reason: pending.reason as i32,
+                        });
+                        self.renderer.publish(snapshot);
+                    }
+                }
+            } else {
+                let matching = layout_matches_pending(
+                    update.revision,
+                    client.waiting_for_layout,
+                    client.latest_layout_revision,
+                );
+                if matching {
+                    if let Some(revision) = update.revision {
+                        client.latest_layout_revision = Some(revision);
+                    }
+                    let anchor = update.anchor.unwrap_or_default();
+                    let became_ready = client.waiting_for_layout.is_some() && anchor.valid;
+                    if became_ready {
+                        client.waiting_for_layout = None;
+                    }
+                    if client.anchor != anchor || became_ready {
+                        client.anchor = anchor;
+                        if client.waiting_for_layout.is_none()
+                            && (!client.last_response.candidates.is_empty()
+                                || client.last_response.external_preedit)
+                        {
+                            self.renderer.publish(render_snapshot(
+                                client_id,
+                                client.revision,
+                                &client.last_response,
+                                &client.anchor,
+                            ));
+                        }
                     }
                 }
             }

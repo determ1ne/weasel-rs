@@ -87,6 +87,22 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
                 ViewField::AnchorTop => v.anchor.as_ref().map_or(0, |a| a.top as i64),
                 ViewField::AnchorRight => v.anchor.as_ref().map_or(0, |a| a.right as i64),
                 ViewField::AnchorBottom => v.anchor.as_ref().map_or(0, |a| a.bottom as i64),
+                ViewField::HasModeIndicator => v.mode_indicator.is_some() as i64,
+                ViewField::ModeIndicatorId => {
+                    v.mode_indicator.as_ref().map_or(0, |value| value.id as i64)
+                }
+                ViewField::ModeIndicatorAscii => v
+                    .mode_indicator
+                    .as_ref()
+                    .map_or(0, |value| value.ascii_mode as i64),
+                ViewField::ModeIndicatorReason => {
+                    v.mode_indicator
+                        .as_ref()
+                        .map_or(0, |value| match value.reason {
+                            crate::theme_api::ModeIndicatorReason::Focus => 1,
+                            crate::theme_api::ModeIndicatorReason::UserSwitch => 2,
+                        })
+                }
             })
         },
     )?;

@@ -16,12 +16,12 @@ use windows_version::OsVersion;
 
 use crate::{
     bindings::*,
-    presentation::{is_visible, popup_position, preview_position},
+    presentation::{is_mode_indicator_visible, is_visible, popup_position, preview_position},
     theme_api::EventSink,
     theme_api::same_content,
     theme_api::{ThemeBackend, UiMode},
 };
-use visual::CandidateTheme;
+use visual::{CandidateTheme, ModeIndicatorVisual};
 
 const WINDOW_CLASS: PCWSTR = w!("weasel-rs-renderer");
 const ISLAND_WINDOW_PROPERTY: PCWSTR = w!("WeaselRS.Renderer.XamlIsland");
@@ -76,14 +76,18 @@ struct UiState {
     revokers: Vec<windows_core::EventRevoker>,
     /// Island 的根视觉对象，由 `SourceGuard` 同时持有其 XAML 树引用。
     root: Border,
-    /// 候选区与快捷操作区的共同布局容器；字段仅用于保持 COM 对象存活。
-    _content: Grid,
+    /// 在同一个 Island 中承载候选视图和模式提示视图的重叠容器。
+    _presentation: Grid,
+    /// 候选区与快捷操作区的共同布局容器。
+    candidate_panel: Grid,
     /// 候选项容器，每次内容变化时重建其子项。
     rows: StackPanel,
     /// 快捷操作区的边框及分隔线容器。
     quick_action_panel: Border,
     /// 分页和表情快捷操作的容器。
     quick_actions: StackPanel,
+    /// 独立的中英文模式提示子树；与候选视图互斥显示。
+    mode_indicator: ModeIndicatorVisual,
     /// 负责候选树、配色及画刷缓存的主题状态。
     theme: CandidateTheme,
     /// 关联属性守卫；须先于 XAML 源析构。
@@ -193,12 +197,16 @@ unsafe fn create_initialized(
         child_exstyle | WS_EX_NOACTIVATE as isize,
     );
     let root = Border::new().map_err(|error| format!("Border creation failed: {error}"))?;
+    let presentation =
+        Grid::new().map_err(|error| format!("presentation Grid creation failed: {error}"))?;
     let content = Grid::new().map_err(|error| format!("Grid creation failed: {error}"))?;
     let rows = StackPanel::new().map_err(|error| format!("StackPanel creation failed: {error}"))?;
     let quick_action_panel =
         Border::new().map_err(|error| format!("quick action panel creation failed: {error}"))?;
     let quick_actions = StackPanel::new()
         .map_err(|error| format!("quick action stack creation failed: {error}"))?;
+    let mode_indicator = ModeIndicatorVisual::new()
+        .map_err(|error| format!("mode indicator creation failed: {error}"))?;
     let columns = content
         .ColumnDefinitions()
         .map_err(|error| format!("Grid column collection unavailable: {error}"))?;
@@ -231,8 +239,17 @@ unsafe fn create_initialized(
     content_children
         .Append(&quick_action_panel)
         .map_err(|error| format!("quick action attachment failed: {error}"))?;
-    root.SetChild(&content)
-        .map_err(|error| format!("XAML content attachment failed: {error}"))?;
+    let presentation_children = presentation
+        .Children()
+        .map_err(|error| format!("presentation children unavailable: {error}"))?;
+    presentation_children
+        .Append(&content)
+        .map_err(|error| format!("candidate panel attachment failed: {error}"))?;
+    presentation_children
+        .Append(mode_indicator.panel())
+        .map_err(|error| format!("mode indicator panel attachment failed: {error}"))?;
+    root.SetChild(&presentation)
+        .map_err(|error| format!("XAML presentation attachment failed: {error}"))?;
     source_guard
         .0
         .SetContent(&root)
@@ -240,16 +257,25 @@ unsafe fn create_initialized(
 
     let theme = CandidateTheme::new(config);
     theme
-        .prepare(&root, &rows, &quick_action_panel, &quick_actions)
+        .prepare(
+            &root,
+            &content,
+            &rows,
+            &quick_action_panel,
+            &quick_actions,
+            &mode_indicator,
+        )
         .map_err(|error| format!("theme preparation failed: {error}"))?;
 
     Ok(Box::new(UiState {
         revokers: Vec::new(),
         root,
-        _content: content,
+        _presentation: presentation,
+        candidate_panel: content,
         rows,
         quick_action_panel,
         quick_actions,
+        mode_indicator,
         theme,
         _island_window_guard: island_window_guard,
         _source_guard: source_guard,
@@ -268,7 +294,7 @@ impl ThemeBackend for UiState {
         self.theme.take_notices()
     }
     fn render(&mut self, snapshot: &CandidateView, events: &EventSink) -> Result<(), String> {
-        if !is_visible(snapshot) {
+        if !is_visible(snapshot) && !is_mode_indicator_visible(snapshot) {
             self.hide();
             return Ok(());
         }
@@ -484,9 +510,11 @@ fn render_snapshot(
         apply_dwm_theme(state);
         if let Err(error) = state.theme.render(
             &state.root,
+            &state.candidate_panel,
             &state.rows,
             &state.quick_action_panel,
             &state.quick_actions,
+            &state.mode_indicator,
             snapshot,
             events,
             &mut state.revokers,
@@ -636,7 +664,10 @@ impl crate::theme_api::ThemeFactory for Factory {
         "eleven"
     }
     fn capabilities(&self) -> crate::theme_api::ThemeCapabilities {
-        crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY
+        crate::theme_api::ThemeCapabilities {
+            mode_indicator: true,
+            ..crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY
+        }
     }
     fn create(
         &self,

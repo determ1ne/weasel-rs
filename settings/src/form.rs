@@ -235,7 +235,14 @@ fn collect(
     )];
     let mut values = values;
     if kind == "choice" || enum_number {
-        choices.extend(values.iter().map(display));
+        let labels = annotation["choices"].as_array();
+        choices.extend(values.iter().enumerate().map(|(index, value)| {
+            labels
+                .and_then(|labels| labels.get(index))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| display(value))
+        }));
         if enum_number {
             choices.push("自定义".into());
         }

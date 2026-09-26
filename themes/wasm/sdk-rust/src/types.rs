@@ -28,6 +28,10 @@ pub enum ViewField {
     AnchorTop = 16,
     AnchorRight = 17,
     AnchorBottom = 18,
+    HasModeIndicator = 19,
+    ModeIndicatorId = 20,
+    ModeIndicatorAscii = 21,
+    ModeIndicatorReason = 22,
 }
 impl TryFrom<i32> for ViewField {
     type Error = i32;
@@ -52,6 +56,28 @@ impl TryFrom<i32> for ViewField {
             16 => Ok(Self::AnchorTop),
             17 => Ok(Self::AnchorRight),
             18 => Ok(Self::AnchorBottom),
+            19 => Ok(Self::HasModeIndicator),
+            20 => Ok(Self::ModeIndicatorId),
+            21 => Ok(Self::ModeIndicatorAscii),
+            22 => Ok(Self::ModeIndicatorReason),
+            _ => Err(value),
+        }
+    }
+}
+
+/// 中英文模式提示来源；仅在HasModeIndicator非零时读取。
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeIndicatorReason {
+    Focus = 1,
+    UserSwitch = 2,
+}
+impl TryFrom<i32> for ModeIndicatorReason {
+    type Error = i32;
+    fn try_from(value: i32) -> Result<Self, i32> {
+        match value {
+            1 => Ok(Self::Focus),
+            2 => Ok(Self::UserSwitch),
             _ => Err(value),
         }
     }
@@ -310,6 +336,7 @@ impl Capability {
     pub const None: Self = Self(0);
     pub const Preedit: Self = Self(1);
     pub const Resident: Self = Self(2);
+    pub const ModeIndicator: Self = Self(4);
     pub const fn bits(self) -> i32 {
         self.0
     }
@@ -317,7 +344,7 @@ impl Capability {
         (self.0 & other.0) == other.0
     }
     pub const fn from_bits(value: i32) -> Option<Self> {
-        if value & !3 == 0 {
+        if value & !7 == 0 {
             Some(Self(value))
         } else {
             None

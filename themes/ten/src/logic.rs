@@ -6,6 +6,8 @@ use crate::theme_api::{CandidateView, UiAction};
 pub const SCALE: f32 = 46.0 / 68.0;
 /// 候选栏在设计坐标中的高度，单位为 DIP。
 pub const HEIGHT: f32 = 46.0;
+/// 中英文模式提示方框的边长，单位为 DIP。
+pub const INDICATOR_SIZE: f32 = 36.0;
 /// 候选序号列宽，单位为 DIP。
 pub const NUMBER: f32 = 40.0 * SCALE;
 /// 候选项右侧留白，单位为 DIP。
@@ -74,15 +76,29 @@ pub struct Layout {
     pub cells: Vec<Cell>,
     /// 所有区域宽度之和。
     pub width: f32,
+    /// 当前窗口高度；模式提示可独立于候选栏使用更紧凑的尺寸。
+    pub height: f32,
 }
 
 impl Layout {
+    /// 为无候选的中英文模式提示创建一个不可交互的紧凑栏位。
+    pub fn mode_indicator() -> Self {
+        Self {
+            cells: Vec::new(),
+            width: INDICATOR_SIZE,
+            height: INDICATOR_SIZE,
+        }
+    }
+
     /// 根据候选项的测量宽度构造布局。
     ///
     /// 每项宽度受最小宽度约束，随后追加上一页、下一页和表情操作区；输入宽度应与
     /// 候选项顺序一致，且已包含主文本和行内注释占用的宽度。
     pub fn new(widths: impl IntoIterator<Item = f32>) -> Self {
-        let mut result = Self::default();
+        let mut result = Self {
+            height: HEIGHT,
+            ..Default::default()
+        };
         for (index, text) in widths.into_iter().enumerate() {
             result.push(
                 Hit::Candidate(index),
@@ -107,7 +123,7 @@ impl Layout {
     ///
     /// 超出栏高、区域范围或位于右边界上的点均返回 `None`；查找按区域线性扫描。
     pub fn hit(&self, x: f32, y: f32) -> Option<Hit> {
-        if !(0.0..HEIGHT).contains(&y) {
+        if !(0.0..self.height).contains(&y) {
             return None;
         }
         self.cells
@@ -246,6 +262,16 @@ mod tests {
         assert_eq!(
             [pixels(HEIGHT, 96), pixels(HEIGHT, 144), pixels(HEIGHT, 192)],
             [46, 69, 92]
+        );
+        let indicator = Layout::mode_indicator();
+        assert_eq!((indicator.width, indicator.height), (36.0, 36.0));
+        assert_eq!(
+            [
+                pixels(indicator.height, 96),
+                pixels(indicator.height, 144),
+                pixels(indicator.height, 192),
+            ],
+            [36, 54, 72]
         );
     }
     #[test]

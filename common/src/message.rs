@@ -50,6 +50,8 @@ pub struct KeyEventResponse {
     pub ascii_mode: Option<bool>,
     /// 当前安全输入策略；未知时为空。
     pub allow_rime_in_secure_fields: Option<bool>,
+    /// 请求 TIP 对当前插入点执行一次模式提示定位。
+    pub mode_indicator_request_id: Option<u64>,
 }
 
 /// 进程内路由使用的消息负载。

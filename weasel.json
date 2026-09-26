@@ -5,6 +5,8 @@
   "preedit_type": "composition",
   "ascii_mode": false,
   "global_ascii_status": false,
+  "input_mode_indicator": "switch_only",
+  "input_mode_indicator_duration_ms": 800,
   "allow_rime_in_secure_fields": false,
   "themeSettings": {
     "abc": {},

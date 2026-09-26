@@ -9,7 +9,7 @@ use crate::{
 use std::{
     sync::{Arc, Mutex, OnceLock, mpsc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use weasel_common::{
     comrt::WinRtApartment,
@@ -211,6 +211,13 @@ fn normalized_renderer_settings(
             root_object
                 .get("themeSettings")
                 .is_some_and(serde_json::Value::is_object),
+        ),
+        (
+            "input_mode_indicator_duration_ms",
+            root_object
+                .get("input_mode_indicator_duration_ms")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|value| (100..=10_000).contains(&value)),
         ),
     ];
     for (name, valid) in checks {
@@ -417,12 +424,50 @@ struct Presentation {
     last: Option<RenderSnapshot>,
     /// 主题事件携带的内容代号；内容改变时递增以使旧回调失效。
     content_id: u64,
+    /// 当前模式提示的本地单调截止时间；相同提示 ID 的刷新不会延长它。
+    indicator_deadline: Option<(u64, Instant)>,
+    /// 新提示从 Renderer 实际收到起应显示的时长。
+    indicator_duration: Duration,
 }
 
 impl Presentation {
     /// 判断候选视图是否应显示，或因主题支持驻留且输入活动而保留。
     fn should_render(&self, view: &crate::theme_api::CandidateView) -> bool {
-        crate::presentation::is_visible(view) || (self.capabilities.resident && view.active)
+        crate::presentation::is_visible(view)
+            || (self.capabilities.resident && view.active)
+            || (self.capabilities.mode_indicator
+                && crate::presentation::is_mode_indicator_visible(view))
+    }
+
+    /// 按主题能力、候选优先级和本地截止时间规范化新快照中的提示。
+    fn update_indicator(&mut self, snapshot: &mut RenderSnapshot) {
+        if !self.capabilities.mode_indicator
+            || snapshot.visible
+            || !snapshot.items.is_empty()
+            || snapshot.preedit.is_some()
+        {
+            snapshot.mode_indicator = None;
+        }
+        let Some(indicator) = snapshot.mode_indicator.as_mut() else {
+            self.indicator_deadline = None;
+            return;
+        };
+        let now = Instant::now();
+        let deadline = match self.indicator_deadline {
+            Some((id, deadline)) if id == indicator.id => deadline,
+            _ => now + self.indicator_duration,
+        };
+        if now >= deadline {
+            snapshot.mode_indicator = None;
+            self.indicator_deadline = None;
+            return;
+        }
+        self.indicator_deadline = Some((indicator.id, deadline));
+    }
+
+    /// 返回下一个提示到期时刻，供 UI 消息循环建立一次性计时器。
+    fn indicator_deadline(&self) -> Option<Instant> {
+        self.indicator_deadline.map(|(_, deadline)| deadline)
     }
 
     /// 隐藏后端并立即取出、报告它产生的通知。
@@ -438,10 +483,12 @@ impl Presentation {
         if self.events.owner != owner {
             self.hide();
             self.last = None;
+            self.indicator_deadline = None;
         }
         self.events.owner = owner;
         match snapshot {
-            Some(snapshot) => {
+            Some(mut snapshot) => {
+                self.update_indicator(&mut snapshot);
                 if !self
                     .last
                     .as_ref()
@@ -469,9 +516,40 @@ impl Presentation {
             None => {
                 self.hide();
                 self.last = None;
+                self.indicator_deadline = None;
             }
         }
         Ok(())
+    }
+
+    /// 到期时从最后快照移除提示，并把取消后的完整视图交给主题。
+    ///
+    /// 后端据此只移除提示层；若同时已有候选或驻留 UI，不会被计时器误隐藏。
+    fn expire_indicator(&mut self) -> Result<(), String> {
+        let Some((id, deadline)) = self.indicator_deadline else {
+            return Ok(());
+        };
+        if Instant::now() < deadline {
+            return Ok(());
+        }
+        self.indicator_deadline = None;
+        let Some(snapshot) = self.last.as_mut() else {
+            return Ok(());
+        };
+        if snapshot.mode_indicator.as_ref().map(|value| value.id) != Some(id) {
+            return Ok(());
+        }
+        snapshot.mode_indicator = None;
+        self.content_id = self
+            .content_id
+            .checked_add(1)
+            .ok_or("presentation identity exhausted")?;
+        let view = crate::theme_adapter::view(snapshot, self.content_id);
+        let events =
+            crate::theme_adapter::events(self.events.owner, snapshot, self.events.sender.clone());
+        let result = self.backend.render(&view, &events);
+        crate::notifications::drain(self.theme_name, self.backend.as_mut());
+        result
     }
 
     /// 刷新主题外观，并仅在邮箱所有者仍匹配时重绘最近快照。
@@ -520,6 +598,8 @@ fn run_ui(
         let config =
             config.with_theme_defaults(registration.name(), registration.default_settings()?)?;
         let inline_preedit = config.required::<bool>(".inline_preedit")?;
+        let indicator_duration =
+            Duration::from_millis(config.required::<u64>(".input_mode_indicator_duration_ms")?);
         let creation = registration.create(mode, &config);
         for notice in creation.notices {
             crate::notifications::report(registration.name(), notice);
@@ -543,6 +623,8 @@ fn run_ui(
             events,
             last: None,
             content_id: 0,
+            indicator_deadline: None,
+            indicator_duration,
         };
         // Preview startup includes its first render. Failed initialization or
         // layout leaves the controller's previous preview alive.
@@ -571,6 +653,7 @@ fn run_ui(
             .send(Ok(thread_id))
             .map_err(|_| "renderer startup handshake failed")?;
         let mut message = MSG::default();
+        let mut indicator_timer = 0usize;
         loop {
             if mailbox
                 .lock()
@@ -593,6 +676,15 @@ fn run_ui(
                 .take_pending();
             if let Some((owner, snapshot)) = pending {
                 presentation.apply(owner, snapshot)?;
+                sync_indicator_timer(&mut presentation, &mut indicator_timer)?;
+            }
+            if message.message == WM_TIMER as u32
+                && message.hwnd.0.is_null()
+                && message.wParam.0 == indicator_timer
+            {
+                indicator_timer = 0;
+                presentation.expire_indicator()?;
+                sync_indicator_timer(&mut presentation, &mut indicator_timer)?;
             }
             if is_thread_message(&message, WM_RENDERER_THEME)
                 || [
@@ -610,6 +702,7 @@ fn run_ui(
             }
             if !is_thread_message(&message, WM_RENDERER_UPDATE)
                 && !is_thread_message(&message, WM_RENDERER_THEME)
+                && message.message != WM_TIMER as u32
             {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
@@ -618,10 +711,43 @@ fn run_ui(
             crate::notifications::drain(registration.name(), presentation.backend.as_mut());
             health?;
         }
+        if indicator_timer != 0 {
+            let _ = KillTimer(None, indicator_timer);
+        }
         presentation.backend.hide();
         crate::notifications::drain(registration.name(), presentation.backend.as_mut());
         Ok(())
     }
+}
+
+/// 依据 Presentation 的单调截止时间维护一个线程级一次性计时器。
+unsafe fn sync_indicator_timer(
+    presentation: &mut Presentation,
+    timer: &mut usize,
+) -> Result<(), String> {
+    if *timer != 0 {
+        let _ = KillTimer(None, *timer);
+        *timer = 0;
+    }
+    let Some(deadline) = presentation.indicator_deadline() else {
+        return Ok(());
+    };
+    let delay = deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis()
+        .clamp(1, u32::MAX as u128) as u32;
+    let id = SetTimer(None, 0, delay, None);
+    if id == 0 {
+        crate::diagnostics::record(format_args!(
+            "could not schedule mode indicator timeout; dismissing indicator"
+        ));
+        presentation.indicator_deadline = presentation
+            .indicator_deadline
+            .map(|(id, _)| (id, Instant::now()));
+        return presentation.expire_indicator();
+    }
+    *timer = id;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -767,6 +893,8 @@ mod tests {
             events: EventSender { owner: 0, sender },
             last: None,
             content_id: 0,
+            indicator_deadline: None,
+            indicator_duration: Duration::from_millis(800),
         };
         let mut snapshot = RenderSnapshot {
             sequence: 1,
@@ -788,6 +916,53 @@ mod tests {
         ui.apply(1, None).unwrap();
         ui.refresh(Some(1)).unwrap();
         assert_eq!(calls.lock().unwrap().rendered, [1, 1]);
+    }
+
+    #[test]
+    fn mode_indicator_keeps_its_deadline_and_yields_to_candidates() {
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let (sender, _) = tokio::sync::mpsc::channel(1);
+        let mut ui = Presentation {
+            theme_name: "test",
+            capabilities: crate::theme_api::ThemeCapabilities {
+                mode_indicator: true,
+                ..crate::theme_api::ThemeCapabilities::CANDIDATES_ONLY
+            },
+            backend: Box::new(FakeBackend(calls)),
+            events: EventSender { owner: 0, sender },
+            last: None,
+            content_id: 0,
+            indicator_deadline: None,
+            indicator_duration: Duration::from_millis(800),
+        };
+        let mut snapshot = RenderSnapshot {
+            sequence: 1,
+            active: true,
+            anchor: Some(weasel_common::message::RenderRect {
+                valid: true,
+                bottom: 1,
+                ..Default::default()
+            }),
+            mode_indicator: Some(weasel_common::message::ModeIndicator {
+                id: 1,
+                ascii_mode: true,
+                reason: weasel_common::message::ModeIndicatorReason::UserSwitch as i32,
+            }),
+            ..Default::default()
+        };
+        ui.apply(1, Some(snapshot.clone())).unwrap();
+        let deadline = ui.indicator_deadline().unwrap();
+
+        snapshot.sequence += 1;
+        ui.apply(1, Some(snapshot.clone())).unwrap();
+        assert_eq!(ui.indicator_deadline(), Some(deadline));
+
+        snapshot.sequence += 1;
+        snapshot.visible = true;
+        snapshot.items.push(Default::default());
+        ui.apply(1, Some(snapshot)).unwrap();
+        assert!(ui.indicator_deadline().is_none());
+        assert!(ui.last.as_ref().unwrap().mode_indicator.is_none());
     }
 
     #[test]
