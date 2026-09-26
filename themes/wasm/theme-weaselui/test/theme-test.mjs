@@ -16,7 +16,9 @@ assert.ok(Math.abs(calls.sizes.at(-1).h - (24 + 2 * (14 * 4 / 3 * 1.4 + 4) + 5))
 assert.ok(calls.texts.some(c => c.text === "1."));
 assert.equal(calls.fills.length, 0);
 assert.deepEqual(calls.corners, []);
-assert.deepEqual(calls.panels, [{corner_radius: 4, shadow_radius: 0, offset_x: 4, offset_y: 4, color: 0x40000000}]);
+assert.equal(calls.panels.length, 2);
+for (const panel of calls.panels) assert.deepEqual(panel,
+  {corner_radius: 4, shadow_radius: 0, offset_x: 4, offset_y: 4, color: 0x40000000});
 assert.equal(calls.rounded.length, 3);
 assert.equal(calls.rounded[2].color, 0xff123456);
 assert.equal(calls.rounded[2].radius, 4);
@@ -32,6 +34,11 @@ calls.actions.length = 0;
 theme.mouse(0,20,60); theme.mouse(3,0,0); theme.mouse(2,20,60);
 assert.deepEqual(calls.actions, []);
 theme.hide();
+host.render({content_id:4,active:true,visible:false,mode_indicator:{id:1,ascii_mode:false,reason:1},items:[]});
+assert.equal(calls.images.at(-1).name, "zh.png");
+assert.deepEqual([calls.images.at(-1).width, calls.images.at(-1).height], [48, 48]);
+host.render({content_id:5,active:true,visible:false,mode_indicator:{id:2,ascii_mode:true,reason:1},items:[]});
+assert.equal(calls.images.at(-1).name, "en.png");
 // One matrix covers layout, global mode selection and the shifted hit rectangles.
 for (const horizontal of [false, true]) for (const preedit_type of ["composition", "preview"]) {
   const h = await createHost(readFileSync(new URL("../build/weaselui.wasm", import.meta.url)),

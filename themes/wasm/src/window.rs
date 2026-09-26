@@ -29,11 +29,13 @@ use crate::theme_api::{
     Anchor, CandidateView, EventSink, NoticeSeverity, ThemeNotice, UiAction, same_content,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use windows_strings::{PCWSTR, w};
 
 const CLASS: PCWSTR = w!("Weasel.ThemeWasm.D2D");
+const AUX_CLASS: PCWSTR = w!("Weasel.ThemeWasm.Surface");
 const RETRY_TIMER: usize = 1;
 const FRAME_TIMER: usize = 2;
 const FRAME_INTERVAL_MS: u32 = 16;
@@ -207,6 +209,256 @@ pub struct Window {
     wake_deadline: Cell<Option<f64>>,
     /// 窗口是否已显示，用于首次显示前刷新画布。
     shown: Cell<bool>,
+    /// guest 创建的辅助表面；对象地址在对应 HWND 生命周期内保持稳定。
+    auxiliary: RefCell<BTreeMap<i32, Rc<AuxWindow>>>,
+}
+
+/// 一个由 WASM `SurfaceId` 对应的辅助原生窗口。
+///
+/// 运行时和资源仍由主 [`Window`] 独占；这里只保存 HWND、画布以及最近一次已应用的
+/// 展示快照。`owner` 指向稳定分配的主窗口，主窗口析构时会先清空 `auxiliary`。
+struct AuxWindow {
+    id: i32,
+    owner: *const Window,
+    hwnd: Cell<HWND>,
+    dpi: Cell<u32>,
+    canvas: RefCell<crate::canvas::Canvas>,
+    frame: RefCell<Vec<DrawCommand>>,
+    layers: RefCell<crate::layers::LayerScene>,
+    size: Cell<(f32, f32)>,
+    applied: Cell<(f32, f32)>,
+    anchor: RefCell<Option<Anchor>>,
+    panel: Cell<crate::protocol::PanelStyle>,
+    backdrop: Cell<crate::protocol::BackdropStyle>,
+    anchor_rect: Cell<crate::protocol::Rect>,
+    placement: Cell<PlacementStyle>,
+    visible: Cell<bool>,
+    shown: Cell<bool>,
+    recovery: RefCell<Recovery>,
+    positioning: Cell<bool>,
+    drag: Cell<Option<DragState>>,
+    manual_position: Cell<Option<(i32, i32)>>,
+    preview: bool,
+}
+
+impl AuxWindow {
+    fn new(id: i32, owner: &Window) -> Result<Self, String> {
+        Ok(Self {
+            id,
+            owner: owner as *const Window,
+            hwnd: Cell::new(HWND::default()),
+            dpi: Cell::new(96),
+            canvas: RefCell::new(crate::canvas::Canvas::new().map_err(|e| e.to_string())?),
+            frame: RefCell::new(Vec::new()),
+            layers: RefCell::new(Default::default()),
+            size: Cell::new((0.0, 0.0)),
+            applied: Cell::new((0.0, 0.0)),
+            anchor: RefCell::new(None),
+            panel: Cell::new(Default::default()),
+            backdrop: Cell::new(Default::default()),
+            anchor_rect: Cell::new(Default::default()),
+            placement: Cell::new(Default::default()),
+            visible: Cell::new(false),
+            shown: Cell::new(false),
+            recovery: RefCell::new(Default::default()),
+            positioning: Cell::new(false),
+            drag: Cell::new(None),
+            manual_position: Cell::new(None),
+            preview: owner.preview,
+        })
+    }
+
+    fn owner(&self) -> &Window {
+        // SAFETY: Window::drop clears all AuxWindow values before destroying itself.
+        unsafe { &*self.owner }
+    }
+
+    fn invalidate(&self) {
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd.get()), None, false);
+        }
+    }
+
+    fn cancel(&self) {
+        unsafe {
+            if GetCapture() == self.hwnd.get() {
+                let _ = ReleaseCapture();
+            }
+        }
+    }
+
+    fn position(&self) -> windows_core::Result<()> {
+        if self.positioning.replace(true) {
+            return Ok(());
+        }
+        struct Reset<'a>(&'a Cell<bool>);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let _reset = Reset(&self.positioning);
+        for _ in 0..3 {
+            let dpi = self.dpi.get();
+            let (dip_w, dip_h) = self.size.get();
+            if dip_w <= 0.0 || dip_h <= 0.0 {
+                return Ok(());
+            }
+            let edge = crate::geometry::insets(&self.panel.get());
+            let width = pixels(dip_w + edge.left + edge.right, dpi);
+            let height = pixels(dip_h + edge.top + edge.bottom, dpi);
+            let position = if let Some((x, y)) = self.manual_position.get() {
+                Some(clamp_to_nearest_work_area(x, y, width, height))
+            } else if self.preview {
+                Some(preview_position(width, height))
+            } else {
+                match self.placement.get() {
+                    PlacementStyle::Fixed { x, y } => Some(crate::presentation::fixed_position(
+                        x, y, width, height, dpi,
+                    )),
+                    PlacementStyle::Anchored => self
+                        .anchor
+                        .borrow()
+                        .as_ref()
+                        .filter(|anchor| anchor.valid)
+                        .map(|anchor| {
+                            let anchor_rect = self.anchor_rect.get();
+                            let (x, y) = popup_position(
+                                anchor,
+                                pixels(anchor_rect.w, dpi),
+                                pixels(anchor_rect.h, dpi),
+                            );
+                            (
+                                x - ((edge.left + anchor_rect.x) * dpi as f32 / 96.0).round()
+                                    as i32,
+                                y - ((edge.top + anchor_rect.y) * dpi as f32 / 96.0).round() as i32,
+                            )
+                        }),
+                }
+            };
+            let Some((x, y)) = position else {
+                return Ok(());
+            };
+            let (x, y) = clamp_to_nearest_work_area(x, y, width, height);
+            unsafe {
+                SetWindowPos(
+                    self.hwnd.get(),
+                    Some(HWND_TOPMOST),
+                    x,
+                    y,
+                    width,
+                    height,
+                    SWP_NOACTIVATE as u32,
+                )
+                .ok()?;
+            }
+            if dpi == self.dpi.get() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn paint(&self) -> windows_core::Result<()> {
+        let mut canvas = self.canvas.borrow_mut();
+        canvas.ensure_target(self.hwnd.get(), self.dpi.get())?;
+        canvas.set_panel(self.panel.get(), self.size.get(), self.dpi.get())?;
+        canvas.set_backdrop(self.backdrop.get())?;
+        canvas.replay(&self.frame.borrow())?;
+        if self.visible.get() {
+            canvas.set_layers(&self.layers.borrow())?;
+        } else {
+            canvas.clear_layers()?;
+        }
+        self.recovery.borrow_mut().succeeded();
+        Ok(())
+    }
+
+    fn graphics_error(&self, error: windows_core::Error) {
+        self.canvas.borrow_mut().invalidate_target();
+        if !self
+            .recovery
+            .borrow_mut()
+            .failed(crate::canvas::Canvas::is_device_lost(&error))
+        {
+            self.owner().fail(error);
+            return;
+        }
+        unsafe {
+            if SetTimer(Some(self.hwnd.get()), RETRY_TIMER, RETRY_INTERVAL_MS, None) == 0 {
+                self.owner().fail(windows_core::Error::from_thread());
+            }
+        }
+    }
+
+    fn resize(&self) -> windows_core::Result<()> {
+        let mut rect = RECT::default();
+        unsafe { GetClientRect(self.hwnd.get(), &mut rect).ok()? };
+        self.canvas.borrow_mut().resize(
+            (rect.right - rect.left).max(1) as u32,
+            (rect.bottom - rect.top).max(1) as u32,
+            self.dpi.get(),
+        )
+    }
+
+    fn begin_drag(&self) -> windows_core::Result<bool> {
+        if !matches!(self.placement.get(), PlacementStyle::Fixed { .. }) {
+            return Ok(false);
+        }
+        let mut cursor = POINT::default();
+        let mut rect = RECT::default();
+        unsafe {
+            GetCursorPos(&mut cursor).ok()?;
+            GetWindowRect(self.hwnd.get(), &mut rect).ok()?;
+            self.manual_position.set(Some((rect.left, rect.top)));
+            self.drag.set(Some(DragState {
+                cursor_x: cursor.x,
+                cursor_y: cursor.y,
+                window_x: rect.left,
+                window_y: rect.top,
+            }));
+            let _ = SetCapture(self.hwnd.get());
+        }
+        Ok(true)
+    }
+
+    fn move_drag(&self) -> windows_core::Result<bool> {
+        let Some(drag) = self.drag.get() else {
+            return Ok(false);
+        };
+        let mut cursor = POINT::default();
+        let mut rect = RECT::default();
+        unsafe {
+            GetCursorPos(&mut cursor).ok()?;
+            GetWindowRect(self.hwnd.get(), &mut rect).ok()?;
+        }
+        let x = drag
+            .window_x
+            .saturating_add(cursor.x.saturating_sub(drag.cursor_x));
+        let y = drag
+            .window_y
+            .saturating_add(cursor.y.saturating_sub(drag.cursor_y));
+        let (x, y) = clamp_to_nearest_work_area(
+            x,
+            y,
+            (rect.right - rect.left).max(1),
+            (rect.bottom - rect.top).max(1),
+        );
+        self.manual_position.set(Some((x, y)));
+        unsafe {
+            SetWindowPos(
+                self.hwnd.get(),
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                0,
+                0,
+                (SWP_NOSIZE | SWP_NOACTIVATE) as u32,
+            )
+            .ok()?;
+        }
+        Ok(true)
+    }
 }
 
 impl Window {
@@ -245,6 +497,7 @@ impl Window {
             dark: Cell::new(appearance::is_dark()),
             wake_deadline: Cell::new(None),
             shown: Cell::new(false),
+            auxiliary: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -475,6 +728,125 @@ impl Window {
         }
     }
 
+    /// 将运行时已提交的辅助 Surface 状态同步到独立 HWND。
+    ///
+    /// 先复制轻量展示状态并释放运行时借用，再创建、定位及显示 HWND，避免 Win32
+    /// 同步消息重入时触发 `RefCell` 借用冲突。
+    fn sync_auxiliary(&self) -> Result<bool, String> {
+        struct Update {
+            id: i32,
+            frame: Option<Vec<DrawCommand>>,
+            layers: crate::layers::LayerScene,
+            size: (f32, f32),
+            panel: crate::protocol::PanelStyle,
+            backdrop: crate::protocol::BackdropStyle,
+            anchor_rect: crate::protocol::Rect,
+            placement: PlacementStyle,
+            visible: bool,
+            anchor: Option<Anchor>,
+        }
+
+        let updates = {
+            let mut app = self.app.borrow_mut();
+            let ids = app.runtime.auxiliary_surfaces();
+            let has_content = app.content.is_some();
+            let anchor = app.anchor.clone();
+            ids.into_iter()
+                .map(|(id, _)| Update {
+                    id,
+                    frame: app.runtime.take_frame_for(id),
+                    layers: app.runtime.layers_for(id).cloned().unwrap_or_default(),
+                    size: app.runtime.size_for(id),
+                    panel: app.runtime.panel_style_for(id),
+                    backdrop: app.runtime.backdrop_style_for(id),
+                    anchor_rect: app.runtime.anchor_rect_for(id),
+                    placement: app.runtime.placement_for(id),
+                    visible: has_content && app.runtime.visible_for(id),
+                    anchor: anchor.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let live = updates.iter().map(|update| update.id).collect::<Vec<_>>();
+        self.auxiliary
+            .borrow_mut()
+            .retain(|id, _| live.binary_search(id).is_ok());
+
+        for update in &updates {
+            if !self.auxiliary.borrow().contains_key(&update.id) {
+                let surface = Rc::new(AuxWindow::new(update.id, self)?);
+                create_aux_window(&surface)?;
+                self.auxiliary.borrow_mut().insert(update.id, surface);
+            }
+        }
+
+        let mut any_repaint = false;
+        for update in updates {
+            let surface = self
+                .auxiliary
+                .borrow()
+                .get(&update.id)
+                .cloned()
+                .expect("created auxiliary surface");
+            let size_changed = surface.applied.replace(update.size) != update.size;
+            let panel_changed = surface.panel.replace(update.panel) != update.panel;
+            let backdrop_changed = surface.backdrop.replace(update.backdrop) != update.backdrop;
+            let anchor_changed =
+                surface.anchor_rect.replace(update.anchor_rect) != update.anchor_rect;
+            let placement_changed = surface.placement.replace(update.placement) != update.placement;
+            let frame_changed = update.frame.is_some();
+            surface.size.set(update.size);
+            *surface.anchor.borrow_mut() = update.anchor;
+            *surface.layers.borrow_mut() = update.layers;
+            if let Some(frame) = update.frame {
+                *surface.frame.borrow_mut() = frame;
+            }
+            if size_changed || panel_changed || anchor_changed || placement_changed {
+                surface.position().map_err(|e| e.to_string())?;
+                let edge = crate::geometry::insets(&update.panel);
+                surface
+                    .canvas
+                    .borrow_mut()
+                    .resize(
+                        pixels(update.size.0 + edge.left + edge.right, surface.dpi.get()) as u32,
+                        pixels(update.size.1 + edge.top + edge.bottom, surface.dpi.get()) as u32,
+                        surface.dpi.get(),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            let repaint = frame_changed || backdrop_changed || panel_changed;
+            any_repaint |= repaint;
+            surface.visible.set(update.visible);
+            if update.visible && (!surface.shown.get() || repaint) {
+                if let Err(error) = surface.paint() {
+                    surface.graphics_error(error);
+                }
+            } else if !update.visible
+                && let Err(error) = surface.canvas.borrow_mut().clear_layers()
+            {
+                surface.graphics_error(error);
+            }
+            unsafe {
+                let _ = ShowWindow(
+                    surface.hwnd.get(),
+                    if update.visible {
+                        if surface.preview {
+                            SW_SHOW
+                        } else {
+                            SW_SHOWNOACTIVATE
+                        }
+                    } else {
+                        SW_HIDE
+                    },
+                );
+            }
+            surface.shown.set(update.visible);
+            if repaint {
+                surface.invalidate();
+            }
+        }
+        Ok(any_repaint)
+    }
+
     /// 鼠标/帧/外观事件后的公共副作用：发送动作、尺寸变化重定位、
     /// 画布 resize、动画计时器、收集诊断。
     ///
@@ -548,6 +920,7 @@ impl Window {
                 .resize(w as u32, h as u32, self.dpi.get())
                 .map_err(|e| e.to_string())?;
         }
+        self.sync_auxiliary()?;
         self.schedule_wakeup(frame_requested)?;
         if !notes.is_empty() {
             let mut app = self.app.borrow_mut();
@@ -580,7 +953,8 @@ impl Window {
     /// 失败时返回错误，且不登记新的截止时间。
     fn schedule_wakeup(&self, request: crate::animation::WakeRequest) -> Result<(), String> {
         let old = self.wake_deadline.get();
-        let next = if self.app.borrow().runtime.visible() && self.app.borrow().content.is_some() {
+        let next = if self.app.borrow().runtime.any_visible() && self.app.borrow().content.is_some()
+        {
             request.merge(old)
         } else {
             None
@@ -667,6 +1041,10 @@ impl Window {
                 app.anchor = snapshot.anchor.clone();
             }
             self.position().map_err(|e| e.to_string())?;
+            for surface in self.auxiliary.borrow().values() {
+                *surface.anchor.borrow_mut() = snapshot.anchor.clone();
+                surface.position().map_err(|e| e.to_string())?;
+            }
             return self.health();
         }
         self.health()?;
@@ -700,23 +1078,24 @@ impl Window {
             app.runtime.render(snapshot)?;
             let commands = app.runtime.take_frame();
             let changed = commands.is_some() || appearance_changed;
+            let presentation_updated = app.runtime.presentation_updated();
             // No submission preserves the presented snapshot, including its action identity.
             if let Some(commands) = commands {
                 app.frame = commands;
                 app.size = app.runtime.size();
-                if app.runtime.main_updated() {
-                    if app.content.is_none() {
-                        app.content = Some(Content {
-                            events: events.clone(),
-                            last: snapshot.clone(),
-                        });
-                    } else {
-                        let content = app.content.as_mut().expect("checked above");
-                        content.events = events.clone();
-                        content.last = snapshot.clone();
-                    }
-                    app.anchor = snapshot.anchor.clone();
+            }
+            if presentation_updated {
+                if app.content.is_none() {
+                    app.content = Some(Content {
+                        events: events.clone(),
+                        last: snapshot.clone(),
+                    });
+                } else {
+                    let content = app.content.as_mut().expect("checked above");
+                    content.events = events.clone();
+                    content.last = snapshot.clone();
                 }
+                app.anchor = snapshot.anchor.clone();
             }
             (
                 app.runtime.take_actions(),
@@ -763,6 +1142,9 @@ impl Window {
         app.size = (0.0, 0.0);
         app.applied = (0.0, 0.0);
         drop(app);
+        if let Err(error) = self.sync_auxiliary() {
+            self.fail(error);
+        }
         self.recovery.borrow_mut().waiting = false;
         unsafe {
             let _ = KillTimer(Some(self.hwnd.get()), RETRY_TIMER);
@@ -814,16 +1196,34 @@ impl Window {
     /// 无当前内容时忽略输入。鼠标按下可按主题请求启动固定窗口拖动；普通捕获、动作
     /// 发送和重绘均在运行时调用结束后处理，以免持有可变借用时触发重入。
     fn mouse(&self, kind: i32, param: LPARAM) -> Result<(), String> {
+        self.mouse_surface(
+            crate::runtime::PRIMARY_SURFACE,
+            self.dpi.get(),
+            self.app.borrow().runtime.panel_style(),
+            kind,
+            param,
+        )
+    }
+
+    /// 分发来自任意宿主管理表面的指针事件。
+    fn mouse_surface(
+        &self,
+        surface_id: i32,
+        dpi: u32,
+        panel: crate::protocol::PanelStyle,
+        kind: i32,
+        param: LPARAM,
+    ) -> Result<(), String> {
         if !self.app.borrow().content.is_some() {
             return Ok(());
         }
-        let dpi = self.dpi.get() as f32;
-        let edge = crate::geometry::insets(&self.app.borrow().runtime.panel_style());
+        let dpi = dpi as f32;
+        let edge = crate::geometry::insets(&panel);
         let x = (param.0 as u16 as i16) as f32 * 96.0 / dpi - edge.left;
         let y = ((param.0 >> 16) as u16 as i16) as f32 * 96.0 / dpi - edge.top;
         let (actions, frame_requested, notes, changed, drag_requested) = {
             let mut app = self.app.borrow_mut();
-            app.runtime.mouse(kind, x, y)?;
+            app.runtime.mouse_on(surface_id, kind, x, y)?;
             let commands = app.runtime.take_frame();
             // Presentation-only submissions also require an invalidation.
             let changed = commands.is_some();
@@ -840,14 +1240,40 @@ impl Window {
             )
         };
         if kind == MOUSE_DOWN {
-            let dragging = drag_requested && self.begin_drag().map_err(|e| e.to_string())?;
+            let dragging = match drag_requested {
+                Some(id) if id == crate::runtime::PRIMARY_SURFACE => {
+                    self.begin_drag().map_err(|e| e.to_string())?
+                }
+                Some(id) => {
+                    let surface = self.auxiliary.borrow().get(&id).cloned();
+                    match surface {
+                        Some(surface) => surface.begin_drag().map_err(|e| e.to_string())?,
+                        None => false,
+                    }
+                }
+                None => false,
+            };
             if !dragging {
                 unsafe {
-                    let _ = SetCapture(self.hwnd.get());
+                    let hwnd = if surface_id == crate::runtime::PRIMARY_SURFACE {
+                        self.hwnd.get()
+                    } else {
+                        self.auxiliary
+                            .borrow()
+                            .get(&surface_id)
+                            .map_or(HWND::default(), |surface| surface.hwnd.get())
+                    };
+                    if !hwnd.0.is_null() {
+                        let _ = SetCapture(hwnd);
+                    }
                 }
             }
         } else if kind == MOUSE_UP {
-            self.cancel();
+            if surface_id == crate::runtime::PRIMARY_SURFACE {
+                self.cancel();
+            } else if let Some(surface) = self.auxiliary.borrow().get(&surface_id) {
+                surface.cancel();
+            }
         }
         self.apply_side_effects(&actions, frame_requested, notes)?;
         self.sync_visibility();
@@ -861,7 +1287,7 @@ impl Window {
     ///
     /// 内容不存在或运行时不可见时不调用 WASM。
     fn tick_frame(&self) -> Result<(), String> {
-        if self.app.borrow().content.is_none() || !self.app.borrow().runtime.visible() {
+        if self.app.borrow().content.is_none() || !self.app.borrow().runtime.any_visible() {
             return Ok(());
         }
         let (actions, frame_requested, notes, changed) = {
@@ -977,12 +1403,68 @@ pub(crate) fn create_window(window: &Window) -> Result<(), String> {
             .ensure_target(hwnd, window.dpi.get())
             .map_err(|e| e.to_string())?;
     }
+    window.sync_auxiliary()?;
+    Ok(())
+}
+
+/// 为一个辅助 Surface 创建独立的非激活顶层 HWND。
+fn create_aux_window(surface: &AuxWindow) -> Result<(), String> {
+    unsafe {
+        let instance = GetModuleHandleW(None);
+        if instance.0.is_null() {
+            return Err(windows_core::Error::from_thread().to_string());
+        }
+        let mut existing = WNDCLASSW::default();
+        if !GetClassInfoW(Some(instance), AUX_CLASS, &mut existing).as_bool() {
+            let class = WNDCLASSW {
+                hInstance: instance,
+                lpszClassName: AUX_CLASS,
+                lpfnWndProc: Some(aux_wnd_proc),
+                hCursor: LoadCursorW(None, IDC_ARROW),
+                ..Default::default()
+            };
+            if RegisterClassW(&class).0 == 0 {
+                return Err(windows_core::Error::from_thread().to_string());
+            }
+        }
+        let ex_style = if surface.preview {
+            WS_EX_TOPMOST as u32
+        } else {
+            (WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) as u32
+        };
+        let hwnd = CreateWindowExW(
+            ex_style | WS_EX_NOREDIRECTIONBITMAP as u32,
+            AUX_CLASS,
+            w!("Weasel auxiliary surface (WASM)"),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            None,
+            None,
+            Some(instance),
+            Some(surface as *const AuxWindow as *const std::ffi::c_void),
+        );
+        if hwnd.0.is_null() {
+            return Err(windows_core::Error::from_thread().to_string());
+        }
+        surface.hwnd.set(hwnd);
+        surface.dpi.set(GetDpiForWindow(hwnd).max(1));
+        surface
+            .canvas
+            .borrow_mut()
+            .ensure_target(hwnd, surface.dpi.get())
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
 impl Drop for Window {
     /// 摘除窗口过程中的 Rust 指针，停止计时器并释放鼠标捕获后销毁 HWND。
     fn drop(&mut self) {
+        // 辅助窗口持有回指主 Window 的非拥有指针，必须先全部销毁。
+        self.auxiliary.get_mut().clear();
         let hwnd = self.hwnd.get();
         if !hwnd.0.is_null() {
             unsafe {
@@ -991,6 +1473,20 @@ impl Drop for Window {
                 self.cancel();
                 let _ = KillTimer(Some(hwnd), RETRY_TIMER);
                 let _ = KillTimer(Some(hwnd), FRAME_TIMER);
+                let _ = DestroyWindow(hwnd);
+            }
+        }
+    }
+}
+
+impl Drop for AuxWindow {
+    fn drop(&mut self) {
+        let hwnd = self.hwnd.get();
+        if !hwnd.0.is_null() {
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                self.cancel();
+                let _ = KillTimer(Some(hwnd), RETRY_TIMER);
                 let _ = DestroyWindow(hwnd);
             }
         }
@@ -1040,6 +1536,198 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             }
             LRESULT(0)
         }
+    }
+}
+
+/// 辅助 Surface 的窗口过程；错误统一记录到所属主窗口。
+unsafe extern "system" fn aux_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
+        aux_dispatch(hwnd, msg, wp, lp)
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            unsafe {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const AuxWindow;
+                if let Some(surface) = ptr.as_ref() {
+                    surface
+                        .owner()
+                        .fail("theme_wasm auxiliary callback panicked");
+                }
+            }
+            LRESULT(0)
+        }
+    }
+}
+
+unsafe fn aux_dispatch(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if msg == WM_NCCREATE as u32 {
+            let create = &*(lp.0 as *const CREATESTRUCTW);
+            let ptr = create.lpCreateParams as *const AuxWindow;
+            if ptr.is_null() {
+                return LRESULT(0);
+            }
+            (*ptr).hwnd.set(hwnd);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
+            return LRESULT(1);
+        }
+        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const AuxWindow;
+        if let Some(surface) = ptr.as_ref() {
+            match msg as i32 {
+                WM_PAINT => {
+                    let _paint = PaintGuard::begin(hwnd);
+                    if !surface.recovery.borrow().waiting {
+                        if let Err(error) = surface.paint() {
+                            surface.graphics_error(error);
+                        }
+                    }
+                    return LRESULT(0);
+                }
+                WM_ERASEBKGND => return LRESULT(1),
+                WM_CLOSE => {
+                    if surface.preview {
+                        PostQuitMessage(0);
+                    }
+                    return LRESULT(0);
+                }
+                WM_NCHITTEST => {
+                    let mut point = POINT {
+                        x: (lp.0 as u16 as i16) as i32,
+                        y: ((lp.0 >> 16) as u16 as i16) as i32,
+                    };
+                    let _ = ScreenToClient(hwnd, &mut point);
+                    let edge = crate::geometry::insets(&surface.panel.get());
+                    let scale = surface.dpi.get() as f32 / 96.0;
+                    let hit = surface.owner().app.borrow().runtime.hit_test_for(
+                        surface.id,
+                        point.x as f32 / scale - edge.left,
+                        point.y as f32 / scale - edge.top,
+                    ) >= 0;
+                    return LRESULT(if hit { HTCLIENT } else { HTTRANSPARENT } as isize);
+                }
+                WM_MOUSEACTIVATE => {
+                    return if surface.preview {
+                        DefWindowProcW(hwnd, msg, wp, lp)
+                    } else {
+                        LRESULT(MA_NOACTIVATE as isize)
+                    };
+                }
+                WM_SIZE => {
+                    if let Err(error) = surface.resize() {
+                        surface.graphics_error(error);
+                    }
+                    return LRESULT(0);
+                }
+                WM_DPICHANGED => {
+                    surface.dpi.set((wp.0 as u32 & 0xffff).max(1));
+                    if surface.drag.get().is_none() {
+                        surface.cancel();
+                    }
+                    if let Err(error) = surface.position() {
+                        surface.owner().fail(error);
+                    }
+                    if let Err(error) = surface.resize() {
+                        surface.graphics_error(error);
+                    }
+                    surface.invalidate();
+                    return LRESULT(0);
+                }
+                WM_TIMER if wp.0 == RETRY_TIMER => {
+                    let _ = KillTimer(Some(hwnd), RETRY_TIMER);
+                    surface.recovery.borrow_mut().waiting = false;
+                    surface.invalidate();
+                    return LRESULT(0);
+                }
+                WM_LBUTTONDOWN => {
+                    if let Err(error) = surface.owner().mouse_surface(
+                        surface.id,
+                        surface.dpi.get(),
+                        surface.panel.get(),
+                        MOUSE_DOWN,
+                        lp,
+                    ) {
+                        surface.owner().fail(error);
+                    }
+                    return LRESULT(0);
+                }
+                WM_LBUTTONUP => {
+                    if surface.drag.get().is_some() {
+                        if let Err(error) = surface.move_drag() {
+                            surface.owner().fail(error);
+                        }
+                        surface.drag.set(None);
+                        surface.cancel();
+                        return LRESULT(0);
+                    }
+                    if let Err(error) = surface.owner().mouse_surface(
+                        surface.id,
+                        surface.dpi.get(),
+                        surface.panel.get(),
+                        MOUSE_UP,
+                        lp,
+                    ) {
+                        surface.owner().fail(error);
+                    }
+                    return LRESULT(0);
+                }
+                WM_MOUSEMOVE => {
+                    match surface.move_drag() {
+                        Ok(true) => return LRESULT(0),
+                        Ok(false) => {}
+                        Err(error) => {
+                            surface.drag.set(None);
+                            surface.cancel();
+                            surface.owner().fail(error);
+                            return LRESULT(0);
+                        }
+                    }
+                    if let Err(error) = surface.owner().mouse_surface(
+                        surface.id,
+                        surface.dpi.get(),
+                        surface.panel.get(),
+                        MOUSE_MOVE,
+                        lp,
+                    ) {
+                        surface.owner().fail(error);
+                    }
+                    let mut track = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE as u32,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    let _ = TrackMouseEvent(&mut track);
+                    return LRESULT(0);
+                }
+                WM_MOUSELEAVE if surface.drag.get().is_some() => return LRESULT(0),
+                WM_MOUSELEAVE | WM_CAPTURECHANGED | WM_CANCELMODE => {
+                    surface.drag.set(None);
+                    surface.cancel();
+                    let kind = if msg == WM_MOUSELEAVE as u32 {
+                        MOUSE_LEAVE
+                    } else {
+                        crate::protocol::MOUSE_CANCEL
+                    };
+                    if let Err(error) = surface.owner().mouse_surface(
+                        surface.id,
+                        surface.dpi.get(),
+                        surface.panel.get(),
+                        kind,
+                        lp,
+                    ) {
+                        surface.owner().fail(error);
+                    }
+                    surface.invalidate();
+                    return LRESULT(0);
+                }
+                WM_NCDESTROY => {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                    surface.hwnd.set(HWND::default());
+                }
+                _ => {}
+            }
+        }
+        DefWindowProcW(hwnd, msg, wp, lp)
     }
 }
 

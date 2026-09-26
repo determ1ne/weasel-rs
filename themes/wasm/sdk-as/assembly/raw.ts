@@ -1,4 +1,20 @@
 // Generated from themes/wasm/abi.json. DO NOT EDIT.
+// 分组：surface。创建一个由宿主管理的辅助原生表面，返回正 SurfaceId 或负 ErrorCode。每个主题最多拥有 8 个表面（含 Primary）；资源表在所有表面间共享。
+@external("weasel_v2", "surface_create")
+export declare function surface_create(kind: i32): i32;
+
+// 分组：surface。删除辅助表面；Primary(0) 不可删除。删除随当前展示事务提交，失败或 Keep 时回滚。
+@external("weasel_v2", "surface_destroy")
+export declare function surface_destroy(surface: i32): i32;
+
+// 分组：surface。选择后续绘制、图层、几何、材质、命中区与可见性操作的目标表面。切换前绘制状态栈必须平衡；返回 0 或负 ErrorCode。每次事件开始默认选择 Primary。
+@external("weasel_v2", "surface_select")
+export declare function surface_select(surface: i32): i32;
+
+// 分组：interaction。返回当前指针事件来源的 SurfaceId；非指针事件返回 Primary(0)。
+@external("weasel_v2", "event_surface")
+export declare function event_surface(): i32;
+
 // 分组：draw。绘制状态栈，最多32层；只影响绘制，不影响panel/anchor/hit_region。
 // 变换为局部到父坐标的仿射矩阵(m11,m12,m21,m22,dx,dy)，可嵌套。
 @external("weasel_v2", "push_transform")

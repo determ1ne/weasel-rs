@@ -2,10 +2,15 @@
 //! `surface`、`interaction` 等分组模块导入；`raw` 仅用于需要直接调用宿主 ABI 的高级场景。
 //! 主题应先在创建入口读取并缓存配置和资源，再在事件入口读取快照、构建完整画面，
 //! 并以 `FrameResult::Present` 提交；资源句柄由 RAII 类型持有并在离开作用域时释放。
+//!
+//! 默认绘制目标是 `Surface::primary()`。复杂主题可以创建由 host 管理的辅助 Surface，
+//! 在一个 WASM 实例内共享配置、资源和动画状态；选择目标后，现有绘制与窗口属性 API
+//! 都作用于该 Surface。一次 `Present` 原子提交本事件触碰的所有 Surface，guest 不会
+//! 接触 HWND、DPI 或原生窗口生命周期。
 pub mod types;
 pub use types::{
     ABI_VERSION, Action, Capability, ConfigScope, DataKind as Kind, ErrorCode, EventKind,
-    FrameResult, Mode, PointerPhase,
+    FrameResult, Mode, PointerPhase, SurfaceKind,
 };
 pub mod animation;
 pub mod config;

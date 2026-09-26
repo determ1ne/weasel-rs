@@ -2,6 +2,10 @@
 /// 由 `themes/wasm/abi.json` 生成的 ABI 导入签名表，供宿主校验主题模块。
 #[rustfmt::skip]
 pub const IMPORTS: &[(&str, &[&str], &[&str])] = &[
+    ("surface_create", &["i32"], &["i32"]),
+    ("surface_destroy", &["i32"], &["i32"]),
+    ("surface_select", &["i32"], &["i32"]),
+    ("event_surface", &[], &["i32"]),
     ("push_transform", &["f32", "f32", "f32", "f32", "f32", "f32"], &[]),
     ("push_clip", &["f32", "f32", "f32", "f32"], &[]),
     ("pop_draw_state", &[], &[]),

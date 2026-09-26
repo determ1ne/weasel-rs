@@ -303,6 +303,28 @@ impl TryFrom<i32> for Mode {
     }
 }
 
+/// 由宿主管理的原生表面用途提示。Primary 的固定 ID 为 0，不能通过 surface_create 创建或销毁；其余类型不暴露 HWND，当前作为语义标记保留给后续宿主策略。
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceKind {
+    Primary = 0,
+    Transient = 1,
+    Resident = 2,
+    Auxiliary = 3,
+}
+impl TryFrom<i32> for SurfaceKind {
+    type Error = i32;
+    fn try_from(value: i32) -> Result<Self, i32> {
+        match value {
+            0 => Ok(Self::Primary),
+            1 => Ok(Self::Transient),
+            2 => Ok(Self::Resident),
+            3 => Ok(Self::Auxiliary),
+            _ => Err(value),
+        }
+    }
+}
+
 /// LogLevel
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

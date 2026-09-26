@@ -3,7 +3,61 @@
 //! 创建回调可初始化表面；事件内的设置在返回 `FrameResult::Present` 时提交，返回 `Keep`、
 //! 负错误或 trap 时丢弃。内容坐标、应用光标定位锚点和面板材质区域互相独立；这些设置
 //! 不绘制内容，也不受 [`crate::draw`] 的变换或裁剪影响。长度使用 DIP，颜色为 ARGB。
-use crate::raw;
+use crate::{raw, types::{ErrorCode, SurfaceKind}};
+
+/// 由宿主管理的原生表面句柄。
+///
+/// `primary()` 不拥有表面；`create()` 返回的辅助表面会在 `Drop` 时请求销毁。主题仍在
+/// 单线程事件回调内使用这些句柄，不能把它们解释成 HWND 或跨主题实例传递。
+pub struct Surface {
+    id: i32,
+    owned: bool,
+}
+
+impl Surface {
+    /// 返回始终存在的主候选表面。
+    pub const fn primary() -> Self {
+        Self { id: 0, owned: false }
+    }
+
+    /// 创建辅助原生表面。每个主题最多拥有八个表面（包含主表面）。
+    pub fn create(kind: SurfaceKind) -> Result<Self, ErrorCode> {
+        let id = unsafe { raw::surface_create(kind as i32) };
+        if id > 0 {
+            Ok(Self { id, owned: true })
+        } else {
+            Err(ErrorCode::try_from(id).unwrap_or(ErrorCode::Internal))
+        }
+    }
+
+    /// 返回仅用于 ABI 调用的不透明 ID。
+    pub const fn id(&self) -> i32 {
+        self.id
+    }
+
+    /// 选择此表面作为后续绘制、图层、几何和命中区操作的目标。
+    pub fn select(&self) -> Result<(), ErrorCode> {
+        let code = unsafe { raw::surface_select(self.id) };
+        if code == ErrorCode::Success as i32 {
+            Ok(())
+        } else {
+            Err(ErrorCode::try_from(code).unwrap_or(ErrorCode::Internal))
+        }
+    }
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        if self.owned {
+            let _ = unsafe { raw::surface_destroy(self.id) };
+        }
+    }
+}
+
+/// 当前指针事件来源的表面；非指针事件返回主表面 ID 0。
+pub fn event_surface() -> i32 {
+    unsafe { raw::event_surface() }
+}
 /// 由宿主合成的背景材质设置。
 ///
 /// 模糊 sigma 以 DIP 表示，三个权重须为非负数且总和为 1；宿主负责背景采样、效果合成，

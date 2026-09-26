@@ -33,6 +33,12 @@
  * 异形窗口使用 `frame_geometry` 定义完整透明表面、`panel_bounds` 定义材质与阴影矩形；
  * 图片可超出 panel，但不能超出完整表面。命中区域使用内容或图层局部坐标，不继承绘制
  * 变换。所有资源、图层、命令、配置路径和字符串复制都受宿主配额约束。
+ *
+ * 主题默认操作 Primary(0) 表面。需要把候选、模式提示或常驻状态栏拆成独立 HWND 时，
+ * 可创建至多七个辅助 Surface，并在绘制前调用 `select_surface`。Surface 只是宿主管理的
+ * 不透明 ID：DPI、置顶、不激活、窗口类和销毁均由宿主处理；字体、布局与图片资源在
+ * 同一主题实例的所有 Surface 之间共享。一次 `Present` 会原子提交本事件触碰的全部
+ * Surface，未触碰的 Surface 保持上一帧。
  */
 export * from "./lifecycle";
 export * from "./config";

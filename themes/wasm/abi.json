@@ -148,6 +148,16 @@
       }
     },
     {
+      "name": "SurfaceKind",
+      "doc": "由宿主管理的原生表面用途提示。Primary 的固定 ID 为 0，不能通过 surface_create 创建或销毁；其余类型不暴露 HWND，当前作为语义标记保留给后续宿主策略。",
+      "values": {
+        "Primary": 0,
+        "Transient": 1,
+        "Resident": 2,
+        "Auxiliary": 3
+      }
+    },
+    {
       "name": "LogLevel",
       "doc": "LogLevel",
       "values": {
@@ -200,6 +210,49 @@
     }
   ],
   "functions": [
+    {
+      "name": "surface_create",
+      "doc": "创建一个由宿主管理的辅助原生表面，返回正 SurfaceId 或负 ErrorCode。每个主题最多拥有 8 个表面（含 Primary）；资源表在所有表面间共享。",
+      "params": [
+        {
+          "name": "kind",
+          "type": "i32"
+        }
+      ],
+      "result": "i32",
+      "group": "surface"
+    },
+    {
+      "name": "surface_destroy",
+      "doc": "删除辅助表面；Primary(0) 不可删除。删除随当前展示事务提交，失败或 Keep 时回滚。",
+      "params": [
+        {
+          "name": "surface",
+          "type": "i32"
+        }
+      ],
+      "result": "i32",
+      "group": "surface"
+    },
+    {
+      "name": "surface_select",
+      "doc": "选择后续绘制、图层、几何、材质、命中区与可见性操作的目标表面。切换前绘制状态栈必须平衡；返回 0 或负 ErrorCode。每次事件开始默认选择 Primary。",
+      "params": [
+        {
+          "name": "surface",
+          "type": "i32"
+        }
+      ],
+      "result": "i32",
+      "group": "surface"
+    },
+    {
+      "name": "event_surface",
+      "doc": "返回当前指针事件来源的 SurfaceId；非指针事件返回 Primary(0)。",
+      "params": [],
+      "result": "i32",
+      "group": "interaction"
+    },
     {
       "name": "push_transform",
       "doc": "绘制状态栈，最多32层；只影响绘制，不影响panel/anchor/hit_region。\n变换为局部到父坐标的仿射矩阵(m11,m12,m21,m22,dx,dy)，可嵌套。",

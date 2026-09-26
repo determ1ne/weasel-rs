@@ -17,6 +17,7 @@
 //! resources 模块统一测量，结果作为绘制命令交由 canvas 回放。
 
 use std::{
+    collections::BTreeMap,
     sync::{Arc, OnceLock},
     time::Instant,
 };
@@ -25,7 +26,7 @@ use wasmtime::{
     TypedFunc, Val, ValType,
 };
 
-use crate::abi::{Action, Capability, EventKind, FrameResult, LogLevel};
+use crate::abi::{Action, Capability, EventKind, FrameResult, LogLevel, SurfaceKind};
 use crate::protocol::{
     ABI_VERSION, DrawCommand, ERR_OK, EXPORT_ABI_VERSION, EXPORT_CAPABILITIES, EXPORT_INIT,
     IMPORT_ABORT, IMPORT_ABORT_MODULE, IMPORT_BEGIN_DRAG, IMPORT_FILL_RECT,
@@ -40,6 +41,15 @@ use crate::protocol::{
 pub const MAX_MEMORY_BYTES: usize = 128 * 1024 * 1024;
 /// `set_size` 的单边上限（DIP）：约等于任何屏幕的最大物理尺寸。
 pub const MAX_DIM_DIP: f32 = 8192.0;
+/// 单个主题最多可拥有的宿主管理表面数，包含固定的 Primary 表面。
+pub const MAX_SURFACES: usize = 8;
+/// 单个主题所有表面的总面积上限（DIP²）。
+///
+/// 单边上限用于拒绝异常坐标，而总面积上限避免主题同时创建多个超大窗口，导致宿主
+/// 为各 HWND 分配过量的原生渲染资源。64 Mi DIP² 足以覆盖多块高分屏上的正常主题 UI。
+pub const MAX_TOTAL_SURFACE_AREA_DIP2: f64 = 64.0 * 1024.0 * 1024.0;
+/// 主表面的稳定标识；现有主题未调用多表面 API 时始终操作此表面。
+pub const PRIMARY_SURFACE: i32 = 0;
 
 // 每次导出的指令预算（wasmtime fuel）：超出即 trap，trap 被收敛为 Err。
 /// start 函数（如 AssemblyScript 静态初始化）在实例化时执行，单列预算。
@@ -85,23 +95,18 @@ pub struct HostState {
     pub settings: serde_json::Value,
     /// 仅由宿主在事件回调期间开启，回调结束后关闭；guest 无需自行配对。
     pub(crate) frame_open: bool,
-    /// 已提交及当前事务暂存的图层场景。
-    pub(crate) layers: crate::layers::LayerScene,
-    /// 当前绘制命令和命中区所归属的图层；`None` 表示主画布。
-    pub(crate) selected_layer: Option<u32>,
-    pub(crate) layers_edited: bool,
+    /// 所有宿主管理表面；Primary(0) 永远存在，其余表面由 guest 以不透明 ID 操作。
+    pub(crate) surfaces: BTreeMap<i32, SurfaceState>,
+    /// 当前 ABI 操作的目标表面。每次导出调用前恢复为 Primary。
+    selected_surface: i32,
+    /// 下一个不复用的辅助表面 ID。
+    next_surface: i32,
+    /// 当前输入事件来源；非指针事件为 Primary。
+    event_surface: i32,
     pub(crate) motion_revision: u64,
     pub(crate) event_revision: u64,
-    main_edited: bool,
-    main_updated: bool,
-    presented_commands: Vec<DrawCommand>,
-    pub(crate) draw_depth: usize,
-    pending_frame: Option<Vec<DrawCommand>>,
-    regions: Vec<HitRegion>,
     pointer_region: i32,
     pointer_layer: i32,
-    /// 按下时记录的图层 ID、代次和区域 ID；抬起事件据此防止旧目标误触。
-    pub(crate) pressed_target: Option<(u32, u64, i32)>,
     /// 当前导出调用已消耗的宿主导入次数与 UTF-8 文本字节数。
     host_calls: usize,
     text_bytes: usize,
@@ -109,22 +114,9 @@ pub struct HostState {
     accept_actions: bool,
     /// 经 `Store::limiter` 生效的 Wasmtime 资源限制器，约束内存、表和实例的增长。
     pub limits: StoreLimits,
-    /// 当前帧的绘制命令（host 在 WM_PAINT 回放）。
-    pub commands: Vec<DrawCommand>,
-    /// 主题最近一次声明的内容尺寸（DIP）。
-    pub size: (f32, f32),
-    anchor_rect: Option<crate::protocol::Rect>,
-    /// 当前事务中的原生面板样式；成功提交后成为宿主展示状态。
-    pub panel_style: PanelStyle,
-    /// 最近一次成功提交的原生背景材质配置。
-    pub backdrop_style: crate::protocol::BackdropStyle,
-    /// 展示状态随帧提交；每次视图回调默认可见，常驻主题可显式隐藏。
-    pub visible: bool,
-    /// 当前事务中的窗口定位方式；成功提交后由宿主应用。
-    pub placement: PlacementStyle,
     /// 当前处理的鼠标事件类型；拖动请求仅在指针按下回调中有效。
     mouse_kind: Option<i32>,
-    drag_requested: bool,
+    drag_requested: Option<i32>,
     /// 主题请求了下一动画帧。
     pub wake_request: crate::animation::WakeRequest,
     /// 主题请求的高层动作 `(action, index)`；事务失败时清空。
@@ -136,8 +128,65 @@ pub struct HostState {
     image_calls: u32,
 }
 
+/// 一个 WASM 表面的完整、可事务回滚展示状态。
+///
+/// 原生 HWND、DPI 与图形设备不进入该结构，仍由窗口宿主管理。资源句柄属于整个
+/// WASM 实例，因此不同表面的命令可安全引用同一个字体、布局或图片。
+#[derive(Clone)]
+pub(crate) struct SurfaceState {
+    pub(crate) kind: SurfaceKind,
+    pub(crate) layers: crate::layers::LayerScene,
+    pub(crate) selected_layer: Option<u32>,
+    pub(crate) layers_edited: bool,
+    pub(crate) main_edited: bool,
+    pub(crate) main_updated: bool,
+    pub(crate) presented_commands: Vec<DrawCommand>,
+    pub(crate) draw_depth: usize,
+    pub(crate) pending_frame: Option<Vec<DrawCommand>>,
+    pub(crate) regions: Vec<HitRegion>,
+    /// 按下时记录图层、代次与区域，防止释放事件命中已经替换的目标。
+    pub(crate) pressed_target: Option<(u32, u64, i32)>,
+    pub(crate) commands: Vec<DrawCommand>,
+    pub(crate) size: (f32, f32),
+    pub(crate) anchor_rect: Option<crate::protocol::Rect>,
+    pub(crate) panel_style: PanelStyle,
+    pub(crate) backdrop_style: crate::protocol::BackdropStyle,
+    pub(crate) visible: bool,
+    pub(crate) placement: PlacementStyle,
+    /// 本事务是否触碰过此表面；未触碰的表面不会产生伪更新。
+    pub(crate) touched: bool,
+}
+
+impl SurfaceState {
+    fn new(kind: SurfaceKind) -> Self {
+        Self {
+            kind,
+            layers: Default::default(),
+            selected_layer: None,
+            layers_edited: false,
+            main_edited: false,
+            main_updated: false,
+            presented_commands: Vec::new(),
+            draw_depth: 0,
+            pending_frame: None,
+            regions: Vec::new(),
+            pressed_target: None,
+            commands: Vec::new(),
+            size: (0.0, 0.0),
+            anchor_rect: None,
+            panel_style: Default::default(),
+            backdrop_style: Default::default(),
+            visible: kind == SurfaceKind::Primary,
+            placement: PlacementStyle::Anchored,
+            touched: false,
+        }
+    }
+}
+
 impl Default for HostState {
     fn default() -> Self {
+        let mut surfaces = BTreeMap::new();
+        surfaces.insert(PRIMARY_SURFACE, SurfaceState::new(SurfaceKind::Primary));
         Self {
             declaration_query: false,
             resources: Default::default(),
@@ -145,33 +194,20 @@ impl Default for HostState {
             options: serde_json::json!({}),
             settings: serde_json::json!({}),
             frame_open: false,
-            layers: Default::default(),
-            selected_layer: None,
-            layers_edited: false,
+            surfaces,
+            selected_surface: PRIMARY_SURFACE,
+            next_surface: 1,
+            event_surface: PRIMARY_SURFACE,
             motion_revision: 0,
             event_revision: 0,
-            main_edited: false,
-            main_updated: false,
-            presented_commands: Vec::new(),
-            draw_depth: 0,
-            pending_frame: None,
-            regions: Vec::new(),
             pointer_region: -1,
             pointer_layer: 0,
-            pressed_target: None,
             host_calls: 0,
             text_bytes: 0,
             accept_actions: false,
             limits: default_limits(),
-            commands: Vec::new(),
-            size: (0.0, 0.0),
-            anchor_rect: None,
-            panel_style: PanelStyle::default(),
-            backdrop_style: Default::default(),
-            visible: true,
-            placement: PlacementStyle::Anchored,
             mouse_kind: None,
-            drag_requested: false,
+            drag_requested: None,
             wake_request: Default::default(),
             actions: Vec::new(),
             notes: Vec::new(),
@@ -199,46 +235,60 @@ impl HitRegion {
 
 /// 回调事务的展示快照；不包含日志、资源配置等非画面状态。
 struct Presentation {
-    layers: crate::layers::LayerScene,
-    anchor_rect: Option<crate::protocol::Rect>,
-    size: (f32, f32),
-    panel: PanelStyle,
-    backdrop: crate::protocol::BackdropStyle,
-    visible: bool,
-    placement: PlacementStyle,
+    surfaces: BTreeMap<i32, SurfaceState>,
+    selected_surface: i32,
+    next_surface: i32,
     view: Option<Arc<crate::theme_api::CandidateView>>,
-    regions: Vec<HitRegion>,
 }
 impl Presentation {
     /// 复制可回滚的展示状态；日志、资源、配额计数和 guest 内存不在快照中。
     fn capture(s: &HostState) -> Self {
         Self {
-            layers: s.layers.clone(),
-            size: s.size,
-            anchor_rect: s.anchor_rect,
-            panel: s.panel_style,
-            backdrop: s.backdrop_style,
-            visible: s.visible,
-            placement: s.placement,
+            surfaces: s.surfaces.clone(),
+            selected_surface: s.selected_surface,
+            next_surface: s.next_surface,
             view: s.view.clone(),
-            regions: s.regions.clone(),
         }
     }
     /// 恢复失败或保留帧的展示状态，同时保留快照以外的副作用。
     fn restore(self, s: &mut HostState) {
-        s.layers = self.layers;
-        s.size = self.size;
-        s.anchor_rect = self.anchor_rect;
-        s.panel_style = self.panel;
-        s.backdrop_style = self.backdrop;
-        s.visible = self.visible;
-        s.placement = self.placement;
+        s.surfaces = self.surfaces;
+        s.selected_surface = self.selected_surface;
+        s.next_surface = self.next_surface;
         s.view = self.view;
-        s.regions = self.regions;
     }
 }
 
 impl HostState {
+    /// 返回当前目标表面；ID 始终由 `surface_select` 校验。
+    pub(crate) fn surface(&self) -> &SurfaceState {
+        self.surfaces
+            .get(&self.selected_surface)
+            .expect("selected surface must exist")
+    }
+
+    /// 返回当前目标表面的可变引用。
+    pub(crate) fn surface_mut(&mut self) -> &mut SurfaceState {
+        self.surfaces
+            .get_mut(&self.selected_surface)
+            .expect("selected surface must exist")
+    }
+
+    /// 返回指定表面，用于事件命中与宿主同步。
+    pub(crate) fn surface_by_id(&self, id: i32) -> Option<&SurfaceState> {
+        self.surfaces.get(&id)
+    }
+
+    fn touch_surface(&mut self) -> wasmtime::Result<()> {
+        self.charge(0)?;
+        let surface = self.surface_mut();
+        if surface.selected_layer.is_some() {
+            return Err(wasmtime::format_err!("surface changes are not layer-local"));
+        }
+        surface.touched = true;
+        Ok(())
+    }
+
     /// 记录宿主边界调用及其文本字节数；与 Wasmtime fuel 分开限制原生工作入口。
     ///
     /// 声明查询期的导入调用会失败；单次导出最多允许 4096 次调用和累计 1 MiB 文本。
@@ -259,11 +309,7 @@ impl HostState {
 
     /// 检查是否能修改主展示面，并将操作计入宿主调用预算。
     fn edit_presentation(&mut self) -> wasmtime::Result<()> {
-        self.charge(0)?;
-        if self.selected_layer.is_some() {
-            return Err(wasmtime::format_err!("surface changes are not layer-local"));
-        }
-        Ok(())
+        self.touch_surface()
     }
 
     /// 限制单次回调中的昂贵原生资源工作；图片次数受独立子配额约束。
@@ -288,26 +334,28 @@ impl HostState {
         if !command.is_finite() {
             return Err(wasmtime::format_err!("non-finite draw coordinates"));
         }
-        if self.commands.len() >= 1024 {
+        if self.surface().commands.len() >= 1024 {
             return Err(wasmtime::format_err!("theme draw-command limit exceeded"));
         }
+        let surface = self.surface_mut();
+        surface.touched = true;
         match &command {
             DrawCommand::PushTransform(_) | DrawCommand::PushClip(_) => {
-                if self.draw_depth >= 32 {
+                if surface.draw_depth >= 32 {
                     return Err(wasmtime::format_err!("draw stack limit exceeded"));
                 }
-                self.draw_depth += 1;
+                surface.draw_depth += 1;
             }
             DrawCommand::PopState => {
-                self.draw_depth = self
+                surface.draw_depth = surface
                     .draw_depth
                     .checked_sub(1)
                     .ok_or_else(|| wasmtime::format_err!("empty draw stack"))?;
             }
             _ => {}
         }
-        if let Some(id) = self.selected_layer {
-            let layer = self
+        if let Some(id) = surface.selected_layer {
+            let layer = surface
                 .layers
                 .layers
                 .iter_mut()
@@ -317,10 +365,10 @@ impl HostState {
                 return Err(wasmtime::format_err!("layer command limit"));
             }
             layer.commands.push(command);
-            self.layers_edited = true;
+            surface.layers_edited = true;
         } else {
-            self.main_edited = true;
-            self.commands.push(command);
+            surface.main_edited = true;
+            surface.commands.push(command);
         }
         Ok(())
     }
@@ -383,8 +431,8 @@ fn set_panel(
     {
         return Err(wasmtime::format_err!("invalid panel style"));
     }
-    let bounds = caller.data().panel_style.bounds;
-    caller.data_mut().panel_style = PanelStyle {
+    let bounds = caller.data().surface().panel_style.bounds;
+    caller.data_mut().surface_mut().panel_style = PanelStyle {
         bounds,
         corner_radius: radius,
         shadow_radius,
@@ -418,7 +466,7 @@ fn set_backdrop(
     {
         return Err(wasmtime::format_err!("invalid backdrop style"));
     }
-    caller.data_mut().backdrop_style = crate::protocol::BackdropStyle {
+    caller.data_mut().surface_mut().backdrop_style = crate::protocol::BackdropStyle {
         enabled: enabled != 0,
         tint: tint as u32 | 0xff000000,
         blur_sigma,
@@ -497,9 +545,10 @@ fn set_size(mut caller: Caller<'_, HostState>, w: f32, h: f32) -> wasmtime::Resu
     {
         return Err(wasmtime::format_err!("invalid content size"));
     }
-    st.size = (w, h);
-    st.panel_style.bounds = None;
-    st.anchor_rect = None;
+    let surface = st.surface_mut();
+    surface.size = (w, h);
+    surface.panel_style.bounds = None;
+    surface.anchor_rect = None;
     Ok(())
 }
 
@@ -509,7 +558,7 @@ fn set_visible(mut caller: Caller<'_, HostState>, visible: i32) -> wasmtime::Res
     if !matches!(visible, 0 | 1) {
         return Err(wasmtime::format_err!("set_visible expects 0 or 1"));
     }
-    caller.data_mut().visible = visible != 0;
+    caller.data_mut().surface_mut().visible = visible != 0;
     Ok(())
 }
 
@@ -523,7 +572,7 @@ fn set_fixed_position(mut caller: Caller<'_, HostState>, x: f32, y: f32) -> wasm
     {
         return Err(wasmtime::format_err!("invalid fixed window position"));
     }
-    caller.data_mut().placement = PlacementStyle::Fixed { x, y };
+    caller.data_mut().surface_mut().placement = PlacementStyle::Fixed { x, y };
     Ok(())
 }
 
@@ -537,7 +586,8 @@ fn begin_drag(mut caller: Caller<'_, HostState>) -> wasmtime::Result<()> {
             .push("begin_drag ignored outside pointer-down".into());
         return Ok(());
     }
-    caller.data_mut().drag_requested = true;
+    let source = caller.data().event_surface;
+    caller.data_mut().drag_requested = Some(source);
     Ok(())
 }
 
@@ -605,6 +655,69 @@ pub(crate) fn now_ms() -> f64 {
     EPOCH.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
 }
 
+/// 创建一个不透明辅助表面；真实 HWND 仅在事务成功后由宿主同步创建。
+fn surface_create(mut caller: Caller<'_, HostState>, kind: i32) -> wasmtime::Result<i32> {
+    caller.data_mut().charge(0)?;
+    let kind =
+        SurfaceKind::try_from(kind).map_err(|_| wasmtime::format_err!("invalid surface kind"))?;
+    if kind == SurfaceKind::Primary {
+        return Ok(crate::abi::ErrorCode::InvalidArgument as i32);
+    }
+    let state = caller.data_mut();
+    if state.surfaces.len() >= MAX_SURFACES {
+        return Ok(crate::abi::ErrorCode::ResourceLimit as i32);
+    }
+    let id = state.next_surface;
+    state.next_surface = state
+        .next_surface
+        .checked_add(1)
+        .ok_or_else(|| wasmtime::format_err!("surface id exhausted"))?;
+    state.surfaces.insert(id, SurfaceState::new(kind));
+    Ok(id)
+}
+
+/// 删除辅助表面；Primary 永远保留，以维持现有主题的默认目标语义。
+fn surface_destroy(mut caller: Caller<'_, HostState>, id: i32) -> wasmtime::Result<i32> {
+    caller.data_mut().charge(0)?;
+    if id == PRIMARY_SURFACE {
+        return Ok(crate::abi::ErrorCode::InvalidArgument as i32);
+    }
+    let state = caller.data_mut();
+    if state
+        .surfaces
+        .get(&state.selected_surface)
+        .is_some_and(|surface| surface.draw_depth != 0 || surface.selected_layer.is_some())
+    {
+        return Err(wasmtime::format_err!(
+            "balance draw state before destroying a surface"
+        ));
+    }
+    if state.surfaces.remove(&id).is_none() {
+        return Ok(crate::abi::ErrorCode::InvalidHandle as i32);
+    }
+    if state.selected_surface == id {
+        state.selected_surface = PRIMARY_SURFACE;
+    }
+    Ok(crate::abi::ErrorCode::Success as i32)
+}
+
+/// 切换当前隐式绘制目标；SDK 用 Surface 句柄封装这一状态切换。
+fn surface_select(mut caller: Caller<'_, HostState>, id: i32) -> wasmtime::Result<i32> {
+    caller.data_mut().charge(0)?;
+    let state = caller.data_mut();
+    let current = state.surface();
+    if current.draw_depth != 0 || current.selected_layer.is_some() {
+        return Err(wasmtime::format_err!(
+            "balance draw state before selecting a surface"
+        ));
+    }
+    if !state.surfaces.contains_key(&id) {
+        return Ok(crate::abi::ErrorCode::InvalidHandle as i32);
+    }
+    state.selected_surface = id;
+    Ok(crate::abi::ErrorCode::Success as i32)
+}
+
 /// 注册主题 ABI 的完整宿主导入面；签名注册失败时停止构造并返回上下文错误。
 ///
 /// 导入处理的数据仍归属于调用方 Store；字符串从线性内存做有界复制，绘制、命中区、
@@ -615,6 +728,17 @@ fn register_imports(linker: &mut Linker<HostState>) -> Result<(), String> {
             .map(|_| ())
             .map_err(|e| format!("failed to register imports: {e}"))
     };
+    register(linker.func_wrap(IMPORT_MODULE, "surface_create", surface_create))?;
+    register(linker.func_wrap(IMPORT_MODULE, "surface_destroy", surface_destroy))?;
+    register(linker.func_wrap(IMPORT_MODULE, "surface_select", surface_select))?;
+    register(linker.func_wrap(
+        IMPORT_MODULE,
+        "event_surface",
+        |mut c: Caller<'_, HostState>| -> wasmtime::Result<i32> {
+            c.data_mut().charge(0)?;
+            Ok(c.data().event_surface)
+        },
+    ))?;
     register(linker.func_wrap(
         IMPORT_MODULE,
         "hit_region",
@@ -630,8 +754,9 @@ fn register_imports(linker: &mut Linker<HostState>) -> Result<(), String> {
             let s = c.data_mut();
             if !s.frame_open
                 || id <= 0
-                || s.regions.len()
-                    + s.layers
+                || s.surface().regions.len()
+                    + s.surface()
+                        .layers
                         .layers
                         .iter()
                         .map(|l| l.regions.len())
@@ -644,9 +769,11 @@ fn register_imports(linker: &mut Linker<HostState>) -> Result<(), String> {
             {
                 return Err(wasmtime::format_err!("invalid hit region"));
             }
-            let regions = match s.selected_layer {
+            let surface = s.surface_mut();
+            surface.touched = true;
+            let regions = match surface.selected_layer {
                 Some(id) => {
-                    &mut s
+                    &mut surface
                         .layers
                         .layers
                         .iter_mut()
@@ -654,7 +781,7 @@ fn register_imports(linker: &mut Linker<HostState>) -> Result<(), String> {
                         .unwrap()
                         .regions
                 }
-                None => &mut s.regions,
+                None => &mut surface.regions,
             };
             if regions.iter().any(|r| r.id == id) {
                 return Err(wasmtime::format_err!("duplicate region id"));
@@ -816,7 +943,7 @@ fn register_imports(linker: &mut Linker<HostState>) -> Result<(), String> {
             c.data_mut().charge(0)?;
             let rect = crate::protocol::Rect { x, y, w: aw, h: ah };
             if !c.data().frame_open
-                || c.data().selected_layer.is_some()
+                || c.data().surface().selected_layer.is_some()
                 || ![w, h]
                     .iter()
                     .all(|v| v.is_finite() && *v > 0.0 && *v <= MAX_DIM_DIP)
@@ -824,8 +951,10 @@ fn register_imports(linker: &mut Linker<HostState>) -> Result<(), String> {
             {
                 return Err(wasmtime::format_err!("invalid content/anchor geometry"));
             }
-            c.data_mut().size = (w, h);
-            c.data_mut().anchor_rect = Some(rect);
+            let surface = c.data_mut().surface_mut();
+            surface.touched = true;
+            surface.size = (w, h);
+            surface.anchor_rect = Some(rect);
             Ok(())
         },
     ))?;
@@ -835,7 +964,7 @@ fn register_imports(linker: &mut Linker<HostState>) -> Result<(), String> {
         |mut c: Caller<'_, HostState>, x: f32, y: f32, w: f32, h: f32| -> wasmtime::Result<()> {
             c.data_mut().charge(0)?;
             if !c.data().frame_open
-                || c.data().selected_layer.is_some()
+                || c.data().surface().selected_layer.is_some()
                 || ![x, y, w, h].iter().all(|v| v.is_finite())
                 || x < 0.0
                 || y < 0.0
@@ -844,7 +973,9 @@ fn register_imports(linker: &mut Linker<HostState>) -> Result<(), String> {
             {
                 return Err(wasmtime::format_err!("invalid panel bounds"));
             }
-            c.data_mut().panel_style.bounds = Some(crate::protocol::Rect { x, y, w, h });
+            let surface = c.data_mut().surface_mut();
+            surface.touched = true;
+            surface.panel_style.bounds = Some(crate::protocol::Rect { x, y, w, h });
             Ok(())
         },
     ))?;
@@ -1003,13 +1134,18 @@ impl WasmRuntime {
         state.text_bytes = 0;
         state.measure_calls = 0;
         state.image_calls = 0;
-        state.commands.clear();
-        state.selected_layer = None;
-        state.layers_edited = false;
-        state.main_edited = false;
-        state.main_updated = false;
+        state.selected_surface = PRIMARY_SURFACE;
+        for surface in state.surfaces.values_mut() {
+            surface.commands.clear();
+            surface.selected_layer = None;
+            surface.layers_edited = false;
+            surface.main_edited = false;
+            surface.main_updated = false;
+            surface.draw_depth = 0;
+            surface.pending_frame = None;
+            surface.touched = false;
+        }
         state.frame_open = false;
-        state.pending_frame = None;
         state.actions.clear();
         state.wake_request = Default::default();
         state.accept_actions = false;
@@ -1038,48 +1174,78 @@ impl WasmRuntime {
         call: impl FnOnce(&mut Self) -> Result<FrameResult, String>,
     ) -> Result<(), String> {
         let before = Presentation::capture(self.store.data());
-        let old_view = before.view.clone();
-        let old_regions = before.regions.clone();
+        let old_regions = before
+            .surfaces
+            .iter()
+            .map(|(&id, surface)| (id, surface.regions.clone()))
+            .collect::<BTreeMap<_, _>>();
         self.set_fuel(budget)?;
         {
             let state = self.store.data_mut();
             state.frame_open = !initialize;
-            state.draw_depth = 0;
             if !initialize {
-                state.regions.clear();
+                for surface in state.surfaces.values_mut() {
+                    surface.regions.clear();
+                }
             }
         }
         let result = call(self).and_then(|outcome| {
             let state = self.store.data();
-            let main_regions = if state.main_edited || !state.layers_edited {
-                state.regions.len()
-            } else {
-                old_regions.len()
-            };
-            if outcome == FrameResult::Present
-                && main_regions
-                    + state
+            let region_count = state
+                .surfaces
+                .iter()
+                .map(|(&id, surface)| {
+                    let main = if surface.main_edited || !surface.layers_edited {
+                        surface.regions.len()
+                    } else {
+                        old_regions.get(&id).map_or(0, Vec::len)
+                    };
+                    main + surface
                         .layers
                         .layers
                         .iter()
-                        .map(|l| l.regions.len())
+                        .map(|layer| layer.regions.len())
                         .sum::<usize>()
-                    > 256
-            {
+                })
+                .sum::<usize>();
+            if outcome == FrameResult::Present && region_count > 256 {
                 return Err("hit region quota exceeded".into());
             }
-            if outcome == FrameResult::Present && !state.layers.validate(96) {
+            if outcome == FrameResult::Present
+                && state
+                    .surfaces
+                    .values()
+                    .any(|surface| !surface.layers.validate(96))
+            {
                 return Err("invalid layer scene or quota exceeded".into());
             }
-            if state.draw_depth != 0 {
+            if outcome == FrameResult::Present
+                && state
+                    .surfaces
+                    .values()
+                    .map(|surface| f64::from(surface.size.0) * f64::from(surface.size.1))
+                    .sum::<f64>()
+                    > MAX_TOTAL_SURFACE_AREA_DIP2
+            {
+                return Err("surface area quota exceeded".into());
+            }
+            if state
+                .surfaces
+                .values()
+                .any(|surface| surface.draw_depth != 0 || surface.selected_layer.is_some())
+            {
                 return Err("unbalanced draw stack".into());
             }
             if outcome == FrameResult::Present
-                && (state.anchor_rect.is_some_and(|r| !r.within(state.size))
-                    || state
-                        .panel_style
-                        .bounds
-                        .is_some_and(|r| !r.within(state.size)))
+                && state.surfaces.values().any(|surface| {
+                    surface
+                        .anchor_rect
+                        .is_some_and(|rect| !rect.within(surface.size))
+                        || surface
+                            .panel_style
+                            .bounds
+                            .is_some_and(|rect| !rect.within(surface.size))
+                })
             {
                 return Err("panel/anchor bounds outside content".into());
             }
@@ -1091,23 +1257,45 @@ impl WasmRuntime {
             before.restore(state);
         }
         if result == Ok(FrameResult::Present) {
-            state.main_updated = state.main_edited || !state.layers_edited;
-            if !state.main_updated {
-                state.view = old_view;
-                state.regions = old_regions;
+            if !state.surfaces.values().any(|surface| surface.touched) {
+                // 保留 ABI v2 的“空 Present 清空主画面”语义；若明确修改了辅助表面，
+                // 则不得把未选择的 Primary 一并清空。
+                state
+                    .surfaces
+                    .get_mut(&PRIMARY_SURFACE)
+                    .expect("primary surface")
+                    .touched = true;
             }
-            if state.main_updated {
-                state.presented_commands = std::mem::take(&mut state.commands);
+            for (&id, surface) in &mut state.surfaces {
+                if !surface.touched {
+                    if let Some(regions) = old_regions.get(&id) {
+                        surface.regions = regions.clone();
+                    }
+                    continue;
+                }
+                surface.main_updated = surface.main_edited || !surface.layers_edited;
+                if !surface.main_updated {
+                    if let Some(regions) = old_regions.get(&id) {
+                        surface.regions = regions.clone();
+                    }
+                } else {
+                    surface.presented_commands = std::mem::take(&mut surface.commands);
+                }
+                // 图层、几何或材质更新同样需要窗口宿主处理，即使主命令未改变。
+                surface.pending_frame = Some(surface.presented_commands.clone());
             }
-            state.pending_frame = Some(state.presented_commands.clone());
         } else {
-            state.commands.clear();
+            for surface in state.surfaces.values_mut() {
+                surface.commands.clear();
+            }
         }
         if result.is_err() {
             state.actions.clear();
-            state.drag_requested = false;
+            state.drag_requested = None;
             state.wake_request = Default::default();
         }
+        state.selected_surface = PRIMARY_SURFACE;
+        state.event_surface = PRIMARY_SURFACE;
         state.mouse_kind = None;
         state.accept_actions = false;
         result.map(|_| ())
@@ -1135,11 +1323,18 @@ impl WasmRuntime {
     /// fuel 预算，只有返回 `Present` 并通过事务验证后才发布绘制结果和命中区域。
     pub fn render(&mut self, view: &crate::theme_api::CandidateView) -> Result<(), String> {
         // 新快照不继承旧候选的按下状态，即使图层和区域ID被复用。
-        self.store.data_mut().pressed_target = None;
+        for surface in self.store.data_mut().surfaces.values_mut() {
+            surface.pressed_target = None;
+        }
         let view = Arc::new(view.clone());
         self.transact(RENDER_FUEL, false, |rt| {
             rt.store.data_mut().view = Some(view);
-            rt.store.data_mut().visible = true;
+            rt.store
+                .data_mut()
+                .surfaces
+                .get_mut(&PRIMARY_SURFACE)
+                .expect("primary surface")
+                .visible = true;
             let code = rt
                 .event_fn
                 .call(
@@ -1157,31 +1352,44 @@ impl WasmRuntime {
     /// 按下目标带有图层代次标识；抬起时目标必须仍相同才会向 guest 传递命中，否则按未命中
     /// 处理，避免视图刷新后复用的区域 ID 误触。动作只允许由按下/抬起事件产生。
     pub fn mouse(&mut self, kind: i32, x: f32, y: f32) -> Result<(), String> {
-        let target = self
+        self.mouse_on(PRIMARY_SURFACE, kind, x, y)
+    }
+
+    /// 向指定原生表面分发指针事件，并把来源通过 `event_surface` 暴露给 guest。
+    pub fn mouse_on(&mut self, surface_id: i32, kind: i32, x: f32, y: f32) -> Result<(), String> {
+        let surface = self
             .store
             .data()
+            .surface_by_id(surface_id)
+            .ok_or_else(|| "pointer event for unknown surface".to_string())?;
+        let target = surface
             .layers
             .hit(x, y, std::time::Instant::now())
-            .unwrap_or((0, 0, self.hit_test(x, y)));
+            .unwrap_or((0, 0, self.hit_test_for(surface_id, x, y)));
         let mut region = target.2;
         let state = self.store.data_mut();
+        let surface = state
+            .surfaces
+            .get_mut(&surface_id)
+            .ok_or_else(|| "pointer event for unknown surface".to_string())?;
         if kind == crate::protocol::MOUSE_DOWN {
-            state.pressed_target = Some(target);
+            surface.pressed_target = Some(target);
         }
         if kind == crate::protocol::MOUSE_UP {
-            if state.pressed_target != Some(target) {
+            if surface.pressed_target != Some(target) {
                 region = -1;
             }
-            state.pressed_target = None;
+            surface.pressed_target = None;
         }
         if matches!(
             kind,
             crate::protocol::MOUSE_LEAVE | crate::protocol::MOUSE_CANCEL
         ) {
-            state.pressed_target = None;
+            surface.pressed_target = None;
         }
         self.transact(EVENT_FUEL, false, |rt| {
             let state = rt.store.data_mut();
+            state.event_surface = surface_id;
             state.pointer_layer = if region > 0
                 && !matches!(
                     kind,
@@ -1204,7 +1412,7 @@ impl WasmRuntime {
                 crate::protocol::MOUSE_DOWN | crate::protocol::MOUSE_UP
             );
             state.mouse_kind = Some(kind);
-            state.drag_requested = false;
+            state.drag_requested = None;
             {
                 let code = rt
                     .event_fn
@@ -1237,7 +1445,9 @@ impl WasmRuntime {
     /// 通知主题隐藏，然后无条件清除宿主视图、图层、已呈现命令和待处理交互请求。
     /// 即使 guest 隐藏回调失败，宿主仍完成清理并返回该错误。
     pub fn hide(&mut self) -> Result<(), String> {
-        self.store.data_mut().pressed_target = None;
+        for surface in self.store.data_mut().surfaces.values_mut() {
+            surface.pressed_target = None;
+        }
         let result = self.transact(EVENT_FUEL, false, |rt| {
             let code = rt
                 .event_fn
@@ -1251,11 +1461,14 @@ impl WasmRuntime {
         });
         let state = self.store.data_mut();
         state.view = None;
-        state.layers = Default::default();
-        state.presented_commands.clear();
-        state.visible = false;
+        for surface in state.surfaces.values_mut() {
+            surface.layers = Default::default();
+            surface.presented_commands.clear();
+            surface.pending_frame = Some(Vec::new());
+            surface.visible = false;
+        }
         state.actions.clear();
-        state.drag_requested = false;
+        state.drag_requested = None;
         state.wake_request = Default::default();
         result
     }
@@ -1283,7 +1496,16 @@ impl WasmRuntime {
 
     /// 取走最近一次已提交的帧命令；没有新帧时返回 `None`，空绘制帧仍为 `Some(vec![])`。
     pub fn take_frame(&mut self) -> Option<Vec<DrawCommand>> {
-        self.store.data_mut().pending_frame.take()
+        self.take_frame_for(PRIMARY_SURFACE)
+    }
+
+    /// 取走指定表面的待呈现主画布命令。
+    pub fn take_frame_for(&mut self, surface: i32) -> Option<Vec<DrawCommand>> {
+        self.store
+            .data_mut()
+            .surfaces
+            .get_mut(&surface)
+            .and_then(|state| state.pending_frame.take())
     }
 
     #[cfg(test)]
@@ -1294,11 +1516,23 @@ impl WasmRuntime {
 
     /// 返回最近一次成功提交的面板样式副本。
     pub fn panel_style(&self) -> PanelStyle {
-        self.store.data().panel_style
+        self.panel_style_for(PRIMARY_SURFACE)
+    }
+    pub fn panel_style_for(&self, surface: i32) -> PanelStyle {
+        self.store
+            .data()
+            .surface_by_id(surface)
+            .map_or_else(Default::default, |state| state.panel_style)
     }
     /// 返回最近一次成功提交的背景材质样式副本。
     pub fn backdrop_style(&self) -> crate::protocol::BackdropStyle {
-        self.store.data().backdrop_style
+        self.backdrop_style_for(PRIMARY_SURFACE)
+    }
+    pub fn backdrop_style_for(&self, surface: i32) -> crate::protocol::BackdropStyle {
+        self.store
+            .data()
+            .surface_by_id(surface)
+            .map_or_else(Default::default, |state| state.backdrop_style)
     }
 
     /// 面板圆角（DIP）。
@@ -1308,13 +1542,25 @@ impl WasmRuntime {
 
     /// 返回主题声明的内容尺寸，单位为 DIP。
     pub fn size(&self) -> (f32, f32) {
-        self.store.data().size
+        self.size_for(PRIMARY_SURFACE)
+    }
+    pub fn size_for(&self, surface: i32) -> (f32, f32) {
+        self.store
+            .data()
+            .surface_by_id(surface)
+            .map_or((0.0, 0.0), |state| state.size)
     }
 
     /// 查询已提交画面的命中结果；后声明区域优先，`-1` 表示未命中，`0` 表示默认面板。
     /// 动画图层使用当前原生时间采样，并按裁剪和交互标志过滤区域。
     pub fn hit_test(&self, x: f32, y: f32) -> i32 {
-        let s = self.store.data();
+        self.hit_test_for(PRIMARY_SURFACE, x, y)
+    }
+
+    pub fn hit_test_for(&self, surface: i32, x: f32, y: f32) -> i32 {
+        let Some(s) = self.store.data().surface_by_id(surface) else {
+            return -1;
+        };
         if let Some((_, _, region)) = s.layers.hit(x, y, std::time::Instant::now()) {
             return region;
         }
@@ -1354,14 +1600,18 @@ impl WasmRuntime {
 
     /// 返回主题显式设置的锚点矩形；未设置时以整个内容区域作为锚点。
     pub fn anchor_rect(&self) -> crate::protocol::Rect {
+        self.anchor_rect_for(PRIMARY_SURFACE)
+    }
+    pub fn anchor_rect_for(&self, surface: i32) -> crate::protocol::Rect {
         self.store
             .data()
-            .anchor_rect
+            .surface_by_id(surface)
+            .and_then(|state| state.anchor_rect)
             .unwrap_or(crate::protocol::Rect {
                 x: 0.0,
                 y: 0.0,
-                w: self.size().0,
-                h: self.size().1,
+                w: self.size_for(surface).0,
+                h: self.size_for(surface).1,
             })
     }
     /// 主题是否声明可常驻运行。
@@ -1376,26 +1626,80 @@ impl WasmRuntime {
 
     /// 当前已提交展示状态的可见标志。
     pub fn visible(&self) -> bool {
-        self.store.data().visible
+        self.visible_for(PRIMARY_SURFACE)
+    }
+    pub fn visible_for(&self, surface: i32) -> bool {
+        self.store
+            .data()
+            .surface_by_id(surface)
+            .is_some_and(|state| state.visible)
+    }
+
+    /// 是否至少有一个表面可见；用于共享动画计时器的生命周期门控。
+    pub fn any_visible(&self) -> bool {
+        self.store
+            .data()
+            .surfaces
+            .values()
+            .any(|surface| surface.visible)
     }
 
     /// 只读访问当前已提交的图层场景。
     pub fn layers(&self) -> &crate::layers::LayerScene {
-        &self.store.data().layers
+        self.layers_for(PRIMARY_SURFACE)
+            .expect("primary surface must exist")
+    }
+    pub fn layers_for(&self, surface: i32) -> Option<&crate::layers::LayerScene> {
+        self.store
+            .data()
+            .surface_by_id(surface)
+            .map(|state| &state.layers)
     }
     /// 最近一次已提交帧是否更新了主画布；装饰图层帧可为假。
     pub fn main_updated(&self) -> bool {
-        self.store.data().main_updated
+        self.main_updated_for(PRIMARY_SURFACE)
+    }
+    pub fn main_updated_for(&self, surface: i32) -> bool {
+        self.store
+            .data()
+            .surface_by_id(surface)
+            .is_some_and(|state| state.main_updated)
+    }
+
+    /// 最近一次成功提交是否修改了任一表面。
+    pub fn presentation_updated(&self) -> bool {
+        self.store
+            .data()
+            .surfaces
+            .values()
+            .any(|surface| surface.touched)
     }
 
     /// 返回当前已提交的窗口放置方式。
     pub fn placement(&self) -> PlacementStyle {
-        self.store.data().placement
+        self.placement_for(PRIMARY_SURFACE)
+    }
+    pub fn placement_for(&self, surface: i32) -> PlacementStyle {
+        self.store
+            .data()
+            .surface_by_id(surface)
+            .map_or_else(Default::default, |state| state.placement)
     }
 
     /// 取走并清除待处理的拖动请求。
-    pub fn take_drag_request(&mut self) -> bool {
+    pub fn take_drag_request(&mut self) -> Option<i32> {
         std::mem::take(&mut self.store.data_mut().drag_requested)
+    }
+
+    /// 返回当前辅助表面 ID 与用途，按 ID 稳定排序。
+    pub fn auxiliary_surfaces(&self) -> Vec<(i32, SurfaceKind)> {
+        self.store
+            .data()
+            .surfaces
+            .iter()
+            .filter(|&(&id, _)| id != PRIMARY_SURFACE)
+            .map(|(&id, surface)| (id, surface.kind))
+            .collect()
     }
 
     /// 取走并清除主题请求的动画唤醒信息。
@@ -1466,6 +1770,53 @@ mod tests {
                 "{name} results"
             );
         }
+    }
+
+    #[test]
+    fn auxiliary_surfaces_share_one_runtime_and_commit_atomically() {
+        let bytes = wat::parse_str(
+            r#"(module
+              (import "weasel_v2" "surface_create" (func $create (param i32) (result i32)))
+              (import "weasel_v2" "surface_select" (func $select (param i32) (result i32)))
+              (import "weasel_v2" "set_size" (func $size (param f32 f32)))
+              (import "weasel_v2" "set_visible" (func $visible (param i32)))
+              (import "weasel_v2" "fill_rect" (func $fill (param f32 f32 f32 f32 i32)))
+              (memory (export "memory") 1 1)
+              (global $aux (mut i32) (i32.const -1))
+              (func (export "theme_abi_version") (result i32) i32.const 2)
+              (func (export "theme_capabilities") (result i32) i32.const 0)
+              (func (export "theme_create") (param i32 i32) (result i32)
+                i32.const 1 call $create global.set $aux
+                global.get $aux call $select drop
+                f32.const 32 f32.const 32 call $size
+                i32.const 0 call $visible
+                i32.const 0 call $select drop
+                i32.const 0)
+              (func (export "theme_event") (param $kind i32) (param i32 f32 f32 f64) (result i32)
+                local.get $kind i32.eqz
+                if
+                  global.get $aux call $select drop
+                  i32.const 1 call $visible
+                  f32.const 0 f32.const 0 f32.const 32 f32.const 32 i32.const -1 call $fill
+                  i32.const 0 call $select drop
+                  i32.const 0 call $visible
+                end
+                i32.const 1))"#,
+        )
+        .unwrap();
+        let mut runtime = WasmRuntime::new(&bytes).unwrap();
+        runtime.init(crate::protocol::MODE_LIVE, false).unwrap();
+        assert_eq!(
+            runtime.auxiliary_surfaces(),
+            vec![(1, SurfaceKind::Transient)]
+        );
+        assert_eq!(runtime.size_for(1), (32.0, 32.0));
+        assert!(!runtime.visible_for(1));
+
+        runtime.render(&CandidateView::default()).unwrap();
+        assert!(!runtime.visible());
+        assert!(runtime.visible_for(1));
+        assert_eq!(runtime.take_frame_for(1).unwrap().len(), 1);
     }
 
     #[test]
@@ -1757,6 +2108,8 @@ mod tests {
         .unwrap();
         let mut state = HostState::default();
         state.options = serde_json::json!({"color":{"hilited_candidate_back":"#123456"}});
+        state.resources.asset_root =
+            Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("theme-weaselui/assets"));
         let mut rt = WasmRuntime::with_state(&bytes, state).unwrap();
         rt.configure(true).unwrap(); // TODO: guest implements external preedit later.
         assert_eq!(rt.store.data().options["layout"]["margin_x"], 12);
@@ -1779,6 +2132,28 @@ mod tests {
                 ..
             }
         )));
+
+        rt.render(&CandidateView {
+            active: true,
+            mode_indicator: Some(crate::theme_api::ModeIndicator {
+                id: 1,
+                ascii_mode: true,
+                reason: crate::theme_api::ModeIndicatorReason::UserSwitch,
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!rt.visible());
+        let surfaces = rt.auxiliary_surfaces();
+        assert_eq!(surfaces.len(), 1);
+        let (indicator, kind) = surfaces[0];
+        assert_eq!(kind, SurfaceKind::Transient);
+        assert!(rt.visible_for(indicator));
+        assert_eq!(rt.size_for(indicator), (48.0, 48.0));
+        assert!(
+            rt.take_frame_for(indicator)
+                .is_some_and(|commands| !commands.is_empty())
+        );
     }
 
     #[test]
@@ -1842,7 +2217,7 @@ mod tests {
         runtime
             .mouse(crate::protocol::MOUSE_DOWN, 20.0, 10.0)
             .unwrap();
-        assert!(runtime.take_drag_request());
+        assert_eq!(runtime.take_drag_request(), Some(PRIMARY_SURFACE));
 
         view.ascii_mode = Some(true);
         runtime.render(&view).unwrap();

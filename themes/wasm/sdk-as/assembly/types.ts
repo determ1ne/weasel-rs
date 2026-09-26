@@ -113,6 +113,14 @@ export enum Mode {
   Preview = 1,
 }
 
+// 由宿主管理的原生表面用途提示。Primary 的固定 ID 为 0，不能通过 surface_create 创建或销毁；其余类型不暴露 HWND，当前作为语义标记保留给后续宿主策略。
+export enum SurfaceKind {
+  Primary = 0,
+  Transient = 1,
+  Resident = 2,
+  Auxiliary = 3,
+}
+
 // LogLevel
 export enum LogLevel {
   Trace = 0,

@@ -18,7 +18,9 @@ fn editing(state: &mut HostState) -> wasmtime::Result<()> {
     if !state.frame_open {
         return Err(wasmtime::format_err!("layers require theme_event"));
     }
-    state.layers_edited = true;
+    let surface = state.surface_mut();
+    surface.layers_edited = true;
+    surface.touched = true;
     Ok(())
 }
 /// 将 ABI 整数映射为宿主属性；未知枚举值作为 WASM 调用错误返回。
@@ -74,7 +76,10 @@ fn motion(
         .motion_revision
         .checked_add(1)
         .ok_or_else(|| wasmtime::format_err!("motion revision exhausted"))?;
+    let revision = state.motion_revision;
+    let event_revision = state.event_revision;
     let layer = state
+        .surface_mut()
         .layers
         .layers
         .iter_mut()
@@ -87,7 +92,7 @@ fn motion(
         _ => 1.0,
     };
     let prior = old.map(|i| layer.motions[i]);
-    let same_event = prior.is_some_and(|m| m.revision > state.event_revision);
+    let same_event = prior.is_some_and(|m| m.revision > event_revision);
     let snap_from =
         same_event && prior.is_some_and(|m| m.operation != LayerOperation::Animate || m.snap_from);
     let from = prior.map_or(default, |m| {
@@ -105,7 +110,7 @@ fn motion(
     let value = LayerMotion {
         snap_from,
         property,
-        revision: state.motion_revision,
+        revision,
         operation,
         from,
         to: target,
@@ -135,6 +140,7 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
             let s = c.data_mut();
             editing(s)?;
             let layer = s
+                .surface_mut()
                 .layers
                 .layers
                 .iter_mut()
@@ -169,6 +175,7 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
                 return Err(wasmtime::format_err!("invalid layer clip"));
             }
             let layer = s
+                .surface_mut()
                 .layers
                 .layers
                 .iter_mut()
@@ -189,14 +196,15 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
                 return Err(wasmtime::format_err!("invalid interaction flag"));
             }
             let layer = s
+                .surface_mut()
                 .layers
                 .layers
                 .iter_mut()
                 .find(|l| l.id as i32 == id)
                 .ok_or_else(|| wasmtime::format_err!("unknown layer"))?;
             layer.interactive = enabled != 0;
-            if enabled == 0 && s.pressed_target.is_some_and(|t| t.0 as i32 == id) {
-                s.pressed_target = None;
+            if enabled == 0 && s.surface().pressed_target.is_some_and(|t| t.0 as i32 == id) {
+                s.surface_mut().pressed_target = None;
             }
             Ok(())
         },
@@ -209,13 +217,13 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
         |mut c: Caller<'_, HostState>, id: i32, w: f32, h: f32| -> wasmtime::Result<()> {
             let s = c.data_mut();
             editing(s)?;
-            if s.draw_depth != 0 {
+            if s.surface().draw_depth != 0 {
                 return Err(wasmtime::format_err!(
                     "balance draw stack before switching layers"
                 ));
             }
             if id == 0 {
-                s.selected_layer = None;
+                s.surface_mut().selected_layer = None;
                 return Ok(());
             }
             if id < 0
@@ -228,21 +236,28 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
             {
                 return Err(wasmtime::format_err!("invalid layer geometry"));
             }
-            if let Some(l) = s.layers.layers.iter_mut().find(|l| l.id == id as u32) {
+            if let Some(l) = s
+                .surface_mut()
+                .layers
+                .layers
+                .iter_mut()
+                .find(|l| l.id == id as u32)
+            {
                 l.commands.clear();
                 l.regions.clear();
                 l.size = (w, h);
             } else {
-                if s.layers.layers.len() >= MAX_LAYERS {
+                if s.surface().layers.layers.len() >= MAX_LAYERS {
                     return Err(wasmtime::format_err!("layer quota exceeded"));
                 }
                 s.motion_revision = s
                     .motion_revision
                     .checked_add(1)
                     .ok_or_else(|| wasmtime::format_err!("layer generation exhausted"))?;
-                s.layers.layers.push(LayerState {
+                let generation = s.motion_revision;
+                s.surface_mut().layers.layers.push(LayerState {
                     z_index: 0,
-                    generation: s.motion_revision,
+                    generation,
                     id: id as u32,
                     size: (w, h),
                     commands: Vec::new(),
@@ -252,7 +267,7 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
                     motions: Vec::new(),
                 });
             }
-            s.selected_layer = Some(id as u32);
+            s.surface_mut().selected_layer = Some(id as u32);
             Ok(())
         },
     )?;
@@ -263,12 +278,12 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
         |mut c: Caller<'_, HostState>, id: i32| -> wasmtime::Result<()> {
             let s = c.data_mut();
             editing(s)?;
-            if id <= 0 || s.selected_layer == Some(id as u32) {
+            if id <= 0 || s.surface().selected_layer == Some(id as u32) {
                 return Err(wasmtime::format_err!("invalid layer removal"));
             }
-            s.layers.layers.retain(|l| l.id != id as u32);
-            if s.pressed_target.is_some_and(|t| t.0 as i32 == id) {
-                s.pressed_target = None;
+            s.surface_mut().layers.layers.retain(|l| l.id != id as u32);
+            if s.surface().pressed_target.is_some_and(|t| t.0 as i32 == id) {
+                s.surface_mut().pressed_target = None;
             }
             Ok(())
         },

@@ -11,6 +11,7 @@ export const Action = Object.freeze({"Item":0,"Previous":1,"Next":2,"Emoji":3,"D
 export const FrameResult = Object.freeze({"Keep":0,"Present":1});
 export const ErrorCode = Object.freeze({"Success":0,"NotFound":-1,"InvalidArgument":-2,"InvalidHandle":-3,"ResourceLimit":-6,"Internal":-7});
 export const Mode = Object.freeze({"Live":0,"Preview":1});
+export const SurfaceKind = Object.freeze({"Primary":0,"Transient":1,"Resident":2,"Auxiliary":3});
 export const LogLevel = Object.freeze({"Trace":0,"Debug":1,"Info":2,"Warn":3,"Error":4});
 export const Capability = Object.freeze({"None":0,"Preedit":1,"Resident":2,"ModeIndicator":4});
 export const LayerProperty = Object.freeze({"Opacity":0,"OffsetX":1,"OffsetY":2,"ScaleX":3,"ScaleY":4});

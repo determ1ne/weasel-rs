@@ -1,6 +1,7 @@
 import {
   ABI_VERSION, Action, Capability, ErrorCode, EventKind, FrameResult, PointerPhase,
-  View, draw_text, measure_text, readView, roundedRect, send_action, set_size,
+  Image, SurfaceKind, View, create_surface, destroy_surface, draw_text, event_surface,
+  measure_text, readView, roundedRect, select_surface, send_action, set_size, set_visible,
 } from "@weasel-rs/sdk-as/assembly";
 // 主题生成绘制命令；窗口、DPI、配置合并与 JSON 解析由宿主负责。
 
@@ -10,7 +11,7 @@ import {
 import { loadConfig, loadColors, colors, PAD, ROW_HEIGHT, GAP, TEXT_SIZE, LABEL_SIZE, COMMENT_SIZE,
   RADIUS, OUTER_RADIUS, MIN_WIDTH, MAX_WIDTH, PAD_Y, ROW_GAP, BORDER, LABEL_GAP,
   PADDING, MIN_HEIGHT, MAX_HEIGHT, TEXT_HEIGHT, LABEL_HEIGHT, COMMENT_HEIGHT, HORIZONTAL, PREVIEW,
-  TEXT_FONT, LABEL_FONT, COMMENT_FONT, label } from "./style";
+  TEXT_FONT, LABEL_FONT, COMMENT_FONT, applyPanel, label } from "./style";
 
 let view: View | null = null;
 let width: f32 = MIN_WIDTH;
@@ -22,6 +23,9 @@ let labels: string[] = [];
 let labelWidths: f32[] = [];
 let hover: i32 = -1;
 let pressed: i32 = -1;
+let indicatorSurface: i32 = -1;
+let chineseIndicator: Image | null = null;
+let englishIndicator: Image | null = null;
 
 class ItemRect {
   constructor(public x: f32, public y: f32, public w: f32) {}
@@ -49,8 +53,8 @@ function layout(v: View): void {
   labelWidths = [];
   rects = [];
   if (v.hasModeIndicator) {
-    width = 48;
-    height = 48;
+    width = 24;
+    height = 24;
     set_size(width, height);
     return;
   }
@@ -116,18 +120,16 @@ function layout(v: View): void {
 function paint(): void {
   const v = view;
   if (v == null) return;
+  if (v.hasModeIndicator) {
+    const image = v.modeIndicatorAscii ? englishIndicator : chineseIndicator;
+    if (image != null && image.valid) image.draw(0, 0, width, height);
+    return;
+  }
   // 外层边框、内层背景；圆角之外保持透明，阴影交由宿主合成。
   roundedRect(0, 0, width, height, OUTER_RADIUS, colors.border_color);
   const border = Mathf.min(BORDER, Mathf.min(width, height) / 2);
   roundedRect(border, border, width - 2 * border, height - 2 * border,
     Mathf.max(0, OUTER_RADIUS - border), colors.back_color);
-  if (v.hasModeIndicator) {
-    const text = v.modeIndicatorAscii ? "英" : "中";
-    const textWidth = measure_text(TEXT_FONT, text, TEXT_SIZE);
-    draw_text(TEXT_FONT, text, (width - textWidth) / 2, (height - TEXT_HEIGHT) / 2,
-      TEXT_SIZE, colors.text);
-    return;
-  }
   const highlighted = hover >= 0 ? hover : v.selectedIndex;
   if (v.hasPreedit) {
     // 编码模式高亮输入段；预览模式显示有效候选，不绘制编码光标。
@@ -168,7 +170,27 @@ export function theme_capabilities(): i32 {
 }
 export function theme_create(_mode: i32, dark: i32): i32 {
   loadConfig(dark != 0);
+  const zh = Image.load("zh.png");
+  if (!zh.valid) return zh.handle;
+  const en = Image.load("en.png");
+  if (!en.valid) { zh.dispose(); return en.handle; }
+  chineseIndicator = zh;
+  englishIndicator = en;
+  indicatorSurface = create_surface(SurfaceKind.Transient);
+  if (indicatorSurface < 0) return indicatorSurface;
+  if (select_surface(indicatorSurface) != ErrorCode.Success) return ErrorCode.Internal;
+  applyPanel();
+  set_visible(false);
+  if (select_surface(0) != ErrorCode.Success) return ErrorCode.Internal;
   return ErrorCode.Success;
+}
+export function theme_destroy(): void {
+  if (chineseIndicator != null) chineseIndicator!.dispose();
+  if (englishIndicator != null) englishIndicator!.dispose();
+  chineseIndicator = null;
+  englishIndicator = null;
+  if (indicatorSurface > 0) destroy_surface(indicatorSurface);
+  indicatorSurface = -1;
 }
 function render(): i32 {
   const next = readView();
@@ -176,8 +198,22 @@ function render(): i32 {
   view = next;
   hover = -1;
   pressed = -1;
-  layout(next);
-  paint();
+  if (next.hasModeIndicator) {
+    if (select_surface(0) != ErrorCode.Success) return ErrorCode.Internal;
+    set_visible(false);
+    if (select_surface(indicatorSurface) != ErrorCode.Success) return ErrorCode.Internal;
+    set_visible(true);
+    layout(next);
+    paint();
+  } else {
+    if (select_surface(indicatorSurface) != ErrorCode.Success) return ErrorCode.Internal;
+    set_visible(false);
+    if (select_surface(0) != ErrorCode.Success) return ErrorCode.Internal;
+    set_visible(true);
+    layout(next);
+    paint();
+  }
+  select_surface(0);
   return FrameResult.Present;
 }
 
@@ -186,6 +222,7 @@ function mouse(kind: i32, x: f32, y: f32): i32 {
   // 悬停仅改变视觉；同一有效候选上按下、抬起才向引擎提交动作。
   const v = view;
   if (v == null) return FrameResult.Keep;
+  if (event_surface() == indicatorSurface) return FrameResult.Keep;
   let row: i32 = -1;
   if (kind != PointerPhase.Leave && kind != PointerPhase.Cancel) {
     for (let i = 0; i < rects.length; i++) {
@@ -214,10 +251,27 @@ function hide(): i32 {
   rects = [];
   hover = -1;
   pressed = -1;
-  return FrameResult.Keep;
+  if (indicatorSurface > 0) {
+    select_surface(indicatorSurface);
+    set_visible(false);
+    select_surface(0);
+  }
+  set_visible(false);
+  return FrameResult.Present;
 }
 // 固定配置配色，不随系统深浅色覆盖；刷新仅重绘当前快照。
-function refresh(dark: i32): i32 { loadColors(dark != 0); paint();   return view == null ? FrameResult.Keep : FrameResult.Present;
+function refresh(dark: i32): i32 {
+  loadColors(dark != 0);
+  if (indicatorSurface > 0) {
+    select_surface(indicatorSurface);
+    applyPanel();
+  }
+  const current = view;
+  if (current == null) { select_surface(0); return FrameResult.Keep; }
+  select_surface(current.hasModeIndicator ? indicatorSurface : 0);
+  paint();
+  select_surface(0);
+  return FrameResult.Present;
 }
 
 // host负责事务；只有完整绘制才返回Present，动作或无变化返回Keep。

@@ -4,8 +4,12 @@ import { EventKind, FrameResult, ViewField, ViewStringField, ConfigScope,DataKin
 export async function createHost(bytes, options = {}, settings = {}) {
   let instance;
   let view = null;
-  const calls = { texts: [], fills: [], rounded: [], strokes: [], actions: [], sizes: [], corners: [], panels: [], backdrops: [] };
+  const calls = { texts: [], images: [], fills: [], rounded: [], strokes: [], actions: [], sizes: [], corners: [], panels: [], backdrops: [] };
   let panel = { corner_radius: 0, shadow_radius: 0, offset_x: 0, offset_y: 0, color: 0 };
+  let nextSurface = 0;
+  const surfaces = new Set([0]);
+  let selectedSurface = 0;
+  let eventSurface = 0;
   const bounded = (value, minimum, maximum = 4096) => Number.isFinite(value) && value >= minimum && value <= maximum;
   const memory = () => new Uint8Array(instance.exports.memory.buffer);
   const read = (p, n) => new TextDecoder("utf-8", { fatal: true }).decode(memory().subarray(p, p + n));
@@ -19,8 +23,12 @@ export async function createHost(bytes, options = {}, settings = {}) {
   ({ instance } = await WebAssembly.instantiate(bytes, {
     env: { abort: (_m, _f, line, column) => { throw new Error(`abort ${line}:${column}`); } },
     weasel_v2: {
-      ...createResourceHost(read, text => calls.texts.push(text)),
+      ...createResourceHost(read, text => calls.texts.push(text), image => calls.images.push(image)),
       ...createViewHost(() => view, memory),
+      surface_create: () => { surfaces.add(++nextSurface); return nextSurface; },
+      surface_destroy: id => id > 0 && surfaces.delete(id) ? 0 : -3,
+      surface_select: id => surfaces.has(id) ? (selectedSurface = id, 0) : -3,
+      event_surface: () => eventSurface,
       set_visible: () => {}, set_fixed_position: () => {}, begin_drag: () => {},
       data_kind: (s, p, n) => {
         const v = get(s, p, n);
@@ -87,11 +95,15 @@ export async function createHost(bytes, options = {}, settings = {}) {
     return outcome===FrameResult.Keep || outcome===FrameResult.Present ? 0 : outcome;
   };
   const exports = { ...instance.exports, abi_version: () => instance.exports.theme_abi_version(), probe_preedit: required => !required || (instance.exports.theme_capabilities() & 1) ? 0 : 2, init: instance.exports.theme_create,
-    mouse: (kind,x,y) => event(EventKind.Pointer,kind,x,y), frame: now => event(EventKind.Animation,0,0,0,now), hide: () => event(EventKind.Hide), refresh: dark => event(EventKind.Appearance,dark) };
+    mouse: (kind,x,y,surface=0) => {
+      eventSurface=surface;
+      try { return event(EventKind.Pointer,kind,x,y); }
+      finally { eventSurface=0; }
+    }, frame: now => event(EventKind.Animation,0,0,0,now), hide: () => event(EventKind.Hide), refresh: dark => event(EventKind.Appearance,dark) };
   return { exports, calls, get panel_style() { return { ...panel }; }, render(next) { view = next; return event(EventKind.View); } };
 }
 /** 仅用于WASM逻辑测试的近似排版；实际字体、资源限额和事务由原生测试覆盖。 */
-export function createResourceHost(read, draw) {
+export function createResourceHost(read, draw, drawImage = () => {}) {
   let next=0;
   const resources=new Map();
   const put=value=>{resources.set(++next,value);return next;};
@@ -105,13 +117,20 @@ export function createResourceHost(read, draw) {
       return put({f,text,width:[...text].reduce((w,c)=>w+(c.codePointAt(0)>0x2e7f?f.size:f.size*.55),0)});
     },
     resource_release(id) {return resources.delete(id)?0:-3;},
+    image_load(p,n) { return put({image:true,name:read(p,n),width:256,height:256}); },
+    image_create() { return -2; },
     resource_metric(id,field) {
       const t=resources.get(id);
+      if (t.image) return field===ResourceMetric.Width?t.width:field===ResourceMetric.Height?t.height:0;
       return field===ResourceMetric.Width?t.width:field===ResourceMetric.Height?t.f.size*1.4:t.f.size;
     },
     draw_layout(id,x,y,color,glow,glow_color) {
       const t=resources.get(id);
       draw({text:t.text,x,y,font:t.f.slot,size:t.f.size,color:color>>>0,glow,glow_color});
+    },
+    draw_image(id,x,y,width,height,opacity) {
+      const image=resources.get(id);
+      drawImage({name:image.name,x,y,width,height,opacity});
     },
   };
 }

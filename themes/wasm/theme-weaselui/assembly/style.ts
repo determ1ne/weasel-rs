@@ -175,5 +175,10 @@ export function loadColors(dark: bool): void {
   colors.hilited_candidate_back_color = color("hilited_candidate_back", defaults.COLOR_HILITED_CANDIDATE_BACK);
   colors.hilited_label_color = color("hilited_label", defaults.COLOR_HILITED_LABEL);
   colors.hilited_comment_text_color = color("hilited_comment_text", defaults.COLOR_HILITED_COMMENT_TEXT);
+  applyPanel();
+}
+
+/** 把当前配色的原生面板参数应用到当前选中的宿主 Surface。 */
+export function applyPanel(): void {
   set_panel(OUTER_RADIUS, shadowRadius, shadowX, shadowY, <i32>color("shadow", defaults.COLOR_SHADOW));
 }
