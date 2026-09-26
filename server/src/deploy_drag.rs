@@ -5,14 +5,10 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 use crate::ui_bindings::Windows::{
     Foundation::Rect,
-    UI::Xaml::{
-        Controls::{Button, Grid, ScrollViewer},
-        FrameworkElement, Visibility,
-    },
+    UI::Xaml::{Controls::Grid, FrameworkElement, Visibility},
     Win32::*,
 };
 use std::cell::{Cell, RefCell};
-use windows_core::Interface;
 use windows_strings::{PCWSTR, w};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,10 +36,8 @@ pub struct DragLayer {
     parent: HWND,
     /// 用于将控件坐标变换到共同的 XAML 坐标系。
     root: Grid,
-    /// 日志滚动区域；其矩形从拖动命中区域中排除。
-    scroll: FrameworkElement,
-    /// 部署完成后显示的确认按钮；仅可见且布局完成时排除。
-    button: FrameworkElement,
+    /// 需要从拖动命中区域中排除的可交互 XAML 控件。
+    interactive: Vec<FrameworkElement>,
     /// 最近成功应用的客户区尺寸及控件排除矩形。
     cached: RefCell<Option<(i32, i32, Vec<Bounds>)>>,
     /// 布局更新重入保护，仅供窗口线程访问。
@@ -58,11 +52,8 @@ impl DragLayer {
     pub unsafe fn new(
         parent: HWND,
         root: &Grid,
-        scroll: &ScrollViewer,
-        button: &Button,
+        interactive: Vec<FrameworkElement>,
     ) -> Result<Self, String> {
-        let scroll = scroll.cast().map_err(|e| e.to_string())?;
-        let button = button.cast().map_err(|e| e.to_string())?;
         let name = w!("WeaselRS.DeployDragInput");
         let class = WNDCLASSW {
             lpfnWndProc: Some(input_proc),
@@ -94,8 +85,7 @@ impl DragLayer {
             window,
             parent,
             root: root.clone(),
-            scroll,
-            button,
+            interactive,
             cached: RefCell::new(None),
             updating: Cell::new(false),
         };
@@ -141,15 +131,8 @@ impl DragLayer {
             .ok()
             .map_err(|e| e.to_string())?;
         let scale = GetDpiForWindow(self.parent).max(96) as f64 / 96.0;
-        if self.scroll.ActualWidth().map_err(|e| e.to_string())? <= 0.0
-            || self.scroll.ActualHeight().map_err(|e| e.to_string())? <= 0.0
-        {
-            let _ = ShowWindow(self.window, SW_HIDE);
-            *self.cached.borrow_mut() = None;
-            return Ok(()); // Wait for XAML's first completed layout.
-        }
         let mut holes = Vec::new();
-        for element in [&self.scroll, &self.button] {
+        for element in &self.interactive {
             if element.Visibility().map_err(|e| e.to_string())? != Visibility::Visible {
                 continue;
             }

@@ -7,9 +7,38 @@ use std::{
 
 use crate::bindings::{
     CloseHandle, CreateMutexW, ERROR_ALREADY_EXISTS, ERROR_INVALID_PARAMETER, GetLastError, HANDLE,
+    SW_SHOWNORMAL, ShellExecuteW,
 };
 use crate::windows_security::{LocalSecurityDescriptor, RuntimeIdentity};
-use windows_strings::HSTRING;
+use windows_strings::{HSTRING, PCWSTR, w};
+
+/// 使用 Windows Shell 的默认关联程序打开绝对文件或目录路径。
+pub fn open_path(path: &Path) -> io::Result<()> {
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Shell target must be an absolute path",
+        ));
+    }
+    let target = HSTRING::from(path.as_os_str());
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(target.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = result.0 as isize;
+    if code <= 32 {
+        return Err(io::Error::other(format!(
+            "ShellExecuteW failed with shell error {code}"
+        )));
+    }
+    Ok(())
+}
 
 /// 返回当前进程映像所在目录。
 ///

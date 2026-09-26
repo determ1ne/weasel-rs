@@ -121,8 +121,13 @@
       <TextBlock x:Name="LogText" FontFamily="Consolas, Microsoft YaHei UI" FontSize="12" TextWrapping="Wrap" IsTextSelectionEnabled="True"/>
     </ScrollViewer>
   </Border>
-  <Grid Grid.Row="3" Margin="0,16,0,0" MinHeight="40">
-    <ProgressBar x:Name="Progress" Style="{StaticResource FluentProgress}" IsIndeterminate="True" VerticalAlignment="Center" Height="4"/>
-    <Button x:Name="Okay" Style="{StaticResource FluentButton}" Content="好的" Visibility="Collapsed" HorizontalAlignment="Right" MinWidth="96"/>
+  <Grid Grid.Row="3" Margin="0,16,0,0">
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <ProgressBar x:Name="Progress" Style="{StaticResource FluentProgress}" IsIndeterminate="True" Height="4" Margin="0,0,0,12"/>
+    <Grid Grid.Row="1" MinHeight="32">
+      <HyperlinkButton x:Name="OpenLog" Content="打开部署日志" Visibility="Collapsed" Padding="0"
+                       FontFamily="Microsoft YaHei UI" FontSize="13" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+      <Button x:Name="Okay" Style="{StaticResource FluentButton}" Content="好的" Visibility="Collapsed" HorizontalAlignment="Right" MinWidth="96"/>
+    </Grid>
   </Grid>
 </Grid>

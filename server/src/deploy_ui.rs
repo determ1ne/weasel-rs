@@ -1,4 +1,4 @@
-//! 提供 Rime 部署的原生 Windows/XAML 进度窗口，并在界面初始化失败时回退到无界面部署。
+//! 提供 Rime 部署的 Windows/XAML 进度窗口，并在初始化失败时回退到原生 Task Dialog。
 //!
 //! 窗口及 XAML 对象由调用线程创建和销毁；部署工作线程通过有界邮箱回传日志与最终状态。
 #![allow(unsafe_op_in_unsafe_fn)]
@@ -7,7 +7,7 @@ use crate::ui_bindings::Windows::{
         Color,
         ViewManagement::{UIColorType, UISettings},
         Xaml::{
-            Controls::{Button, Grid, ProgressBar, ScrollViewer, TextBlock},
+            Controls::{Button, Grid, HyperlinkButton, ProgressBar, ScrollViewer, TextBlock},
             ElementTheme, FrameworkElement,
             Hosting::{DesktopWindowXamlSource, WindowsXamlManager},
             IXamlSourceTransparency,
@@ -21,27 +21,31 @@ use crate::ui_bindings::Windows::{
 use std::{
     cell::Cell,
     collections::VecDeque,
+    path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
 };
 use weasel_common::{
-    comrt::WinRtApartment, deploy_protocol::DeployComplete, process::SingleInstance,
+    comrt::{ComApartment, WinRtApartment},
+    deploy_protocol::DeployComplete,
+    process::SingleInstance,
+    task_dialog::{Element as TaskDialogElement, TaskDialog, TaskDialogController},
 };
 use windows_core::Interface;
 use windows_strings::{HSTRING, w};
 
 pub const WM_DEPLOY_FINISHED: u32 = WM_APP as u32 + 31;
-use crate::deploy_job::{PREVIEW_LIMIT, UiMailbox, diagnostic};
+use crate::deploy_job::{PREVIEW_LIMIT, UiMailbox, UiSink, diagnostic};
 
 /// 标记部署工作线程已报告完成，使窗口过程此后允许响应关闭请求。
 static FINISHED: AtomicBool = AtomicBool::new(false);
 
-/// 启动部署界面；界面初始化失败时，仅在部署锁仍由本线程持有的情况下启动无界面部署。
+/// 启动部署界面；XAML 初始化失败时复用部署锁启动 Task Dialog 兼容界面。
 ///
-/// 界面流程正常结束时返回 `Ok(())`；锁获取、界面启动失败且无法回退，或无界面部署失败时返回错误。
+/// 界面流程正常结束时返回 `Ok(())`；锁获取、界面启动失败且无法回退，或部署失败时返回错误。
 pub fn run() -> Result<(), String> {
     let result = (|| {
         let guard = SingleInstance::acquire("deploy-ui-active").map_err(|e| e.to_string())?;
@@ -51,14 +55,7 @@ pub fn run() -> Result<(), String> {
                 let _apartment = WinRtApartment::initialize_sta().map_err(|e| e.to_string())?;
                 run_initialized(guard)
             },
-            |guard| {
-                thread::Builder::new()
-                    .name("rime-deploy-headless".into())
-                    .spawn(move || crate::deploy_job::run(None, guard))
-                    .map_err(|e| e.to_string())?
-                    .join()
-                    .map_err(|_| "deployment worker panicked".to_owned())
-            },
+            run_task_dialog,
         )
     })();
     if let Err(error) = &result {
@@ -77,15 +74,15 @@ pub fn run() -> Result<(), String> {
     }
 }
 
-/// 在界面初始化失败时复用部署锁启动无界面任务。
+/// 在首选界面初始化失败时复用部署锁启动兼容界面。
 ///
 /// `ui` 只有在工作线程开始部署时才应从 `guard` 中取走锁；若界面返回错误且锁仍在，
-/// `headless` 会被调用一次。锁已被取走时表示部署可能已经开始，此时必须原样返回界面错误，
-/// 以免并发启动第二次部署。无界面任务的完成结果与初始化错误分别通过 `Some` 和 `Err` 表示。
+/// `fallback` 会被调用一次。锁已被取走时表示部署可能已经开始，此时必须原样返回界面错误，
+/// 以免并发启动第二次部署。兼容任务的完成结果与初始化错误分别通过 `Some` 和 `Err` 表示。
 fn with_fallback<G>(
     guard: G,
     ui: impl FnOnce(&mut Option<G>) -> Result<(), String>,
-    headless: impl FnOnce(G) -> Result<DeployComplete, String>,
+    fallback: impl FnOnce(G) -> Result<DeployComplete, String>,
 ) -> Result<Option<DeployComplete>, String> {
     let mut guard = Some(guard);
     match ui(&mut guard) {
@@ -93,12 +90,125 @@ fn with_fallback<G>(
         Err(error) => match guard {
             Some(guard) => {
                 diagnostic(&format!(
-                    "deployment UI unavailable; running --deploy without UI: {error}"
+                    "XAML deployment UI unavailable; using Task Dialog: {error}"
                 ));
-                headless(guard).map(Some)
+                fallback(guard).map(Some)
             }
             None => Err(error),
         },
+    }
+}
+
+/// 使用 Windows Task Dialog 展示旧系统兼容部署界面。
+///
+/// 部署线程先于模态对话框启动，因此即使 Task Dialog 自身创建失败，同一个任务仍会在
+/// 后台完成并返回结果。控制器会缓存创建前到达的日志，完成前禁用“确定”按钮。
+fn run_task_dialog(guard: SingleInstance) -> Result<DeployComplete, String> {
+    let log_path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    let hyperlink_path = log_path.clone();
+    let dialog = TaskDialog::new("小狼毫RS", "正在部署 Rime 数据")
+        .content("完整部署界面在当前系统上不可用，正在创建部署日志……")
+        .marquee(true, 30)
+        .ok_enabled(false)
+        .on_hyperlink(move |target| {
+            if target != "deploy-log" {
+                return;
+            }
+            open_deploy_log(&hyperlink_path);
+        });
+    let sink = Arc::new(TaskDialogSink::new(dialog.controller(), log_path));
+    let ui: Arc<dyn UiSink> = sink;
+    let worker = thread::Builder::new()
+        .name("rime-deploy-task-dialog-worker".into())
+        .spawn(move || crate::deploy_job::run(Some(ui), guard))
+        .map_err(|e| e.to_string())?;
+    let shown = dialog.show();
+    let done = worker
+        .join()
+        .map_err(|_| "deployment worker panicked".to_owned())?;
+    if let Err(error) = shown {
+        diagnostic(&format!(
+            "Task Dialog unavailable; deployment completed without UI: {error}"
+        ));
+    }
+    Ok(done)
+}
+
+/// 在独立 STA 线程中用系统默认程序打开部署日志，避免阻塞任一界面线程。
+fn open_deploy_log(log_path: &Arc<Mutex<Option<PathBuf>>>) {
+    let path = log_path.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let Some(path) = path else { return };
+    if let Err(error) = thread::Builder::new()
+        .name("open-deploy-log".into())
+        .spawn(move || {
+            let result = (|| -> Result<(), String> {
+                let _apartment = ComApartment::initialize_sta().map_err(|e| e.to_string())?;
+                weasel_common::process::open_path(&path).map_err(|e| e.to_string())
+            })();
+            if let Err(error) = result {
+                diagnostic(&format!("could not open deployment log: {error}"));
+            }
+        })
+    {
+        diagnostic(&format!("could not start deployment log opener: {error}"));
+    }
+}
+
+/// 在 Task Dialog 中公布专用日志链接，并在部署完成后停止进度动画。
+struct TaskDialogSink {
+    controller: TaskDialogController,
+    log_path: Arc<Mutex<Option<PathBuf>>>,
+}
+
+impl TaskDialogSink {
+    fn new(controller: TaskDialogController, log_path: Arc<Mutex<Option<PathBuf>>>) -> Self {
+        Self {
+            controller,
+            log_path,
+        }
+    }
+
+    fn content(&self, message: &str) -> String {
+        if self
+            .log_path
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+        {
+            format!("{message}\n\n<a href=\"deploy-log\">打开部署日志</a>")
+        } else {
+            message.to_owned()
+        }
+    }
+}
+
+impl UiSink for TaskDialogSink {
+    fn log_path(&self, path: &std::path::Path) {
+        *self.log_path.lock().unwrap_or_else(|p| p.into_inner()) = Some(path.to_owned());
+        self.controller.set_text(
+            TaskDialogElement::Content,
+            self.content("正在部署 Rime 数据。"),
+        );
+    }
+
+    fn log(&self, _text: &str) {
+        // Task Dialog 只提供日志文件链接；XAML 界面仍显示实时文本。
+    }
+
+    fn finish(&self, done: DeployComplete) {
+        self.controller.set_text(
+            TaskDialogElement::MainInstruction,
+            if done.success {
+                "Rime 数据部署完成"
+            } else {
+                "Rime 数据部署失败"
+            },
+        );
+        self.controller
+            .set_text(TaskDialogElement::Content, self.content(&done.message));
+        self.controller.set_marquee(false, 0);
+        self.controller.set_progress_position(100);
+        self.controller.set_ok_enabled(true);
     }
 }
 
@@ -290,12 +400,25 @@ unsafe fn run_initialized(guard: &mut Option<SingleInstance>) -> Result<(), Stri
         .FindName(&HSTRING::from("Okay"))
         .and_then(|x| x.cast())
         .map_err(|e| e.to_string())?;
+    let open_log: HyperlinkButton = element
+        .FindName(&HSTRING::from("OpenLog"))
+        .and_then(|x| x.cast())
+        .map_err(|e| e.to_string())?;
     source.0.SetContent(&root).map_err(|e| e.to_string())?;
+    let interactive = vec![
+        scroll
+            .cast::<FrameworkElement>()
+            .map_err(|e| e.to_string())?,
+        open_log
+            .cast::<FrameworkElement>()
+            .map_err(|e| e.to_string())?,
+        okay.cast::<FrameworkElement>().map_err(|e| e.to_string())?,
+    ];
     let layout = LayoutBinding(Box::new(Layout {
         parent: hwnd,
         child,
         root: root.clone(),
-        drag: crate::deploy_drag::DragLayer::new(hwnd, &root, &scroll, &okay)?,
+        drag: crate::deploy_drag::DragLayer::new(hwnd, &root, interactive)?,
         size: Cell::new((-1, -1, 0)),
     }));
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, &*layout.0 as *const Layout as isize);
@@ -319,6 +442,11 @@ unsafe fn run_initialized(guard: &mut Option<SingleInstance>) -> Result<(), Stri
                 LPARAM(0),
             );
         })
+        .map_err(|e| e.to_string())?;
+    let log_path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    let click_log_path = log_path.clone();
+    let _open_log_click = open_log
+        .Click(move |_, _| open_deploy_log(&click_log_path))
         .map_err(|e| e.to_string())?;
     let dpi = GetDpiForWindow(hwnd).max(96) as i32;
     let width = 720 * dpi / 96;
@@ -384,7 +512,7 @@ unsafe fn run_initialized(guard: &mut Option<SingleInstance>) -> Result<(), Stri
     );
     let mailbox = Arc::new(UiMailbox::default());
     mailbox.set_window(hwnd.0 as usize);
-    let sender = mailbox.clone();
+    let sender: Arc<dyn UiSink> = mailbox.clone();
     let guard = guard.take().ok_or("deployment already started")?;
     let worker = thread::Builder::new()
         .name("rime-deploy-ui-worker".into())
@@ -409,6 +537,10 @@ unsafe fn run_initialized(guard: &mut Option<SingleInstance>) -> Result<(), Stri
             }
             let mut dirty = false;
             let pending = mailbox.take();
+            if let Some(path) = pending.log_path {
+                *log_path.lock().unwrap_or_else(|p| p.into_inner()) = Some(path);
+                let _ = open_log.SetVisibility(Visibility::Visible);
+            }
             text.truncated |= pending.omitted;
             for chunk in pending.chunks {
                 text.append(&chunk);
@@ -715,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn headless_deployment_failure_remains_a_completion_not_an_initialization_error() {
+    fn fallback_deployment_failure_remains_a_completion_not_an_initialization_error() {
         let done = DeployComplete {
             success: false,
             exit_code: Some(1),
