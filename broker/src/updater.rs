@@ -1,4 +1,7 @@
-//! Optional WinSparkle integration. A missing DLL or unconfigured feed never blocks input.
+//! 可选的 WinSparkle 更新集成；缺少 DLL 或更新源未配置时不会阻断输入。
+//!
+//! 更新库按需从运行目录加载，函数指针仅在库仍加载期间有效。WinSparkle 的关闭
+//! 回调可能运行于工作线程，因此通过托盘窗口投递退出命令，而不直接操作 UI 状态。
 use std::{
     ffi::CString,
     path::Path,
@@ -17,12 +20,20 @@ type SetShutdownRequest = unsafe extern "C" fn(unsafe extern "C" fn());
 type SetCanShutdown = unsafe extern "C" fn(unsafe extern "C" fn() -> i32);
 type Action = unsafe extern "C" fn();
 
+/// 当前托盘窗口句柄的跨线程副本；零值表示尚未启用或已清理更新器。
 static TRAY_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
+/// 告知 WinSparkle 托盘当前是否允许为更新而关闭。
+///
+/// 回调遵循 WinSparkle 的 C ABI，返回值由托盘生命周期策略转换为整数。
 unsafe extern "C" fn can_shutdown() -> i32 {
-    i32::from(crate::windows_tray::can_shutdown_for_update())
+    i32::from(crate::runtime::can_shutdown_for_update())
 }
 
+/// 响应 WinSparkle 的关闭请求，并将退出命令投递给托盘窗口线程。
+///
+/// 此回调可能从 WinSparkle 工作线程调用；窗口句柄为零时不执行操作，投递失败
+/// 也不会跨线程直接销毁托盘对象。
 unsafe extern "C" fn request_shutdown() {
     let window = TRAY_WINDOW.load(Ordering::Acquire);
     if window != 0 {
@@ -38,14 +49,21 @@ unsafe extern "C" fn request_shutdown() {
     }
 }
 
+/// 持有已加载的 WinSparkle 库及其入口函数，确保函数指针不会悬空。
 pub struct Updater {
-    // The library must stay loaded until cleanup returns and the function pointers are unused.
+    /// 必须至少保持加载到清理函数返回且所有函数指针均不再使用。
     _library: Library,
+    /// 停止 WinSparkle 并释放其内部资源的入口函数。
     cleanup: Action,
+    /// 打开用户可见更新检查界面的入口函数。
     check_with_ui: Action,
 }
 
 impl Updater {
+    /// 从指定目录加载并初始化 WinSparkle 更新器。
+    ///
+    /// 仅接受编译时配置的 HTTPS appcast 地址和非空公钥。加载、符号解析或公钥
+    /// 校验失败时返回错误；成功后注册关闭策略并保存托盘窗口句柄，实例销毁时清理。
     pub fn start(directory: &Path, tray_window: HWND) -> Result<Self, String> {
         let url = option_env!("WINSPARKLE_APPCAST_URL")
             .filter(|value| value.starts_with("https://") && value.ends_with("/appcast.xml"))
@@ -105,11 +123,13 @@ impl Updater {
         }
     }
 
+    /// 请求 WinSparkle 显示交互式更新检查界面。
     pub fn check_with_ui(&self) {
         unsafe { (self.check_with_ui)() };
     }
 }
 
+/// 清除回调可见的窗口句柄，并在库仍加载时清理 WinSparkle。
 impl Drop for Updater {
     fn drop(&mut self) {
         TRAY_WINDOW.store(0, Ordering::Release);

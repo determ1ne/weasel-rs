@@ -1,4 +1,7 @@
-//! Configuration and notification endpoint, confined to the current logon session.
+//! 提供仅限当前登录会话使用的配置查询与用户通知 RPC 端点。
+//!
+//! 配置查询读取已发布的有效快照；显式刷新则临时从磁盘重载并返回结果，
+//! 不会替换该快照。磁盘操作被移出异步运行时，并发读取受信号量限制。
 use std::{
     sync::{Arc, RwLock},
     thread,
@@ -16,33 +19,53 @@ use weasel_common::{
     settings::ConfigSnapshot as Settings,
 };
 
+/// 持有配置 RPC 监听器及其工作线程的服务句柄。
+///
+/// 丢弃句柄会请求服务停止，并在有限时间内等待线程清理。
 pub struct SettingsService {
+    /// 供本地调用方使用的通知中心句柄。
     notifications: crate::notifications::NotificationCenter,
+    /// 可被服务端发布、并由查询端读取的有效配置快照。
     settings: SettingsStore,
+    /// 向服务线程发送停止信号；取出后表示停止请求已发出。
     stop: Option<oneshot::Sender<()>>,
+    /// 服务线程完成清理后发送的通知，用于限制析构时的等待时间。
     done: std::sync::mpsc::Receiver<()>,
+    /// 持有 RPC 运行时的服务线程句柄。
     worker: Option<thread::JoinHandle<()>>,
 }
 
-/// Shared effective snapshot. Publication completes before replacement children start.
+/// 在线程间共享的有效配置快照。
+///
+/// 替换会先完成写锁下的发布；之后读取快照的调用方（包括新连接）都能观察到新值。
 #[derive(Clone)]
 pub struct SettingsStore(Arc<RwLock<Settings>>);
 impl SettingsStore {
+    /// 原子地发布新的有效配置；若锁曾发生中毒，则恢复其内部值后继续。
     pub fn replace(&self, settings: Settings) {
         *self.0.write().unwrap_or_else(|p| p.into_inner()) = settings;
     }
+
+    /// 克隆当前完整快照，使调用方在释放读锁后仍可独立查询。
     fn snapshot(&self) -> Settings {
         self.0.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 
 impl SettingsService {
+    /// 获取通知中心的共享句柄。
     pub fn notifications(&self) -> crate::notifications::NotificationCenter {
         self.notifications.clone()
     }
+
+    /// 获取有效配置快照的共享发布句柄。
     pub fn settings(&self) -> SettingsStore {
         self.settings.clone()
     }
+
+    /// 在当前进程的默认 broker 管道上启动配置与通知服务。
+    ///
+    /// 绑定监听器成功后才返回；管道名、运行时或绑定错误会作为错误返回。
     pub fn start(
         settings: Settings,
         paths: RuntimePaths,
@@ -50,6 +73,7 @@ impl SettingsService {
         Self::start_on(try_default_broker_pipe_name()?, settings, paths)
     }
 
+    /// 在指定管道启动服务。监听器就绪后才启动工作线程，确保调用方可安全启动子进程。
     fn start_on(
         pipe: String,
         settings: Settings,
@@ -112,6 +136,7 @@ impl SettingsService {
 }
 
 impl Drop for SettingsService {
+    /// 请求工作线程停止，并最多等待两秒完成清理；超时后分离线程句柄。
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
@@ -124,6 +149,10 @@ impl Drop for SettingsService {
     }
 }
 
+/// 顺序处理一个已接受连接上的通知和配置查询请求。
+///
+/// 通知写入完成后才回复；刷新查询从磁盘读取并报告配置错误，但不发布快照。连接收发
+/// 失败会向调用方返回 RPC 错误，连接级超时由服务端任务负责施加。
 async fn serve(
     connection: RpcConnection,
     settings: SettingsStore,
@@ -182,6 +211,7 @@ async fn serve(
     Ok(())
 }
 
+/// 将配置路径查询结果编码为 RPC 负载；无匹配值表示为 `json: None`，无效路径返回失败负载。
 fn config_payload(snapshot: &Settings, path: &str) -> Payload {
     match snapshot.query(path) {
         Ok(value) => Payload::ConfigValue(weasel_common::message::ConfigValue {
@@ -194,6 +224,10 @@ fn config_payload(snapshot: &Settings, path: &str) -> Payload {
     }
 }
 
+/// 在阻塞线程池执行磁盘工作，并以信号量限制同时进行的读取数。
+///
+/// 许可由阻塞闭包持有，因此取消等待它的 RPC 不会提前释放名额；关闭信号量或任务失败
+/// 分别映射为断连错误和协议错误。
 async fn read_on_worker<T: Send + 'static>(
     gate: Arc<Semaphore>,
     operation: impl FnOnce() -> T + Send + 'static,
@@ -212,265 +246,5 @@ async fn read_on_worker<T: Send + 'static>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use weasel_common::{
-        message::{QueryConfig, Shutdown, UserNotification, envelope::Payload},
-        rpc::RpcClient,
-    };
-
-    struct TestClient(RpcClient);
-
-    impl TestClient {
-        async fn query_config(
-            &self,
-            path: &str,
-            refresh: bool,
-        ) -> Result<Option<serde_json::Value>, RpcError> {
-            match self
-                .0
-                .request(Payload::QueryConfig(QueryConfig {
-                    refresh,
-                    path: path.into(),
-                }))
-                .await?
-                .payload
-            {
-                Some(Payload::ConfigValue(value)) => value
-                    .json
-                    .map(|json| {
-                        serde_json::from_str(&json)
-                            .map_err(|error| RpcError::Protocol(error.to_string()))
-                    })
-                    .transpose(),
-                _ => Err(RpcError::UnexpectedResponse),
-            }
-        }
-
-        async fn notify_user(&self, notice: UserNotification) -> Result<(), RpcError> {
-            match self
-                .0
-                .request(Payload::UserNotification(notice))
-                .await?
-                .payload
-            {
-                Some(Payload::Pong(_)) => Ok(()),
-                _ => Err(RpcError::UnexpectedResponse),
-            }
-        }
-
-        async fn shutdown(&self, reason: &str) -> Result<(), RpcError> {
-            match self
-                .0
-                .request(Payload::Shutdown(Shutdown {
-                    reason: reason.into(),
-                }))
-                .await?
-                .payload
-            {
-                Some(Payload::ShutdownResponse(_)) => Ok(()),
-                _ => Err(RpcError::UnexpectedResponse),
-            }
-        }
-    }
-
-    async fn connect(pipe: &str, role: PeerRole) -> Result<TestClient, RpcError> {
-        RpcClient::connect_as_with_timeout(pipe, role, Duration::from_secs(1))
-            .await
-            .map(TestClient)
-    }
-
-    #[test]
-    fn slow_disk_does_not_block_runtime_and_cancel_keeps_permit() {
-        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
-        let gate = Arc::new(Semaphore::new(1));
-        let (release, wait) = std::sync::mpsc::channel();
-        runtime.block_on(async {
-            let (started, ready) = oneshot::channel();
-            let task = tokio::spawn(read_on_worker(gate.clone(), move || {
-                let _ = started.send(());
-                let _ = wait.recv_timeout(Duration::from_secs(2));
-            }));
-            tokio::time::timeout(Duration::from_secs(1), ready)
-                .await
-                .unwrap()
-                .unwrap();
-            // Runtime remains responsive while the filesystem worker is waiting.
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            assert_eq!(gate.available_permits(), 0);
-            task.abort();
-            let _ = task.await;
-            assert_eq!(gate.available_permits(), 0);
-            release.send(()).unwrap();
-            let permit = tokio::time::timeout(Duration::from_secs(1), gate.acquire())
-                .await
-                .unwrap()
-                .unwrap();
-            drop(permit);
-        });
-    }
-
-    static TEST_DIR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    fn test_paths() -> RuntimePaths {
-        let id = TEST_DIR.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let base = format!("weasel-settings-test-{}-{}", std::process::id(), id);
-        let root = std::env::temp_dir().join(&base);
-        RuntimePaths {
-            executable_directory: root.clone(),
-            user_data: root.join("user-data"),
-            logs: root.join("logs"),
-        }
-    }
-
-    #[test]
-    fn concurrent_queries_and_role_restrictions() {
-        let pipe = weasel_common::windows_security::RuntimeIdentity::current()
-            .unwrap()
-            .pipe_name(&format!("settings-test-{}", std::process::id()))
-            .unwrap();
-        let paths = test_paths();
-        let service = SettingsService::start_on(
-            pipe.clone(),
-            Settings::new(serde_json::json!({"theme":"ten"})),
-            paths.clone(),
-        )
-        .unwrap();
-        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
-        runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                let a = connect(&pipe, PeerRole::Renderer).await.unwrap();
-                let b = connect(&pipe, PeerRole::Renderer).await.unwrap();
-                let (a_result, b_result) =
-                    tokio::join!(a.query_config(".", false), b.query_config(".", false));
-                assert_eq!(a_result.unwrap().unwrap()["theme"], "ten");
-                assert_eq!(b_result.unwrap().unwrap()["theme"], "ten");
-                let engine = connect(&pipe, PeerRole::Server).await.unwrap();
-                let notice = weasel_common::message::UserNotification {
-                    source: "server".into(),
-                    code: "configuration.invalid".into(),
-                    severity: weasel_common::message::UserNotificationSeverity::Warning as i32,
-                    title: "Configuration warning".into(),
-                    message: "Using defaults".into(),
-                    details: "field=example".into(),
-                };
-                engine.notify_user(notice.clone()).await.unwrap();
-                a.notify_user(notice).await.unwrap();
-                assert_eq!(
-                    engine.query_config(".theme", false).await.unwrap(),
-                    Some(serde_json::json!("ten"))
-                );
-                assert!(
-                    engine
-                        .query_config(".missing", false)
-                        .await
-                        .unwrap()
-                        .is_none()
-                );
-                assert!(
-                    engine
-                        .query_config(".theme | invalid", false)
-                        .await
-                        .is_err()
-                );
-                service
-                    .settings()
-                    .replace(Settings::new(serde_json::json!({"theme":"eleven"})));
-                // Existing and newly accepted clients observe the published snapshot.
-                assert_eq!(
-                    b.query_config(".", false).await.unwrap().unwrap()["theme"],
-                    "eleven"
-                );
-                let c = connect(&pipe, PeerRole::Renderer).await.unwrap();
-                assert_eq!(
-                    c.query_config(".", false).await.unwrap().unwrap()["theme"],
-                    "eleven"
-                );
-                // The read-only endpoint does not accept lifecycle commands.
-                assert!(a.shutdown("not allowed").await.is_err());
-                let tip = connect(&pipe, PeerRole::Tip).await.unwrap();
-                assert!(tip.query_config(".", false).await.is_err());
-                assert_eq!(
-                    b.query_config(".", false).await.unwrap().unwrap()["theme"],
-                    "eleven"
-                );
-            })
-            .await
-            .unwrap();
-        });
-        drop(service);
-        // Drop closes the listener and releases first-instance ownership.
-        let _replacement = SettingsService::start_on(
-            pipe,
-            Settings::new(serde_json::json!({"theme":"eleven"})),
-            paths,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn refresh_reloads_from_disk_without_publishing() {
-        let pipe = weasel_common::windows_security::RuntimeIdentity::current()
-            .unwrap()
-            .pipe_name(&format!("settings-refresh-test-{}", std::process::id()))
-            .unwrap();
-        let paths = test_paths();
-        let custom = paths.user_data.join("weasel.custom.json");
-        let _ = std::fs::remove_file(&custom);
-        std::fs::create_dir_all(&paths.user_data).unwrap();
-        let service = SettingsService::start_on(
-            pipe.clone(),
-            Settings::new(serde_json::json!({"theme":"ten"})),
-            paths.clone(),
-        )
-        .unwrap();
-        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
-        runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                let client = connect(&pipe, PeerRole::Renderer).await.unwrap();
-                // Baseline: a non-refresh query returns the published snapshot.
-                assert_eq!(
-                    client.query_config(".", false).await.unwrap().unwrap()["theme"],
-                    "ten"
-                );
-                // The user edits the configuration on disk.
-                std::fs::write(&custom, br#"{"theme":"eleven","preview":true}"#).unwrap();
-                // A refresh re-reads the fresh disk state and returns the complete merged object.
-                let fresh = client.query_config(".", true).await.unwrap().unwrap();
-                assert_eq!(fresh["theme"], "eleven");
-                assert_eq!(fresh["preview"], true);
-                // The refresh does not publish: the published snapshot is unchanged.
-                assert_eq!(
-                    client.query_config(".", false).await.unwrap().unwrap()["theme"],
-                    "ten"
-                );
-                std::fs::write(
-                    &custom,
-                    br#"{"theme":"ten","themeSettings":{"ten":{"color":"red"}}}"#,
-                )
-                .unwrap();
-                let fresh = client.query_config(".", true).await.unwrap().unwrap();
-                let json = fresh;
-                assert_eq!(json["themeSettings"]["ten"]["color"], "red");
-                assert_eq!(
-                    client.query_config(".", false).await.unwrap().unwrap()["theme"],
-                    "ten"
-                );
-                std::fs::write(&custom, b"{invalid").unwrap();
-                assert!(matches!(
-                    client.query_config(".", true).await,
-                    Err(RpcError::Remote { .. })
-                ));
-                assert_eq!(
-                    client.query_config(".", false).await.unwrap().unwrap()["theme"],
-                    "ten"
-                );
-            })
-            .await
-            .unwrap();
-        });
-        drop(service);
-        let _ = std::fs::remove_file(&custom);
-        let _ = std::fs::remove_dir(&paths.user_data);
-        let _ = std::fs::remove_dir(&paths.executable_directory);
-    }
-}
+#[path = "../tests/unit/settings_rpc.rs"]
+mod tests;

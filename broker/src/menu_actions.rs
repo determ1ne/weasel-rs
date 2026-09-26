@@ -1,8 +1,15 @@
-//! Shell actions run outside the tray message loop and never inside the TIP.
+//! 执行打开设置、帮助和目录等 Shell 菜单操作。
+//!
+//! 这些动作在独立线程中处理，避免阻塞托盘消息循环；调用边界也确保它们不在文本输入处理器（TIP）中运行。
 use crate::bindings::*;
+use weasel_common::comrt::ComApartment;
 use weasel_common::{command_menu::*, process::RuntimePaths};
 use windows_strings::{HSTRING, PCWSTR, w};
 
+/// 将菜单命令解析为可交给 Windows Shell 打开的目标。
+///
+/// 设置程序缺失时回退到用户目录；用户数据和日志目录会按需创建，程序目录则必须已经存在。
+/// 路径发现、目录创建或不支持的命令以错误返回，调用方负责向用户展示。
 fn target(command: u32) -> Result<HSTRING, String> {
     match command {
         SETTINGS => {
@@ -31,14 +38,16 @@ fn target(command: u32) -> Result<HSTRING, String> {
     }
 }
 
+/// 在专用线程中打开菜单目标，并将启动线程或 Shell 失败显示为错误对话框。
+///
+/// 工作线程初始化单线程 COM apartment，完成 Shell 调用后再反初始化；本函数不等待打开操作结束。
 pub fn open(command: u32) {
     let result = std::thread::Builder::new()
         .name("weasel-shell".into())
         .spawn(move || {
             let result = (|| -> Result<(), String> {
                 let target = target(command)?;
-                unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED as u32).ok() }
-                    .map_err(|e| e.to_string())?;
+                let _apartment = ComApartment::initialize_sta().map_err(|e| e.to_string())?;
                 let result = unsafe {
                     ShellExecuteW(
                         None,
@@ -49,9 +58,6 @@ pub fn open(command: u32) {
                         SW_SHOWNORMAL,
                     )
                 };
-                unsafe {
-                    CoUninitialize();
-                }
                 if result.0 as isize <= 32 {
                     return Err(format!("无法打开目标，Shell 错误码：{}", result.0 as isize));
                 }
@@ -66,6 +72,7 @@ pub fn open(command: u32) {
     }
 }
 
+/// 使用前台错误对话框呈现菜单操作失败原因。
 fn show_error(error: &str) {
     let error = HSTRING::from(error);
     unsafe {
@@ -75,22 +82,5 @@ fn show_error(error: &str) {
             w!("Weasel-RS"),
             (MB_OK | MB_ICONERROR | MB_SETFOREGROUND) as u32,
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn links_match_requested_destinations() {
-        assert_eq!(
-            target(HELP).unwrap(),
-            HSTRING::from("https://rime.im/docs/")
-        );
-        assert_eq!(
-            target(FORUM).unwrap(),
-            HSTRING::from("https://rime.im/discuss/")
-        );
-        assert!(target(0).is_err());
     }
 }

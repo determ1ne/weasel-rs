@@ -4,6 +4,8 @@ pub mod about;
 #[cfg(windows)]
 mod bindings;
 pub mod command_menu;
+#[cfg(windows)]
+pub mod comrt;
 pub mod data_frame;
 pub mod deploy_protocol;
 pub mod logging;

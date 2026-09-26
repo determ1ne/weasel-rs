@@ -1,7 +1,12 @@
-//! Installer command: request normal exit and observe the same process handle.
+//! 通过窗口命令请求 broker 执行正常关闭，并等待最初识别的进程退出；在发送命令前
+//! 校验进程映像路径，防止安装程序关闭来自另一安装目录的 broker。
 use crate::bindings::*;
 use windows_strings::{PWSTR, w};
 
+/// 请求指定安装目录中的 broker 正常退出，并等待其进程结束。
+///
+/// 没有 broker 窗口时视为无需关闭。找到窗口后会固定其进程句柄、校验可执行文件
+/// 路径，再发送退出命令；无法打开进程、路径不符或 30 秒内未退出均返回错误。
 pub fn run(directory: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         let hwnd = FindWindowW(w!("weasel-rs-broker"), None);

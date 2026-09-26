@@ -1,5 +1,7 @@
-//! Broker-owned startup configuration. Files overlay objects recursively;
-//! arrays and scalar values replace the previous value.
+//! 加载并合并由 broker 管理的启动配置。
+//!
+//! 配置文件按顺序叠加：对象会递归合并，数组和标量会替换已有值；单个文件无效时保留
+//! 该文件应用前的配置。这里只检查文件、JSON 和传输大小；具体选项由消费组件校验。
 use serde_json::Value;
 use std::{
     io::{self, Read},
@@ -10,8 +12,13 @@ use weasel_common::{
     settings::{ConfigSnapshot, merge},
 };
 
+/// 单个覆盖配置文件允许读取的最大字节数（1 MiB）。
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
+/// 从打包默认值开始，依次应用可选的程序目录配置和用户自定义配置。
+///
+/// 后加载的文件优先级更高。缺失文件会被忽略；读取或解析失败时调用 `warn` 报告问题，
+/// 并继续使用此前有效的值。
 pub fn load(paths: &RuntimePaths, mut warn: impl FnMut(String)) -> ConfigSnapshot {
     // Also keep packaged defaults available to standalone cargo builds.
     let mut value: Value = serde_json::from_str(include_str!("../../weasel.json"))
@@ -30,6 +37,10 @@ pub fn load(paths: &RuntimePaths, mut warn: impl FnMut(String)) -> ConfigSnapsho
     ConfigSnapshot::new(value)
 }
 
+/// 将单个可选配置文件叠加到基值；缺失文件不改变基值。
+///
+/// 单文件最多读取 1 MiB。文件读取、字节解码、JSON 解析、根对象检查和配置合并均在
+/// 此处完成。新配置只有在全部检查通过后才会原子地替换基值。
 fn overlay_file(base: &mut Value, path: &Path) -> Result<(), String> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -43,170 +54,24 @@ fn overlay_file(base: &mut Value, path: &Path) -> Result<(), String> {
     if bytes.len() as u64 > MAX_CONFIG_BYTES {
         return Err("configuration exceeds 1 MiB".into());
     }
-    overlay(base, &bytes)
-}
-
-fn overlay(base: &mut Value, bytes: &[u8]) -> Result<(), String> {
-    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
     let patch: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     if !patch.is_object() {
         return Err("configuration must be a JSON object".into());
     }
     let mut next = base.clone();
     merge(&mut next, patch);
+
+    // 此处不理解 `theme`、`inline_preedit` 等业务选项。消费配置的组件负责验证
+    // 自己使用的字段、报告错误并选择回退值。这里只保留 RPC 帧大小这一传输约束。
     // Leave room for protobuf fields when two individually valid files merge.
     if next.to_string().len() > weasel_common::data_frame::MAX_FRAME_SIZE - 4096 {
         return Err("merged configuration exceeds RPC size limit".into());
-    }
-    if !matches!(
-        next.get("theme").and_then(Value::as_str),
-        Some("eleven" | "ten" | "abc" | "void" | "wasm")
-    ) {
-        return Err("theme must be eleven, ten, abc, void or wasm".into());
-    }
-    if next.get("inline_preedit").is_some_and(|v| !v.is_boolean()) {
-        return Err("inline_preedit must be a boolean".into());
-    }
-    if next
-        .get("global_ascii_status")
-        .is_some_and(|v| !v.is_boolean())
-    {
-        return Err("global_ascii_status must be a boolean".into());
-    }
-    if next
-        .get("allow_rime_in_secure_fields")
-        .is_some_and(|v| !v.is_boolean())
-    {
-        return Err("allow_rime_in_secure_fields must be a boolean".into());
-    }
-    if next.get("ascii_mode").is_some_and(|v| !v.is_boolean()) {
-        return Err("ascii_mode must be a boolean".into());
-    }
-    if next.get("themeSettings").is_some_and(|v| !v.is_object()) {
-        return Err("themeSettings must be an object".into());
-    }
-    if let Some(apps) = next.get("app_options") {
-        let apps = apps.as_object().ok_or("app_options must be an object")?;
-        for (name, options) in apps {
-            if name.is_empty() || name.contains(['/', '\\']) || !options.is_object() {
-                return Err(
-                    "app_options keys must be executable basenames and values must be objects"
-                        .into(),
-                );
-            }
-            for option in ["ascii_mode", "inline_preedit"] {
-                if options.get(option).is_some_and(|v| !v.is_boolean()) {
-                    return Err(format!("app_options.{name}.{option} must be a boolean"));
-                }
-            }
-        }
     }
     *base = next;
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn merged_size_limit_is_atomic() {
-        let mut base = json!({"theme":"ten", "first":"x".repeat(600_000)});
-        let original = base.clone();
-        let patch = serde_json::to_vec(&json!({"second":"y".repeat(600_000)})).unwrap();
-        assert!(patch.len() < MAX_CONFIG_BYTES as usize);
-        assert!(overlay(&mut base, &patch).unwrap_err().contains("RPC size"));
-        assert_eq!(base, original);
-    }
-
-    #[test]
-    fn merges_objects_and_replaces_arrays() {
-        let mut base = json!({"theme":"eleven", "nested":{"a":1,"b":2}, "list":[1,2]});
-        overlay(&mut base, br#"{"theme":"ten","nested":{"b":3},"list":[4]}"#).unwrap();
-        assert_eq!(
-            base,
-            json!({"theme":"ten","nested":{"a":1,"b":3},"list":[4]})
-        );
-    }
-
-    #[test]
-    fn invalid_overrides_are_atomic() {
-        let original = json!({"theme":"ten"});
-        for bytes in [
-            b"{".as_slice(),
-            b"[]",
-            br#"{"theme":null}"#,
-            br#"{"theme":"unknown"}"#,
-            br#"{"theme":42}"#,
-            br#"{"ascii_mode":"false"}"#,
-            br#"{"app_options":[]}"#,
-            br#"{"app_options":{"cmd.exe":{"ascii_mode":"true"}}}"#,
-            br#"{"app_options":{"cmd.exe":{"inline_preedit":"false"}}}"#,
-        ] {
-            let mut base = original.clone();
-            assert!(overlay(&mut base, bytes).is_err());
-            assert_eq!(base, original);
-        }
-    }
-
-    #[test]
-    fn empty_override_and_utf8_bom_are_supported() {
-        let mut base = json!({"theme":"ten"});
-        overlay(&mut base, b"\xef\xbb\xbf{}").unwrap();
-        assert_eq!(base["theme"], "ten");
-    }
-
-    #[test]
-    fn files_follow_precedence_and_missing_files_are_optional() {
-        let directory = std::env::temp_dir().join(format!(
-            "weasel-settings-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&directory).unwrap();
-        let paths = RuntimePaths {
-            executable_directory: directory.clone(),
-            user_data: directory.join("user-data"),
-            logs: directory.join("logs"),
-        };
-        paths.ensure().unwrap();
-        let mut warnings = Vec::new();
-        assert_eq!(
-            load(&paths, |w| warnings.push(w))
-                .required::<String>(".theme")
-                .unwrap(),
-            "eleven"
-        );
-        std::fs::write(directory.join("weasel.json"), br#"{"theme":"ten"}"#).unwrap();
-        assert_eq!(
-            load(&paths, |w| warnings.push(w))
-                .required::<String>(".theme")
-                .unwrap(),
-            "ten"
-        );
-        let custom = paths.user_data.join("weasel.custom.json");
-        std::fs::write(&custom, br#"{"theme":"eleven"}"#).unwrap();
-        assert_eq!(
-            load(&paths, |w| warnings.push(w))
-                .required::<String>(".theme")
-                .unwrap(),
-            "eleven"
-        );
-        assert!(warnings.is_empty());
-        std::fs::write(&custom, b"invalid").unwrap();
-        assert_eq!(
-            load(&paths, |w| warnings.push(w))
-                .required::<String>(".theme")
-                .unwrap(),
-            "ten"
-        );
-        assert_eq!(warnings.len(), 1);
-        std::fs::write(&custom, vec![b' '; MAX_CONFIG_BYTES as usize + 1]).unwrap();
-        assert!(overlay_file(&mut serde_json::json!({"theme":"ten"}), &custom).is_err());
-        std::fs::remove_dir_all(&directory).unwrap();
-    }
-}
+#[path = "../tests/unit/settings.rs"]
+mod tests;
