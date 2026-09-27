@@ -790,17 +790,29 @@ impl Window {
             let size_changed = surface.applied.replace(update.size) != update.size;
             let panel_changed = surface.panel.replace(update.panel) != update.panel;
             let backdrop_changed = surface.backdrop.replace(update.backdrop) != update.backdrop;
-            let anchor_changed =
+            let anchor_rect_changed =
                 surface.anchor_rect.replace(update.anchor_rect) != update.anchor_rect;
             let placement_changed = surface.placement.replace(update.placement) != update.placement;
+            let screen_anchor_changed = {
+                let mut anchor = surface.anchor.borrow_mut();
+                let changed = *anchor != update.anchor;
+                *anchor = update.anchor;
+                changed
+            };
+            let becoming_visible = update.visible && !surface.shown.get();
             let frame_changed = update.frame.is_some();
             surface.size.set(update.size);
-            *surface.anchor.borrow_mut() = update.anchor;
             *surface.layers.borrow_mut() = update.layers;
             if let Some(frame) = update.frame {
                 *surface.frame.borrow_mut() = frame;
             }
-            if size_changed || panel_changed || anchor_changed || placement_changed {
+            if size_changed
+                || panel_changed
+                || anchor_rect_changed
+                || placement_changed
+                || screen_anchor_changed
+                || becoming_visible
+            {
                 surface.position().map_err(|e| e.to_string())?;
                 let edge = crate::geometry::insets(&update.panel);
                 surface
