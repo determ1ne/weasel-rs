@@ -16,6 +16,47 @@ type HyperlinkHandler = Arc<dyn Fn(&str) + Send + Sync + 'static>;
 
 /// Task Dialog 内置“确定”按钮的标识。
 pub const BUTTON_OK: i32 = IDOK;
+/// Task Dialog 内置“取消”按钮的标识。
+pub const BUTTON_CANCEL: i32 = IDCANCEL;
+
+/// Task Dialog 主说明旁显示的系统图标。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskDialogIcon {
+    /// 普通信息。
+    Information,
+    /// 需要用户注意的警告。
+    Warning,
+    /// 操作失败或不可恢复错误。
+    Error,
+}
+
+impl TaskDialogIcon {
+    fn native(self) -> PCWSTR {
+        match self {
+            Self::Information => TD_INFORMATION_ICON,
+            Self::Warning => TD_WARNING_ICON,
+            Self::Error => TD_ERROR_ICON,
+        }
+    }
+}
+
+/// Task Dialog 使用的标准按钮组合。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskDialogButtons {
+    /// 只显示“确定”。
+    Ok,
+    /// 显示“确定”和“取消”。
+    OkCancel,
+}
+
+impl TaskDialogButtons {
+    fn native(self) -> TASKDIALOG_COMMON_BUTTON_FLAGS {
+        match self {
+            Self::Ok => TDCBF_OK_BUTTON,
+            Self::OkCancel => TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON,
+        }
+    }
+}
 
 /// 可以由 [`TaskDialogController`] 动态更新的文字区域。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,6 +196,9 @@ impl TaskDialogController {
 /// [`controller`](Self::controller) 可在显示前取得工作线程使用的更新句柄。
 pub struct TaskDialog {
     title: String,
+    owner: usize,
+    icon: Option<TaskDialogIcon>,
+    buttons: TaskDialogButtons,
     expanded_control_text: String,
     collapsed_control_text: String,
     expanded_by_default: bool,
@@ -179,6 +223,9 @@ impl TaskDialog {
     pub fn new(title: impl Into<String>, main_instruction: impl Into<String>) -> Self {
         Self {
             title: title.into(),
+            owner: 0,
+            icon: None,
+            buttons: TaskDialogButtons::Ok,
             expanded_control_text: "显示详细信息".into(),
             collapsed_control_text: "隐藏详细信息".into(),
             expanded_by_default: false,
@@ -199,6 +246,24 @@ impl TaskDialog {
                 hyperlink_handler: None,
             }))),
         }
+    }
+
+    /// 设置拥有此模态对话框的原生窗口；零值表示没有父窗口。
+    pub fn owner(mut self, hwnd: usize) -> Self {
+        self.owner = hwnd;
+        self
+    }
+
+    /// 设置主说明旁显示的系统图标。
+    pub fn icon(mut self, icon: TaskDialogIcon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// 设置标准按钮组合。
+    pub fn buttons(mut self, buttons: TaskDialogButtons) -> Self {
+        self.buttons = buttons;
+        self
     }
 
     /// 设置主正文。
@@ -301,11 +366,18 @@ impl TaskDialog {
         if self.enable_hyperlinks {
             flags |= TDF_ENABLE_HYPERLINKS;
         }
+        if self.owner != 0 {
+            flags |= TDF_POSITION_RELATIVE_TO_WINDOW;
+        }
         let config = TASKDIALOGCONFIG {
             cbSize: std::mem::size_of::<TASKDIALOGCONFIG>() as u32,
+            hwndParent: HWND(self.owner as *mut _),
             dwFlags: flags,
-            dwCommonButtons: TDCBF_OK_BUTTON,
+            dwCommonButtons: self.buttons.native(),
             pszWindowTitle: PCWSTR(title.as_ptr()),
+            Anonymous: TASKDIALOGCONFIG_0 {
+                pszMainIcon: self.icon.map(TaskDialogIcon::native).unwrap_or_default(),
+            },
             pszMainInstruction: PCWSTR(main.as_ptr()),
             pszContent: PCWSTR(content.as_ptr()),
             pszExpandedInformation: PCWSTR(expanded.as_ptr()),

@@ -6,7 +6,12 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use weasel_common::{logging::ComponentLogger, message::UserNotification, process::RuntimePaths};
+use weasel_common::{
+    logging::ComponentLogger,
+    message::UserNotification,
+    process::RuntimePaths,
+    task_dialog::{BUTTON_OK, TaskDialog, TaskDialogButtons, TaskDialogIcon},
+};
 
 #[derive(Clone)]
 /// 管理 broker 通知的记录与展示策略，可在线程间共享。
@@ -100,7 +105,7 @@ impl NotificationCenter {
     /// 记录通知，并在本生命周期首次调用时尝试向用户展示。
     ///
     /// 后续调用仍会逐条记日志，但不会再次弹出界面。桌面 Toast 失败时会在独立
-    /// 工作线程中尝试便携式消息框，避免阻塞调用方的 RPC 或文件系统工作线程；
+    /// 工作线程中尝试 Task Dialog，避免阻塞调用方的 RPC 或文件系统工作线程；
     /// 测试环境只记录通知，不调用系统界面。
     pub fn report(&self, notice: UserNotification) {
         let action = (notice.code == "configuration.invalid")
@@ -150,33 +155,51 @@ impl NotificationCenter {
                 }
                 Err(error) => {
                     self.log(&format!("Toast failed: {error}"));
-                    // 桌面 Toast 失败时，尝试使用便携式消息框通知用户。
+                    // 桌面 Toast 失败时，尝试使用便携式 Task Dialog 通知用户。
                     let center = self.clone();
                     if let Err(error) = std::thread::Builder::new()
                         .name("broker-notification-dialog".into())
-                        .spawn(move || unsafe {
-                            use crate::bindings::*;
-                            use windows_strings::HSTRING;
+                        .spawn(move || {
                             let (instruction, buttons) = if let Some(action) = action {
-                                (format!("\n\n单击“确定”以{}。", action.label()), MB_OKCANCEL)
+                                (
+                                    format!("\n\n单击“确定”以{}。", action.label()),
+                                    TaskDialogButtons::OkCancel,
+                                )
                             } else {
-                                (String::new(), MB_OK)
+                                (String::new(), TaskDialogButtons::Ok)
                             };
-                            let result = MessageBoxW(
-                                None,
-                                &HSTRING::from(format!(
+                            let icon =
+                                match weasel_common::message::UserNotificationSeverity::try_from(
+                                    notice.severity,
+                                ) {
+                                    Ok(weasel_common::message::UserNotificationSeverity::Error) => {
+                                        TaskDialogIcon::Error
+                                    }
+                                    Ok(
+                                        weasel_common::message::UserNotificationSeverity::Warning,
+                                    ) => TaskDialogIcon::Warning,
+                                    _ => TaskDialogIcon::Information,
+                                };
+                            let mut dialog = TaskDialog::new(notice.title, "小狼毫RS 通知")
+                                .icon(icon)
+                                .buttons(buttons)
+                                .content(format!(
                                     "{}{}\n\n详情请查看 broker-notifications.*.log。",
                                     notice.message, instruction
-                                )),
-                                &HSTRING::from(notice.title),
-                                (buttons | MB_ICONINFORMATION | MB_SETFOREGROUND) as u32,
-                            );
-                            if result == 0 {
-                                center.log("notification MessageBox failed");
-                            } else if result == IDOK
-                                && let Some(action) = action
-                            {
-                                action.invoke();
+                                ));
+                            if !notice.details.is_empty() {
+                                dialog = dialog.expanded_information(notice.details);
+                            }
+                            match dialog.show() {
+                                Ok(result) if result.button == BUTTON_OK => {
+                                    if let Some(action) = action {
+                                        action.invoke();
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    center.log(&format!("notification Task Dialog failed: {error}"))
+                                }
                             }
                         })
                     {

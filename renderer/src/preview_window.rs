@@ -2,6 +2,7 @@
 
 use crate::{d2d_bindings::*, theme_api::UiMode, ui_runtime::UiHandle};
 use std::{cell::Cell, sync::mpsc, thread};
+use weasel_common::task_dialog::{TaskDialog, TaskDialogIcon};
 use windows_strings::{HSTRING, w};
 
 const COMPLETE: u32 = WM_APP as u32 + 40;
@@ -227,12 +228,19 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: 
                                             state.status.get(),
                                             w!("刷新失败，原预览保持不变"),
                                         );
-                                        MessageBoxW(
-                                            Some(hwnd),
-                                            &HSTRING::from(error),
-                                            w!("小狼毫RS：外观预览"),
-                                            (MB_OK | MB_ICONERROR) as u32,
-                                        );
+                                        if let Err(dialog_error) = TaskDialog::new(
+                                            "小狼毫RS：外观预览",
+                                            "刷新失败，原预览保持不变",
+                                        )
+                                        .owner(hwnd.0 as usize)
+                                        .icon(TaskDialogIcon::Error)
+                                        .content(error)
+                                        .show()
+                                        {
+                                            crate::diagnostics::record(format_args!(
+                                                "preview error dialog failed: {dialog_error}"
+                                            ));
+                                        }
                                     }
                                 }
                             }

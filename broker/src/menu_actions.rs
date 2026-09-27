@@ -3,7 +3,11 @@
 //! 这些动作在独立线程中处理，避免阻塞托盘消息循环；调用边界也确保它们不在文本输入处理器（TIP）中运行。
 use crate::bindings::*;
 use weasel_common::comrt::ComApartment;
-use weasel_common::{command_menu::*, process::RuntimePaths};
+use weasel_common::{
+    command_menu::*,
+    process::RuntimePaths,
+    task_dialog::{TaskDialog, TaskDialogIcon},
+};
 use windows_strings::{HSTRING, PCWSTR, w};
 
 /// 将菜单命令解析为可交给 Windows Shell 打开的目标。
@@ -74,13 +78,11 @@ pub fn open(command: u32) {
 
 /// 使用前台错误对话框呈现菜单操作失败原因。
 fn show_error(error: &str) {
-    let error = HSTRING::from(error);
-    unsafe {
-        let _ = MessageBoxW(
-            None,
-            PCWSTR(error.as_ptr()),
-            w!("Weasel-RS"),
-            (MB_OK | MB_ICONERROR | MB_SETFOREGROUND) as u32,
-        );
+    if let Err(dialog_error) = TaskDialog::new("小狼毫RS", "无法打开目标")
+        .icon(TaskDialogIcon::Error)
+        .content(error)
+        .show()
+    {
+        eprintln!("weasel-broker: could not show menu error dialog: {dialog_error}");
     }
 }

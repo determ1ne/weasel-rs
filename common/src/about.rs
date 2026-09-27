@@ -39,3 +39,16 @@ pub fn show(text: &str) {
         );
     }
 }
+
+/// 使用带信息图标的 Task Dialog 显示“关于”信息。
+///
+/// `owner` 为零时创建无父窗口的对话框。TIP 应继续调用 [`show`]，避免依赖宿主进程的
+/// Common Controls 激活上下文；拥有独立清单的可执行程序可使用本函数。
+pub fn show_task_dialog(owner: usize, text: &str) -> windows_core::Result<()> {
+    crate::task_dialog::TaskDialog::new("关于小狼毫RS", "小狼毫RS")
+        .owner(owner)
+        .icon(crate::task_dialog::TaskDialogIcon::Information)
+        .content(text)
+        .show()
+        .map(|_| ())
+}

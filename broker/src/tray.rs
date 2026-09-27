@@ -7,7 +7,11 @@ use std::{
 };
 
 use crate::{bindings::*, lifecycle::Operation, operations, service_supervisor};
-use weasel_common::{command_menu, logging::ComponentLogger};
+use weasel_common::{
+    command_menu,
+    logging::ComponentLogger,
+    task_dialog::{TaskDialog, TaskDialogIcon},
+};
 use windows_strings::{HSTRING, PCWSTR, w};
 
 /// 托盘图标向隐藏窗口发送回调的私有消息号。
@@ -226,23 +230,21 @@ fn show_menu(window: HWND) {
 fn handle_command(window: HWND, command: u32) {
     match command {
         command_menu::ABOUT => {
-            weasel_common::about::show(&weasel_common::about::information("broker"));
+            show_about(window, &weasel_common::about::information("broker"));
         }
-        command_menu::DIAGNOSTICS => show_diagnostics(),
+        command_menu::DIAGNOSTICS => show_diagnostics(window),
         command_menu::DEPLOY => begin_operation(window, Operation::Deploy),
         command_menu::RESTART => begin_operation(window, Operation::Restart),
         command_menu::CHECK_UPDATES => UPDATER.with(|cell| {
             if let Some(updater) = cell.borrow().as_ref() {
                 updater.check_with_ui();
             } else {
-                unsafe {
-                    let _ = MessageBoxW(
-                        Some(window),
-                        &HSTRING::from("更新功能尚未配置，或 WinSparkle.dll 不可用。"),
-                        &HSTRING::from("小狼毫RS"),
-                        (MB_OK | MB_ICONERROR | MB_SETFOREGROUND) as u32,
-                    );
-                }
+                show_dialog(
+                    window,
+                    "更新功能不可用",
+                    "更新功能尚未配置，或 WinSparkle.dll 不可用。",
+                    TaskDialogIcon::Error,
+                );
             }
         }),
         command_menu::EXIT => {
@@ -280,30 +282,25 @@ fn show_operation_result(window: HWND) {
     if result.message.is_empty() {
         return;
     }
-    let text = HSTRING::from(result.message);
     let icon = if result.failed {
-        MB_ICONERROR
+        TaskDialogIcon::Error
     } else {
-        MB_ICONINFORMATION
+        TaskDialogIcon::Information
     };
-    unsafe {
-        let shown = MessageBoxW(
-            Some(window),
-            PCWSTR(text.as_ptr()),
-            w!("weasel-rs"),
-            (MB_OK | MB_SETFOREGROUND | icon) as u32,
-        );
-        if shown == 0 {
-            eprintln!(
-                "weasel-broker: MessageBoxW failed: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-    }
+    show_dialog(
+        window,
+        if result.failed {
+            "操作失败"
+        } else {
+            "操作完成"
+        },
+        &result.message,
+        icon,
+    );
 }
 
 /// 显示 broker 和受管服务的诊断摘要。
-fn show_diagnostics() {
+fn show_diagnostics(window: HWND) {
     let mut info = weasel_common::about::information("broker");
     info.push_str(&format!(
         "\n\n正在部署/重启：{}\n正在退出：{}\n{}",
@@ -314,5 +311,24 @@ fn show_diagnostics() {
     info.push_str(
         "\n\nTIP 故障请在对应宿主的语言栏使用 Shift＋右键 → 诊断信息。\nCtrl+C 可复制此对话框。",
     );
-    weasel_common::about::show(&info);
+    show_about(window, &info);
+}
+
+/// 显示属于托盘消息窗口的模态 Task Dialog。
+fn show_dialog(window: HWND, instruction: &str, content: &str, icon: TaskDialogIcon) {
+    if let Err(error) = TaskDialog::new("小狼毫RS", instruction)
+        .owner(window.0 as usize)
+        .icon(icon)
+        .content(content)
+        .show()
+    {
+        eprintln!("weasel-broker: could not show Task Dialog: {error}");
+    }
+}
+
+/// 使用公共“关于”Task Dialog，同时保留 TIP 的 MessageBox 实现。
+fn show_about(window: HWND, text: &str) {
+    if let Err(error) = weasel_common::about::show_task_dialog(window.0 as usize, text) {
+        eprintln!("weasel-broker: could not show about dialog: {error}");
+    }
 }

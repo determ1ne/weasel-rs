@@ -92,7 +92,6 @@ pub fn generate() {
             "Windows.Win32.GetMessageW", "Windows.Win32.TranslateMessage", "Windows.Win32.DispatchMessageW",
             "Windows.Win32.IsDialogMessageW", "Windows.Win32.PostMessageW",
             "Windows.Win32.EnableWindow", "Windows.Win32.SetWindowTextW", "Windows.Win32.SetFocus",
-            "Windows.Win32.MessageBoxW", "Windows.Win32.MB_OK", "Windows.Win32.MB_ICONERROR",
             "Windows.Win32.WS_OVERLAPPEDWINDOW", "Windows.Win32.WS_VISIBLE", "Windows.Win32.WS_CHILD",
             "Windows.Win32.WS_TABSTOP", "Windows.Win32.WS_EX_CONTROLPARENT",
             "Windows.Win32.WM_COMMAND", "Windows.Win32.WM_APP", "Windows.Win32.WM_DESTROY",

@@ -78,13 +78,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 启动常驻托盘代理
     if let Err(error) = runtime::run() {
         eprintln!("weasel-broker: {error}");
-        unsafe {
-            let _ = bindings::MessageBoxW(
-                None,
-                &windows_strings::HSTRING::from(format!("算法服务启动或运行失败：\n{error}")),
-                &windows_strings::HSTRING::from("小狼毫RS"),
-                (bindings::MB_OK | bindings::MB_ICONERROR | bindings::MB_SETFOREGROUND) as u32,
-            );
+        if let Err(dialog_error) =
+            weasel_common::task_dialog::TaskDialog::new("小狼毫RS", "算法服务启动或运行失败")
+                .icon(weasel_common::task_dialog::TaskDialogIcon::Error)
+                .content(error.to_string())
+                .show()
+        {
+            eprintln!("weasel-broker: could not show error dialog: {dialog_error}");
         }
         return Err(error);
     }

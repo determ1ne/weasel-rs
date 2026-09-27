@@ -1,7 +1,7 @@
 //! 在 Windows 10/11 上发送桌面 Toast，并按需注册受控的激活动作。
 //!
 //! 调用方负责控制通知频率。操作系统禁用通知时不改用模态对话框；API 调用失败
-//! 会返回给通知中心，由其决定是否尝试便携版本的消息框回退。
+//! 会返回给通知中心，由其决定是否尝试 Task Dialog 回退。
 use crate::bindings::*;
 use weasel_common::comrt::WinRtApartment;
 use windows_strings::HSTRING;

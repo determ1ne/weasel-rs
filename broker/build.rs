@@ -72,13 +72,11 @@ fn main() {
             "Windows.Win32.TPM_RETURNCMD",
             "Windows.Win32.TPM_NONOTIFY",
             "Windows.Win32.MF_GRAYED",
-            "Windows.Win32.MB_SETFOREGROUND",
             "Windows.Win32.CreatePopupMenu",
             "Windows.Win32.AppendMenuW",
             "Windows.Win32.TrackPopupMenu",
             "Windows.Win32.SetForegroundWindow",
             "Windows.Win32.GetCursorPos",
-            "Windows.Win32.MessageBoxW",
             "Windows.Win32.LoadIconW",
             "Windows.Win32.GetModuleHandleW",
             "Windows.Win32.Shell_NotifyIconW",
@@ -94,11 +92,6 @@ fn main() {
             "Windows.Win32.MF_STRING",
             "Windows.Win32.MF_SEPARATOR",
             "Windows.Win32.TPM_RIGHTBUTTON",
-            "Windows.Win32.MB_OK",
-            "Windows.Win32.MB_OKCANCEL",
-            "Windows.Win32.IDOK",
-            "Windows.Win32.MB_ICONERROR",
-            "Windows.Win32.MB_ICONINFORMATION",
         ])
         .flat()
         .write();
