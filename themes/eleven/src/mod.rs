@@ -106,8 +106,8 @@ struct UiState {
     preview: bool,
     /// 最近成功提交的候选内容，用于跳过未变化时的视觉树重建。
     last_snapshot: Option<CandidateView>,
-    /// 根视觉树在当前 DPI 下测得的 DIP 尺寸缓存；内容或 DPI 变化时失效。
-    measured_size: Option<Size>,
+    /// 根视觉树的 DIP 尺寸及测量时窗口 DPI；内容或 DPI 变化时失效。
+    measured_size: Option<(u32, Size)>,
 }
 
 /// 判断系统版本是否满足该主题对 Windows 11 原生圆角窗口的要求。
@@ -548,6 +548,38 @@ fn render_snapshot(
             // Invalidate the cache and remeasure before resizing both HWNDs.
             state.measured_size = None;
         }
+
+        // A hidden popup retains the DPI of the monitor where it was last
+        // placed. Move and size it without showing first, then remeasure if the
+        // move synchronously changes its per-monitor DPI. This prevents the
+        // first frame on another monitor from combining old-DPI HWND bounds
+        // with a newly scaled XAML Island.
+        for _ in 0..3 {
+            let dpi = GetDpiForWindow(state.window).max(96);
+            let (width, height) = desired_size(state);
+            let (x, y) = if preview {
+                preview_position(width, height)
+            } else {
+                popup_position(anchor, width, height)
+            };
+            let _ = SetWindowPos(
+                state.window,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                width,
+                height,
+                SWP_NOACTIVATE as u32,
+            );
+            if GetDpiForWindow(state.window).max(96) == dpi {
+                break;
+            }
+            state.measured_size = None;
+        }
+
+        // Recompute once from the final monitor. Normally this is identical to
+        // the last settling pass; it also makes the bounded fallback correct if
+        // a pathological monitor arrangement changes DPI on the final pass.
         let (width, height) = desired_size(state);
         let (x, y) = if preview {
             preview_position(width, height)
@@ -636,17 +668,23 @@ fn apply_dwm_corner_preference(window: HWND) {
 /// 缓存只保存 XAML 的期望 DIP 尺寸，返回前按窗口 DPI 向上取整为像素；测量
 /// 失败时采用稳定的默认尺寸。调用方须在内容或 DPI 改变后清除缓存。
 fn desired_size(state: &mut UiState) -> (i32, i32) {
-    let desired = *state.measured_size.get_or_insert_with(|| {
-        let _ = state.root.Measure(Size {
-            Width: 10_000.0,
-            Height: 10_000.0,
-        });
-        state.root.DesiredSize().unwrap_or(Size {
-            Width: 260.0,
-            Height: 34.0,
-        })
-    });
-    let dpi = unsafe { GetDpiForWindow(state.window).max(96) } as f32;
+    let dpi = unsafe { GetDpiForWindow(state.window).max(96) };
+    let desired = match state.measured_size {
+        Some((measured_dpi, desired)) if measured_dpi == dpi => desired,
+        _ => {
+            let _ = state.root.Measure(Size {
+                Width: 10_000.0,
+                Height: 10_000.0,
+            });
+            let desired = state.root.DesiredSize().unwrap_or(Size {
+                Width: 260.0,
+                Height: 34.0,
+            });
+            state.measured_size = Some((dpi, desired));
+            desired
+        }
+    };
+    let dpi = dpi as f32;
     (
         (desired.Width * dpi / 96.0).ceil() as i32,
         (desired.Height * dpi / 96.0).ceil() as i32,
