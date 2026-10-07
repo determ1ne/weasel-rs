@@ -1,12 +1,15 @@
 #Requires -Version 7.0
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('x64', 'arm64')]
+    [string]$Architecture = 'x64'
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Paths provided by the GitHub-hosted windows-2022 image. Fail explicitly if
-# its software layout changes instead of silently selecting an unrelated tool.
+# Paths provided by the GitHub-hosted x64 and ARM64 Windows images. Fail
+# explicitly if their software layout changes instead of selecting another tool.
 $toolDirectories = @(
     (Join-Path ${env:ProgramFiles(x86)} 'NSIS'),
     (Join-Path $env:ProgramFiles '7-Zip')
@@ -27,5 +30,10 @@ rustup toolchain install stable --profile minimal
 if ($LASTEXITCODE -ne 0) { throw 'Failed to install Rust stable.' }
 rustup default stable
 if ($LASTEXITCODE -ne 0) { throw 'Failed to select Rust stable.' }
-rustup target add --toolchain stable x86_64-pc-windows-msvc i686-pc-windows-msvc wasm32-unknown-unknown
+$targets = if ($Architecture -eq 'arm64') {
+    @('aarch64-pc-windows-msvc', 'arm64ec-pc-windows-msvc', 'i686-pc-windows-msvc', 'wasm32-unknown-unknown')
+} else {
+    @('x86_64-pc-windows-msvc', 'i686-pc-windows-msvc', 'wasm32-unknown-unknown')
+}
+rustup target add --toolchain stable @targets
 if ($LASTEXITCODE -ne 0) { throw 'Failed to install Rust build targets.' }

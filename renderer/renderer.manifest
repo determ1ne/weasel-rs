@@ -4,7 +4,7 @@
       type="win32"
       name="weasel-rs.renderer"
       version="1.0.0.0"
-      processorArchitecture="amd64" />
+      processorArchitecture="*" />
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>

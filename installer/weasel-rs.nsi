@@ -27,12 +27,29 @@ ManifestSupportedOS all
 !ifndef OUTPUT_FILE
   !error "Missing OUTPUT_FILE."
 !endif
+!ifndef PRODUCT_ARCH
+  !error "Missing PRODUCT_ARCH."
+!endif
+!ifndef NATIVE_RELEASE
+  !error "Missing NATIVE_RELEASE."
+!endif
+!ifndef SERVER_RELEASE
+  !error "Missing SERVER_RELEASE."
+!endif
+!ifndef TIP64_RELEASE
+  !error "Missing TIP64_RELEASE."
+!endif
+!ifndef TIP64_DIR
+  !error "Missing TIP64_DIR."
+!endif
+!ifndef WINSPARKLE_DLL
+  !error "Missing WINSPARKLE_DLL."
+!endif
 
 !define PRODUCT_NAME "小狼毫RS"
 
 !define PRODUCT_KEY "Software\Weasel-RS"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weasel-RS"
-!define X64_RELEASE "${PROJECT_ROOT}\target\x86_64-pc-windows-msvc\release"
 !define X86_RELEASE "${PROJECT_ROOT}\target\i686-pc-windows-msvc\release"
 
 Name "${PRODUCT_NAME}"
@@ -105,8 +122,20 @@ FunctionEnd
 !macroend
 
 !macro CheckPlatform
+!ifdef ARM64_INSTALLER
+  ${IfNot} ${IsNativeARM64}
+    MessageBox MB_OK|MB_ICONSTOP "此安装包仅支持 ARM64 Windows。" /SD IDOK
+    SetErrorLevel 1
+    Quit
+  ${EndIf}
+  ${IfNot} ${AtLeastBuild} 22000
+    MessageBox MB_OK|MB_ICONSTOP "ARM64 版本需要 Windows 11 或更新版本。" /SD IDOK
+    SetErrorLevel 1
+    Quit
+  ${EndIf}
+!else
   ${IfNot} ${IsNativeAMD64}
-    MessageBox MB_OK|MB_ICONSTOP "仅支持 x64 Windows，不支持 x86 或 ARM64 系统。" /SD IDOK
+    MessageBox MB_OK|MB_ICONSTOP "此安装包仅支持 x64 Windows。ARM64 系统请使用 ARM64 安装包。" /SD IDOK
     SetErrorLevel 1
     Quit
   ${EndIf}
@@ -115,6 +144,7 @@ FunctionEnd
     SetErrorLevel 1
     Quit
   ${EndIf}
+!endif
   SetShellVarContext all
 !macroend
 
@@ -174,7 +204,7 @@ Function .onInit
     Goto foreign_registration
   ${EndIf}
   ${If} $1 != ""
-  ${AndIf} $1 != "$INSTDIR\x64\weasel_tip.dll"
+  ${AndIf} $1 != "$INSTDIR\${TIP64_DIR}\weasel_tip.dll"
   ${AndIf} $1 != "$INSTDIR\weasel_tip.dll"
     Goto foreign_registration
   ${EndIf}
@@ -186,7 +216,7 @@ Function .onInit
   ${EndIf}
   Goto registration_checked
   foreign_registration:
-    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "检测到不属于当前安装记录的 TIP 注册：$\r$\n$\r$\nx86：$PreviousTip32$\r$\nx64：$PreviousTip64$\r$\n$\r$\n继续安装将用当前版本替换这些注册。是否继续？" /SD IDNO IDYES registration_checked
+    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "检测到不属于当前安装记录的 TIP 注册：$\r$\n$\r$\nx86：$PreviousTip32$\r$\n64 位：$PreviousTip64$\r$\n$\r$\n继续安装将用当前版本替换这些注册。是否继续？" /SD IDNO IDYES registration_checked
     SetErrorLevel 1
     Quit
   registration_checked:
@@ -210,7 +240,7 @@ Function StopApplicationProcesses
   ; --shutdown. This command does not start a tray or managed children.
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
-  File /oname=shutdown-broker.exe "${X64_RELEASE}\weasel-broker.exe"
+  File /oname=shutdown-broker.exe "${NATIVE_RELEASE}\weasel-broker.exe"
   DetailPrint "正在请求算法服务正常退出……"
   nsExec::ExecToLog /TIMEOUT=40000 '"$PLUGINSDIR\shutdown-broker.exe" --shutdown "$INSTDIR"'
   Pop $0
@@ -328,6 +358,9 @@ FunctionEnd
   Delete /REBOOTOK "$INSTDIR\x64\rime.dll"
   Delete /REBOOTOK "$INSTDIR\rime.dll"
   Delete /REBOOTOK "$INSTDIR\x64\weasel_tip.dll"
+  Delete /REBOOTOK "$INSTDIR\arm64\weasel_tip.dll"
+  Delete /REBOOTOK "$INSTDIR\arm64\weasel_tip_arm64.dll"
+  Delete /REBOOTOK "$INSTDIR\arm64\weasel_tip_arm64ec.dll"
   Delete /REBOOTOK "$INSTDIR\weasel_tip.dll"
   Delete /REBOOTOK "$INSTDIR\x86\weasel_tip.dll"
   Delete /REBOOTOK "$INSTDIR\weasel_broker.pdb"
@@ -336,6 +369,9 @@ FunctionEnd
   Delete /REBOOTOK "$INSTDIR\weasel_settings.pdb"
   Delete /REBOOTOK "$INSTDIR\weasel_tip.pdb"
   Delete /REBOOTOK "$INSTDIR\x64\weasel_tip.pdb"
+  Delete /REBOOTOK "$INSTDIR\arm64\weasel_tip.pdb"
+  Delete /REBOOTOK "$INSTDIR\arm64\weasel_tip_arm64.pdb"
+  Delete /REBOOTOK "$INSTDIR\arm64\weasel_tip_arm64ec.pdb"
   Delete /REBOOTOK "$INSTDIR\rime.pdb"
   Delete /REBOOTOK "$INSTDIR\x86\weasel_tip.pdb"
   Delete /REBOOTOK "$INSTDIR\x64\rime.pdb"
@@ -352,6 +388,7 @@ FunctionEnd
   Delete /REBOOTOK "$INSTDIR\weasel-installer-helper.exe"
   RMDir /REBOOTOK "$INSTDIR\x86"
   RMDir /REBOOTOK "$INSTDIR\x64"
+  RMDir /REBOOTOK "$INSTDIR\arm64"
   RMDir /REBOOTOK "$INSTDIR\rime-data"
   RMDir /REBOOTOK "$INSTDIR\theme-wasm"
   RMDir /REBOOTOK "$INSTDIR"
@@ -365,20 +402,24 @@ Section "Weasel-RS" SEC_MAIN
   SetOverwrite on
   SetOutPath "$INSTDIR"
   ClearErrors
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel-broker.exe" "weasel-broker.exe"
-  !insertmacro ManagedFile "${PROJECT_ROOT}\artifacts\winsparkle\WinSparkle.dll" "WinSparkle.dll"
+  !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel-broker.exe" "weasel-broker.exe"
+  !insertmacro ManagedFile "${WINSPARKLE_DLL}" "WinSparkle.dll"
   !insertmacro ManagedFile "${PROJECT_ROOT}\artifacts\winsparkle\WinSparkle-LICENSE.txt" "WinSparkle-LICENSE.txt"
   !insertmacro ManagedFile "${PROJECT_ROOT}\artifacts\winsparkle\WinSparkle-Expat-LICENSE.txt" "WinSparkle-Expat-LICENSE.txt"
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel-server.exe" "weasel-server.exe"
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel-renderer.exe" "weasel-renderer.exe"
+  !insertmacro ManagedFile "${SERVER_RELEASE}\weasel-server.exe" "weasel-server.exe"
+  !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel-renderer.exe" "weasel-renderer.exe"
   Call PrepareUiAccessRenderer
   !insertmacro ManagedFile "${PROJECT_ROOT}\server\src\styles-LICENSE.txt" "styles-LICENSE.txt"
   !insertmacro ManagedFile "${PROJECT_ROOT}\LICENSE" "LICENSE"
   !insertmacro ManagedFile "${PROJECT_ROOT}\weasel.json" "weasel.json"
   !insertmacro ManagedFile "${PROJECT_ROOT}\THIRD-PARTY-LICENSES.txt" "THIRD-PARTY-LICENSES.txt"
   !insertmacro ManagedFile "${PROJECT_ROOT}\THIRD-PARTY-GPL-3.0.txt" "THIRD-PARTY-GPL-3.0.txt"
-  SetOutPath "$INSTDIR\x64"
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel_tip.dll" "weasel_tip.dll"
+  SetOutPath "$INSTDIR\${TIP64_DIR}"
+  !insertmacro ManagedFile "${TIP64_RELEASE}\weasel_tip.dll" "weasel_tip.dll"
+!ifdef ARM64_INSTALLER
+  !insertmacro ManagedFile "${TIP64_RELEASE}\weasel_tip_arm64.dll" "weasel_tip_arm64.dll"
+  !insertmacro ManagedFile "${TIP64_RELEASE}\weasel_tip_arm64ec.dll" "weasel_tip_arm64ec.dll"
+!endif
   SetOutPath "$INSTDIR\x86"
   !insertmacro ManagedFile "${X86_RELEASE}\weasel_tip.dll" "weasel_tip.dll"
   CreateDirectory "$INSTDIR\rime-data"
@@ -406,7 +447,7 @@ SectionEnd
 Section "设置应用" SEC_SETTINGS
   ClearErrors
   SetOutPath "$INSTDIR"
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel-settings.exe" "weasel-settings.exe"
+  !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel-settings.exe" "weasel-settings.exe"
   !insertmacro ManagedFile "${PROJECT_ROOT}\settings\LICENSE-NOTICE.txt" "SETTINGS-LICENSE.txt"
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装设置应用，请检查磁盘空间和文件权限。" /SD IDOK
@@ -420,7 +461,7 @@ Section "ten（必选）" SEC_THEME_TEN
   SectionIn RO
   ClearErrors
   SetOutPath "$INSTDIR\themes"
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_ten.dll" "weasel_theme_ten.dll"
+  !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel_theme_ten.dll" "weasel_theme_ten.dll"
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装 ten 主题，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -431,8 +472,8 @@ SectionEnd
 Section "eleven" SEC_THEME_ELEVEN
   ClearErrors
   SetOutPath "$INSTDIR\themes"
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_eleven.dll" "weasel_theme_eleven.dll"
-  !insertmacro ManagedFile "${X64_RELEASE}\themes\weasel_theme_eleven.settings.json" "weasel_theme_eleven.settings.json"
+  !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel_theme_eleven.dll" "weasel_theme_eleven.dll"
+  !insertmacro ManagedFile "${NATIVE_RELEASE}\themes\weasel_theme_eleven.settings.json" "weasel_theme_eleven.settings.json"
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装 eleven 主题，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -443,8 +484,8 @@ SectionEnd
 Section "abc" SEC_THEME_ABC
   ClearErrors
   SetOutPath "$INSTDIR\themes"
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_abc.dll" "weasel_theme_abc.dll"
-  !insertmacro ManagedFile "${X64_RELEASE}\themes\weasel_theme_abc.settings.json" "weasel_theme_abc.settings.json"
+  !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel_theme_abc.dll" "weasel_theme_abc.dll"
+  !insertmacro ManagedFile "${NATIVE_RELEASE}\themes\weasel_theme_abc.settings.json" "weasel_theme_abc.settings.json"
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装 abc 主题，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -455,7 +496,7 @@ SectionEnd
 Section "void" SEC_THEME_VOID
   ClearErrors
   SetOutPath "$INSTDIR\themes"
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_void.dll" "weasel_theme_void.dll"
+  !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel_theme_void.dll" "weasel_theme_void.dll"
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONSTOP "无法安装 void 主题，请检查磁盘空间和文件权限。" /SD IDOK
     SetErrorLevel 1
@@ -467,7 +508,7 @@ SectionEnd
 Section "wasm" SEC_THEME_WASM
   ClearErrors
   SetOutPath "$INSTDIR\themes"
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_wasm.dll" "weasel_theme_wasm.dll"
+  !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel_theme_wasm.dll" "weasel_theme_wasm.dll"
   SetOutPath "$INSTDIR\theme-wasm"
   ; Optional artifacts: preserve offline/skipped-build packaging.
   !insertmacro WasmPayload
@@ -485,38 +526,42 @@ SectionGroupEnd
 Section /o "调试符号" SEC_SYMBOLS
   ClearErrors
   SetOutPath "$INSTDIR"
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel_broker.pdb" "weasel_broker.pdb"
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel_server.pdb" "weasel_server.pdb"
+  !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel_broker.pdb" "weasel_broker.pdb"
+  !insertmacro ManagedFile "${SERVER_RELEASE}\weasel_server.pdb" "weasel_server.pdb"
   ${If} $UseUiAccess == 1
-    !insertmacro ManagedFile "${X64_RELEASE}\uiaccess\weasel_renderer.pdb" "weasel_renderer.pdb"
+    !insertmacro ManagedFile "${NATIVE_RELEASE}\uiaccess\weasel_renderer.pdb" "weasel_renderer.pdb"
   ${Else}
-    !insertmacro ManagedFile "${X64_RELEASE}\weasel_renderer.pdb" "weasel_renderer.pdb"
+    !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel_renderer.pdb" "weasel_renderer.pdb"
   ${EndIf}
   ${If} ${SectionIsSelected} ${SEC_SETTINGS}
-    !insertmacro ManagedFile "${X64_RELEASE}\weasel_settings.pdb" "weasel_settings.pdb"
+    !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel_settings.pdb" "weasel_settings.pdb"
   ${EndIf}
   !insertmacro ManagedFile "${PROJECT_ROOT}\artifacts\librime\dist\lib\rime.pdb" "rime.pdb"
-  SetOutPath "$INSTDIR\x64"
-  !insertmacro ManagedFile "${X64_RELEASE}\weasel_tip.pdb" "weasel_tip.pdb"
+  SetOutPath "$INSTDIR\${TIP64_DIR}"
+  !insertmacro ManagedFile "${TIP64_RELEASE}\weasel_tip.pdb" "weasel_tip.pdb"
+!ifdef ARM64_INSTALLER
+  !insertmacro ManagedFile "${TIP64_RELEASE}\weasel_tip_arm64.pdb" "weasel_tip_arm64.pdb"
+  !insertmacro ManagedFile "${TIP64_RELEASE}\weasel_tip_arm64ec.pdb" "weasel_tip_arm64ec.pdb"
+!endif
   SetOutPath "$INSTDIR\x86"
   !insertmacro ManagedFile "${X86_RELEASE}\weasel_tip.pdb" "weasel_tip.pdb"
   SetOutPath "$INSTDIR\themes"
   ${If} ${SectionIsSelected} ${SEC_THEME_TEN}
-    !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_ten.pdb" "weasel_theme_ten.pdb"
+    !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel_theme_ten.pdb" "weasel_theme_ten.pdb"
   ${EndIf}
   ${If} ${SectionIsSelected} ${SEC_THEME_ELEVEN}
-    !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_eleven.pdb" "weasel_theme_eleven.pdb"
+    !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel_theme_eleven.pdb" "weasel_theme_eleven.pdb"
   ${EndIf}
   ${If} ${SectionIsSelected} ${SEC_THEME_ABC}
-    !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_abc.pdb" "weasel_theme_abc.pdb"
+    !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel_theme_abc.pdb" "weasel_theme_abc.pdb"
   ${EndIf}
   ${If} ${SectionIsSelected} ${SEC_THEME_VOID}
-    !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_void.pdb" "weasel_theme_void.pdb"
+    !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel_theme_void.pdb" "weasel_theme_void.pdb"
   ${EndIf}
 !ifdef HAVE_WASM_THEME
   ${If} ${SectionIsSelected} ${SEC_THEME_WASM}
-!if /FileExists "${X64_RELEASE}\weasel_theme_wasm.pdb"
-    !insertmacro ManagedFile "${X64_RELEASE}\weasel_theme_wasm.pdb" "weasel_theme_wasm.pdb"
+!if /FileExists "${NATIVE_RELEASE}\weasel_theme_wasm.pdb"
+    !insertmacro ManagedFile "${NATIVE_RELEASE}\weasel_theme_wasm.pdb" "weasel_theme_wasm.pdb"
 !endif
   ${EndIf}
 !endif
@@ -543,6 +588,9 @@ Section "-注册与安装信息" SEC_REGISTER
   ; Prerequisite failure must leave the existing application untouched.
   Call InstallRuntime_x86
   Call InstallRuntime_x64
+!ifdef ARM64_INSTALLER
+  Call InstallRuntime_arm64
+!endif
   Call StopApplicationProcesses
   Call RemoveOldPayload
   Delete "$INSTDIR\files.lst"
@@ -556,7 +604,8 @@ Section "-注册与安装信息" SEC_REGISTER
   Call CommitStagedPayload
 
   !insertmacro InstallLog "INFO: 开始注册 TIP"
-  ; RegDLL is 32-bit in this installer; use native regsvr32 for the x64 DLL.
+  ; NSIS is 32-bit. The first call uses redirected x86 regsvr32; the second
+  ; disables redirection and therefore uses the OS-native x64/ARM64 regsvr32.
   SetOutPath "$INSTDIR"
   ClearErrors
   ExecWait '"$SYSDIR\regsvr32.exe" /s "$INSTDIR\x86\weasel_tip.dll"' $0
@@ -568,17 +617,18 @@ Section "-注册与安装信息" SEC_REGISTER
   StrCmp $0 0 0 install_failed
   ${DisableX64FSRedirection}
   ClearErrors
-  ExecWait '"$SYSDIR\regsvr32.exe" /s "$INSTDIR\x64\weasel_tip.dll"' $0
+  ExecWait '"$SYSDIR\regsvr32.exe" /s "$INSTDIR\${TIP64_DIR}\weasel_tip.dll"' $0
   ${EnableX64FSRedirection}
   ${If} ${Errors}
-    !insertmacro InstallLog "ERROR: 无法启动 x64 TIP 注册程序"
+    !insertmacro InstallLog "ERROR: 无法启动 64 位 TIP 注册程序"
     Goto install_failed
   ${EndIf}
-  !insertmacro InstallLog "INFO: x64 TIP 注册退出码=$0"
+  !insertmacro InstallLog "INFO: 64 位 TIP 注册退出码=$0"
   StrCmp $0 0 0 install_failed
 
   ClearErrors
   WriteRegStr HKLM "${PRODUCT_KEY}" "InstallDir" "$INSTDIR"
+  WriteRegStr HKLM "${PRODUCT_KEY}" "Architecture" "${PRODUCT_ARCH}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "${PRODUCT_NAME}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
@@ -610,7 +660,7 @@ Section "-注册与安装信息" SEC_REGISTER
   Call FinishInstallLog
   Goto install_done
   install_failed:
-    MessageBox MB_OK|MB_ICONSTOP "安装或 TIP 注册失败。请检查文件权限和 x86/x64 VC++ 运行库。" /SD IDOK
+    MessageBox MB_OK|MB_ICONSTOP "安装或 TIP 注册失败。请检查文件权限和所需的 VC++ 运行库。" /SD IDOK
     SetErrorLevel 1
     Abort
   install_done:
@@ -682,6 +732,7 @@ Function un.onInit
   !insertmacro AssertSafeUninstallDirectory "$INSTDIR"
   !insertmacro AssertSafeUninstallDirectory "$INSTDIR\x86"
   !insertmacro AssertSafeUninstallDirectory "$INSTDIR\x64"
+  !insertmacro AssertSafeUninstallDirectory "$INSTDIR\arm64"
   !insertmacro AssertSafeUninstallDirectory "$INSTDIR\themes"
   !insertmacro ValidateRimePayloadRemoval
   !insertmacro ValidateWasmPayloadRemoval
@@ -733,7 +784,7 @@ Section "Uninstall"
   Call un.RemoveCurrentUserProvisioning
   ${DisableX64FSRedirection}
   ClearErrors
-  ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\x64\weasel_tip.dll"' $0
+  ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\${TIP64_DIR}\weasel_tip.dll"' $0
   ${EnableX64FSRedirection}
   IfErrors uninstall_failed
   StrCmp $0 0 0 uninstall_failed

@@ -26,7 +26,8 @@ try {
     $zip = [IO.Compression.ZipFile]::OpenRead($archive)
     try {
         $entries = @{
-            "WinSparkle-$version/x64/Release/WinSparkle.dll" = 'WinSparkle.dll'
+            "WinSparkle-$version/x64/Release/WinSparkle.dll" = 'x64\WinSparkle.dll'
+            "WinSparkle-$version/ARM64/Release/WinSparkle.dll" = 'arm64\WinSparkle.dll'
             "WinSparkle-$version/bin/winsparkle-tool.exe" = 'winsparkle-tool.exe'
             "WinSparkle-$version/COPYING" = 'WinSparkle-LICENSE.txt'
             "WinSparkle-$version/COPYING.expat" = 'WinSparkle-Expat-LICENSE.txt'
@@ -35,13 +36,14 @@ try {
             $entry = $zip.GetEntry($entryName)
             if ($null -eq $entry) { throw "Missing WinSparkle archive entry: $entryName" }
             $destination = Join-Path $directory $entries[$entryName]
+            $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination)
             $source = $entry.Open()
             $output = [IO.File]::Create($destination)
             try { $source.CopyTo($output) }
             finally { $output.Dispose(); $source.Dispose() }
         }
     } finally { $zip.Dispose() }
-    Write-Host "WinSparkle ${version}: SHA-256 verified; x64 DLL, signing tool and license staged."
+    Write-Host "WinSparkle ${version}: SHA-256 verified; x64/ARM64 DLLs, signing tool and licenses staged."
 } finally {
     if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
 }

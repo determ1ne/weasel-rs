@@ -16,6 +16,7 @@ use bindings::{
     GUID_WEASEL_PROFILE, GetModuleFileNameW, GetModuleHandleExW, HKL, HMODULE, ITfCategoryMgr,
     ITfInputProcessorProfileMgr,
 };
+use std::path::PathBuf;
 use windows_core::{Error, GUID, Result};
 
 use windows_registry::CLASSES_ROOT;
@@ -80,7 +81,7 @@ fn clsid_key() -> String {
 ///
 /// 以导出函数地址定位模块，逐步扩展 UTF-16 缓冲区；达到 32 Ki 单元上限或 Win32 调用失败
 /// 时返回系统错误，调用方据此中止注册。
-pub(crate) fn module_path() -> Result<HSTRING> {
+fn implementation_module_path() -> Result<HSTRING> {
     let mut module = HMODULE::default();
     let address = PCWSTR(crate::DllRegisterServer as *const () as *const u16);
     let ok = unsafe {
@@ -116,6 +117,20 @@ pub(crate) fn module_path() -> Result<HSTRING> {
     }
 }
 
+/// 返回应写入 COM 注册表的公开入口 DLL。
+///
+/// 普通构建直接注册当前模块。ARM64X 构建中的 Rust DLL 只是转发目标，因此由构建脚本
+/// 注入同目录转发器文件名，确保 ARM64 与 x64 宿主读取同一条 64 位 COM 注册记录。
+fn module_path() -> Result<HSTRING> {
+    let implementation = implementation_module_path()?;
+    let Some(entry) = option_env!("WEASEL_TIP_ENTRY_DLL") else {
+        return Ok(implementation);
+    };
+    let mut path = PathBuf::from(implementation.to_string_lossy());
+    path.set_file_name(entry);
+    Ok(HSTRING::from(path.as_path()))
+}
+
 /// 写入 COM 类和进程内服务器信息；线程模型明确登记为 Apartment。
 fn register_server() -> Result<()> {
     let root = CLASSES_ROOT.create(clsid_key())?;
@@ -135,7 +150,8 @@ fn register_profiles() -> Result<()> {
         bindings::CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?
     };
     let description = HSTRING::from(DESCRIPTION);
-    let icon = module_path()?;
+    // 图标资源位于实现 DLL；COM 入口则可能是无代码的 ARM64X 转发器。
+    let icon = implementation_module_path()?;
     let icon_index = crate::icons::PROFILE_ICON_INDEX;
     let enabled_profile = std::env::var("TEXTSERVICE_PROFILE").ok();
 

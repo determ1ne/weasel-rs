@@ -1,0 +1,5 @@
+EXPORTS
+    DllCanUnloadNow=weasel_tip_arm64ec.DllCanUnloadNow
+    DllGetClassObject=weasel_tip_arm64ec.DllGetClassObject
+    DllRegisterServer=weasel_tip_arm64ec.DllRegisterServer
+    DllUnregisterServer=weasel_tip_arm64ec.DllUnregisterServer

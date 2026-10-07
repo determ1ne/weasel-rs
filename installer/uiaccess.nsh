@@ -25,7 +25,7 @@ Function PrepareUiAccessRenderer
   SetOutPath "$PLUGINSDIR"
   ClearErrors
   File "${PROJECT_ROOT}\scripts\sign-renderer.ps1"
-  File /oname=renderer-uiaccess.exe "${X64_RELEASE}\uiaccess\weasel-renderer.exe"
+  File /oname=renderer-uiaccess.exe "${NATIVE_RELEASE}\uiaccess\weasel-renderer.exe"
   ${If} ${Errors}
     Abort
   ${EndIf}

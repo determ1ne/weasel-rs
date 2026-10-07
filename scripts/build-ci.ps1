@@ -1,6 +1,9 @@
 #Requires -Version 7.0
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('x64', 'arm64')]
+    [string]$Architecture = 'x64'
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -23,21 +26,26 @@ try {
     # & cargo test --workspace --locked --no-fail-fast
     # if ($LASTEXITCODE -ne 0) { Write-Warning 'Workspace tests failed.' }
 
-    foreach ($script in @('download_librime.ps1', 'download_vcredist.ps1', 'download_winsparkle.ps1', 'build-release.ps1', 'build-installer.ps1')) {
+    foreach ($script in @('download_librime.ps1', 'download_vcredist.ps1', 'download_winsparkle.ps1')) {
         & pwsh -NoProfile -File (Join-Path $PSScriptRoot $script)
         if ($LASTEXITCODE -ne 0) { throw "$script failed (exit code $LASTEXITCODE)." }
     }
 
-    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build-installer.ps1') -Mini
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build-release.ps1') -Architecture $Architecture
+    if ($LASTEXITCODE -ne 0) { throw "Release build failed for $Architecture." }
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build-installer.ps1') -Architecture $Architecture
+    if ($LASTEXITCODE -ne 0) { throw "Full installer build failed for $Architecture." }
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build-installer.ps1') -Architecture $Architecture -Mini
     if ($LASTEXITCODE -ne 0) { throw 'Mini installer build failed.' }
     foreach ($suffix in @('', '-mini')) {
-        $installer = Join-Path $projectRoot "artifacts\installer\Weasel-RS-$version-x64$suffix-setup.exe"
+        $installer = Join-Path $projectRoot "artifacts\installer\Weasel-RS-$version-$Architecture$suffix-setup.exe"
         $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
         $filename = Split-Path -Leaf $installer
         Set-Content -LiteralPath "$installer.sha256" -Value "$hash  $filename" -Encoding utf8
     }
     if ($env:GITHUB_OUTPUT) {
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "architecture=$Architecture"
     }
 } finally {
     Pop-Location

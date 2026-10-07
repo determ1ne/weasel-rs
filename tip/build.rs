@@ -5,6 +5,17 @@ mod version;
 fn main() {
     version::embed();
     embed_icons();
+    println!("cargo:rerun-if-env-changed=WEASEL_TIP_ENTRY_DLL");
+    if let Ok(entry) = std::env::var("WEASEL_TIP_ENTRY_DLL") {
+        assert!(
+            !entry.is_empty()
+                && std::path::Path::new(&entry)
+                    .file_name()
+                    .is_some_and(|name| name == entry.as_str()),
+            "WEASEL_TIP_ENTRY_DLL must be a file name"
+        );
+        println!("cargo:rustc-env=WEASEL_TIP_ENTRY_DLL={entry}");
+    }
     let manifest_dir = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is not set"),
     );

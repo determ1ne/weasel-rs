@@ -32,40 +32,56 @@ if ($release.draft -or $release.prerelease -or -not $release.published_at) {
 $latest = Invoke-RestMethod -Uri "https://api.github.com/repos/$repository/releases/latest" -Headers $headers
 if ($latest.tag_name -cne $Tag) { throw "The latest published release is $($latest.tag_name), not $Tag." }
 
-$assetName = "Weasel-RS-$version-x64-mini-setup.exe"
-$installer = @($release.assets | Where-Object { $_.name -ceq $assetName })
-$signatureAsset = @($release.assets | Where-Object { $_.name -ceq "$assetName.edSignature" })
-if ($installer.Count -ne 1 -or $signatureAsset.Count -ne 1) {
-    throw "Release must contain exactly one $assetName and $assetName.edSignature."
+$platforms = @(
+    @{ Architecture = 'x64'; SparkleOs = 'windows-x64' },
+    @{ Architecture = 'arm64'; SparkleOs = 'windows-arm64' }
+)
+$updates = foreach ($platform in $platforms) {
+    $assetName = "Weasel-RS-$version-$($platform.Architecture)-mini-setup.exe"
+    $installer = @($release.assets | Where-Object { $_.name -ceq $assetName })
+    $signatureAsset = @($release.assets | Where-Object { $_.name -ceq "$assetName.edSignature" })
+    if ($installer.Count -ne 1 -or $signatureAsset.Count -ne 1) {
+        throw "Release must contain exactly one $assetName and $assetName.edSignature."
+    }
+    if ($installer[0].size -le 0 -or $installer[0].browser_download_url -notmatch '^https://') {
+        throw "Mini installer asset metadata is invalid: $assetName"
+    }
+    $signatureContent = (Invoke-WebRequest -Uri $signatureAsset[0].browser_download_url -Headers $headers).Content
+    $signature = if ($signatureContent -is [byte[]]) {
+        [Text.Encoding]::UTF8.GetString($signatureContent).Trim()
+    } else {
+        ([string]$signatureContent).Trim()
+    }
+    try { $signatureBytes = [Convert]::FromBase64String($signature) }
+    catch { throw "Release signature is not base64: $assetName" }
+    if ($signatureBytes.Length -ne 64) { throw "Release signature is not Ed25519 (64 bytes): $assetName" }
+    [pscustomobject]@{
+        Installer = $installer[0]
+        Signature = $signature
+        SparkleOs = $platform.SparkleOs
+        AssetName = $assetName
+    }
 }
-if ($installer[0].size -le 0 -or $installer[0].browser_download_url -notmatch '^https://') {
-    throw 'Mini installer asset metadata is invalid.'
-}
-$signatureContent = (Invoke-WebRequest -Uri $signatureAsset[0].browser_download_url -Headers $headers).Content
-$signature = if ($signatureContent -is [byte[]]) {
-    [Text.Encoding]::UTF8.GetString($signatureContent).Trim()
-} else {
-    ([string]$signatureContent).Trim()
-}
-try { $signatureBytes = [Convert]::FromBase64String($signature) }
-catch { throw 'Release signature is not base64.' }
-if ($signatureBytes.Length -ne 64) { throw 'Release signature is not Ed25519 (64 bytes).' }
 
 $root = Split-Path -Parent $PSScriptRoot
 $tool = Join-Path $root 'artifacts\winsparkle\winsparkle-tool.exe'
 if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
     & (Join-Path $PSScriptRoot 'download_winsparkle.ps1')
 }
-$temporaryInstaller = Join-Path ([IO.Path]::GetTempPath()) ("weasel-appcast-{0}.exe" -f [guid]::NewGuid().ToString('N'))
+$temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("weasel-appcast-{0}" -f [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $temporaryDirectory
 try {
-    Invoke-WebRequest -Uri $installer[0].browser_download_url -Headers $headers -OutFile $temporaryInstaller -TimeoutSec 600
-    if ((Get-Item -LiteralPath $temporaryInstaller).Length -ne $installer[0].size) {
-        throw 'Downloaded Mini installer length differs from release metadata.'
+    foreach ($update in $updates) {
+        $temporaryInstaller = Join-Path $temporaryDirectory $update.AssetName
+        Invoke-WebRequest -Uri $update.Installer.browser_download_url -Headers $headers -OutFile $temporaryInstaller -TimeoutSec 600
+        if ((Get-Item -LiteralPath $temporaryInstaller).Length -ne $update.Installer.size) {
+            throw "Downloaded Mini installer length differs from release metadata: $($update.AssetName)"
+        }
+        & $tool verify --public-key $publicKey --signature $update.Signature $temporaryInstaller
+        if ($LASTEXITCODE -ne 0) { throw "Published Mini installer does not match its WinSparkle signature: $($update.AssetName)" }
     }
-    & $tool verify --public-key $publicKey --signature $signature $temporaryInstaller
-    if ($LASTEXITCODE -ne 0) { throw 'Published Mini installer does not match its WinSparkle signature.' }
 } finally {
-    if (Test-Path -LiteralPath $temporaryInstaller) { Remove-Item -LiteralPath $temporaryInstaller -Force }
+    if (Test-Path -LiteralPath $temporaryDirectory) { Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force }
 }
 
 $outputDirectory = Join-Path $root 'artifacts\appcast'
@@ -97,13 +113,15 @@ try {
     $date = ([datetimeoffset]$release.published_at).ToUniversalTime().ToString(
         "ddd, dd MMM yyyy HH:mm:ss 'GMT'", [Globalization.CultureInfo]::InvariantCulture)
     $writer.WriteElementString('pubDate', $date)
-    $writer.WriteStartElement('enclosure')
-    $writer.WriteAttributeString('url', $installer[0].browser_download_url)
-    $writer.WriteAttributeString('length', [string]$installer[0].size)
-    $writer.WriteAttributeString('type', 'application/octet-stream')
-    $writer.WriteAttributeString('sparkle', 'os', $namespace, 'windows-x64')
-    $writer.WriteAttributeString('sparkle', 'edSignature', $namespace, $signature)
-    $writer.WriteEndElement()
+    foreach ($update in $updates) {
+        $writer.WriteStartElement('enclosure')
+        $writer.WriteAttributeString('url', $update.Installer.browser_download_url)
+        $writer.WriteAttributeString('length', [string]$update.Installer.size)
+        $writer.WriteAttributeString('type', 'application/octet-stream')
+        $writer.WriteAttributeString('sparkle', 'os', $namespace, $update.SparkleOs)
+        $writer.WriteAttributeString('sparkle', 'edSignature', $namespace, $update.Signature)
+        $writer.WriteEndElement()
+    }
     $writer.WriteEndElement()
     $writer.WriteEndElement()
     $writer.WriteEndElement()

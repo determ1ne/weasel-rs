@@ -6,6 +6,11 @@
 !ifndef VC_X64_VERSION
   !error "Missing VC_X64_VERSION; use scripts\build-installer.ps1."
 !endif
+!ifdef ARM64_INSTALLER
+!ifndef VC_ARM64_VERSION
+  !error "Missing VC_ARM64_VERSION; use scripts\build-installer.ps1."
+!endif
+!endif
 
 ; Inspect both registry views; do not assume that Installed alone means new enough.
 !macro CheckRuntimeView ARCH VERSION VIEW
@@ -96,3 +101,6 @@ FunctionEnd
 
 !insertmacro RuntimeFunction x86 ${VC_X86_VERSION}
 !insertmacro RuntimeFunction x64 ${VC_X64_VERSION}
+!ifdef ARM64_INSTALLER
+!insertmacro RuntimeFunction arm64 ${VC_ARM64_VERSION}
+!endif

@@ -3,7 +3,9 @@
 param(
     # Build an uncompressed installer that installs all components without a selection page.
     [switch]$Dev,
-    [switch]$Mini
+    [switch]$Mini,
+    [ValidateSet('x64', 'arm64')]
+    [string]$Architecture = 'x64'
 )
 
 Set-StrictMode -Version Latest
@@ -20,31 +22,37 @@ try {
     }
     $version = $versionMatch.Groups[1].Value
 
+    $nativeTarget = if ($Architecture -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+    $serverTarget = if ($Architecture -eq 'arm64') { 'arm64ec-pc-windows-msvc' } else { $nativeTarget }
+    $nativeRelease = "target\$nativeTarget\release"
+    $serverRelease = "target\$serverTarget\release"
+    $tip64Release = if ($Architecture -eq 'arm64') { 'target\arm64x-tip\release' } else { $nativeRelease }
+    $tip64Directory = if ($Architecture -eq 'arm64') { 'arm64' } else { 'x64' }
+    $runtimeArchitectures = if ($Architecture -eq 'arm64') { @('x86', 'x64', 'arm64') } else { @('x86', 'x64') }
+
     $requiredFiles = @(
         'weasel.json',
-        'target\x86_64-pc-windows-msvc\release\weasel-broker.exe',
-        'artifacts\winsparkle\WinSparkle.dll',
+        "$nativeRelease\weasel-broker.exe",
+        "artifacts\winsparkle\$Architecture\WinSparkle.dll",
         'artifacts\winsparkle\WinSparkle-LICENSE.txt',
         'artifacts\winsparkle\WinSparkle-Expat-LICENSE.txt',
-        'target\x86_64-pc-windows-msvc\release\weasel-server.exe',
-        'target\x86_64-pc-windows-msvc\release\weasel-renderer.exe',
-        'target\x86_64-pc-windows-msvc\release\uiaccess\weasel-renderer.exe',
-        'target\x86_64-pc-windows-msvc\release\uiaccess\weasel_renderer.pdb',
+        "$serverRelease\weasel-server.exe",
+        "$nativeRelease\weasel-renderer.exe",
+        "$nativeRelease\uiaccess\weasel-renderer.exe",
+        "$nativeRelease\uiaccess\weasel_renderer.pdb",
         'scripts\sign-renderer.ps1',
-        'target\x86_64-pc-windows-msvc\release\weasel-settings.exe',
-        'target\x86_64-pc-windows-msvc\release\weasel_tip.dll',
+        "$nativeRelease\weasel-settings.exe",
+        "$tip64Release\weasel_tip.dll",
         'target\i686-pc-windows-msvc\release\weasel_tip.dll',
         'artifacts\librime\dist\lib\rime.dll',
         'assets\rime-data\default.yaml',
         'artifacts\librime\dist\lib\rime.pdb',
-        'target\x86_64-pc-windows-msvc\release\weasel_broker.pdb',
-        'target\x86_64-pc-windows-msvc\release\weasel_server.pdb',
-        'target\x86_64-pc-windows-msvc\release\weasel_renderer.pdb',
-        'target\x86_64-pc-windows-msvc\release\weasel_settings.pdb',
-        'target\x86_64-pc-windows-msvc\release\weasel_tip.pdb',
+        "$nativeRelease\weasel_broker.pdb",
+        "$serverRelease\weasel_server.pdb",
+        "$nativeRelease\weasel_renderer.pdb",
+        "$nativeRelease\weasel_settings.pdb",
+        "$tip64Release\weasel_tip.pdb",
         'target\i686-pc-windows-msvc\release\weasel_tip.pdb',
-        'artifacts\vcredist\vc_redist.x86.exe',
-        'artifacts\vcredist\vc_redist.x64.exe',
         'assets\weasel.ico',
         'server\src\styles-LICENSE.txt',
         'LICENSE',
@@ -54,13 +62,24 @@ try {
         'installer\weasel-rs.nsi',
         'scripts\launch-broker.ps1'
     )
+    foreach ($runtimeArchitecture in $runtimeArchitectures) {
+        $requiredFiles += "artifacts\vcredist\vc_redist.$runtimeArchitecture.exe"
+    }
+    if ($Architecture -eq 'arm64') {
+        $requiredFiles += @(
+            "$tip64Release\weasel_tip_arm64.dll",
+            "$tip64Release\weasel_tip_arm64ec.dll",
+            "$tip64Release\weasel_tip_arm64.pdb",
+            "$tip64Release\weasel_tip_arm64ec.pdb"
+        )
+    }
     foreach ($theme in @('ten', 'eleven', 'abc', 'void')) {
         foreach ($extension in @('dll', 'pdb')) {
-            $requiredFiles += "target\x86_64-pc-windows-msvc\release\weasel_theme_$theme.$extension"
+            $requiredFiles += "$nativeRelease\weasel_theme_$theme.$extension"
         }
     }
     foreach ($theme in @('abc', 'eleven')) {
-        $requiredFiles += "target\x86_64-pc-windows-msvc\release\themes\weasel_theme_$theme.settings.json"
+        $requiredFiles += "$nativeRelease\themes\weasel_theme_$theme.settings.json"
     }
     if ($Mini) {
         $requiredFiles = @($requiredFiles | Where-Object { $_ -notlike '*.pdb' })
@@ -146,10 +165,10 @@ try {
     [IO.File]::WriteAllLines($payloadInclude, $payloadLines, [Text.UTF8Encoding]::new($false))
     $buildSuffix = if ($Dev) { '-dev' } else { '' }
     if ($Mini) { $buildSuffix += '-mini' }
-    $outputFile = Join-Path $outputDirectory "Weasel-RS-$version-x64$buildSuffix-setup.exe"
+    $outputFile = Join-Path $outputDirectory "Weasel-RS-$version-$Architecture$buildSuffix-setup.exe"
     $runtimeDefinitions = @()
-    foreach ($architecture in @('x86', 'x64')) {
-        $runtimePath = Join-Path $projectRoot "artifacts\vcredist\vc_redist.$architecture.exe"
+    foreach ($runtimeArchitecture in $runtimeArchitectures) {
+        $runtimePath = Join-Path $projectRoot "artifacts\vcredist\vc_redist.$runtimeArchitecture.exe"
         $signature = Get-AuthenticodeSignature -LiteralPath $runtimePath
         if ($signature.Status -ne 'Valid' -or
             $null -eq $signature.SignerCertificate -or
@@ -161,8 +180,8 @@ try {
             throw "Expected VC14 redistributable: $runtimePath"
         }
         $runtimeVersion = '{0}.{1}.{2}.{3}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart
-        $runtimeDefinitions += "/DVC_$($architecture.ToUpperInvariant())_VERSION=$runtimeVersion"
-        Write-Host "Required $architecture VC++ runtime: $runtimeVersion"
+        $runtimeDefinitions += "/DVC_$($runtimeArchitecture.ToUpperInvariant())_VERSION=$runtimeVersion"
+        Write-Host "Required $runtimeArchitecture VC++ runtime: $runtimeVersion"
     }
     if ($Mini) {
         Write-Host 'Mini: VC++ runtimes downloaded during installation; debug symbols excluded.'
@@ -175,13 +194,20 @@ try {
         '/V3', '/INPUTCHARSET', 'UTF8',
         "/DPROJECT_ROOT=$projectRoot",
         "/DPRODUCT_VERSION=$version",
+        "/DPRODUCT_ARCH=$Architecture",
         "/DOUTPUT_FILE=$outputFile",
         "/DPAYLOAD_INCLUDE=$payloadInclude",
+        "/DNATIVE_RELEASE=$(Join-Path $projectRoot $nativeRelease)",
+        "/DSERVER_RELEASE=$(Join-Path $projectRoot $serverRelease)",
+        "/DTIP64_RELEASE=$(Join-Path $projectRoot $tip64Release)",
+        "/DTIP64_DIR=$tip64Directory",
+        "/DWINSPARKLE_DLL=$(Join-Path $projectRoot "artifacts\winsparkle\$Architecture\WinSparkle.dll")",
         (Join-Path $projectRoot 'installer\weasel-rs.nsi')
     )
     $buildDefinitions = @()
     if ($Mini) { $buildDefinitions += '/DMINI_INSTALLER' }
-    if (Test-Path -LiteralPath (Join-Path $projectRoot 'target\x86_64-pc-windows-msvc\release\weasel_theme_wasm.dll') -PathType Leaf) {
+    if ($Architecture -eq 'arm64') { $buildDefinitions += '/DARM64_INSTALLER' }
+    if (Test-Path -LiteralPath (Join-Path $projectRoot "$nativeRelease\weasel_theme_wasm.dll") -PathType Leaf) {
         $buildDefinitions += '/DHAVE_WASM_THEME'
     }
     if ($Dev) {

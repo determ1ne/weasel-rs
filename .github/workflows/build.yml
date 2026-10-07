@@ -11,10 +11,16 @@ permissions:
 
 jobs:
   build:
-    outputs:
-      version: ${{ steps.build.outputs.version }}
-    runs-on: windows-2022
-    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner: windows-2022
+          - architecture: arm64
+            runner: windows-11-vs2026-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     defaults:
       run:
         shell: pwsh
@@ -29,21 +35,21 @@ jobs:
           persist-credentials: false
 
       - name: Prepare build environment
-        run: ./scripts/prepare-ci.ps1
+        run: ./scripts/prepare-ci.ps1 -Architecture ${{ matrix.architecture }}
 
       - name: Build and package
         id: build
-        run: ./scripts/build-ci.ps1
+        run: ./scripts/build-ci.ps1 -Architecture ${{ matrix.architecture }}
 
       - name: Upload installer and checksum
         uses: actions/upload-artifact@v7
         with:
-          name: Weasel-RS-${{ steps.build.outputs.version }}-x64
+          name: Weasel-RS-${{ steps.build.outputs.version }}-${{ matrix.architecture }}
           path: |
-            artifacts/installer/Weasel-RS-${{ steps.build.outputs.version }}-x64-setup.exe
-            artifacts/installer/Weasel-RS-${{ steps.build.outputs.version }}-x64-setup.exe.sha256
-            artifacts/installer/Weasel-RS-${{ steps.build.outputs.version }}-x64-mini-setup.exe
-            artifacts/installer/Weasel-RS-${{ steps.build.outputs.version }}-x64-mini-setup.exe.sha256
+            artifacts/installer/Weasel-RS-${{ steps.build.outputs.version }}-${{ matrix.architecture }}-setup.exe
+            artifacts/installer/Weasel-RS-${{ steps.build.outputs.version }}-${{ matrix.architecture }}-setup.exe.sha256
+            artifacts/installer/Weasel-RS-${{ steps.build.outputs.version }}-${{ matrix.architecture }}-mini-setup.exe
+            artifacts/installer/Weasel-RS-${{ steps.build.outputs.version }}-${{ matrix.architecture }}-mini-setup.exe.sha256
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
@@ -67,23 +73,35 @@ jobs:
       - name: Download installer and checksum
         uses: actions/download-artifact@v7
         with:
-          name: Weasel-RS-${{ needs.build.outputs.version }}-x64
+          pattern: Weasel-RS-*
+          merge-multiple: true
           path: release-assets
+
+      - name: Read release version
+        id: version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content -LiteralPath tip/Cargo.toml -Raw
+          $match = [regex]::Match($manifest, '(?m)^version\s*=\s*"(\d+\.\d+\.\d+)"\s*$')
+          if (!$match.Success) { throw 'Unable to read release version.' }
+          "version=$($match.Groups[1].Value)" >> $env:GITHUB_OUTPUT
 
       - name: Prepare WinSparkle signer
         shell: pwsh
         run: ./scripts/download_winsparkle.ps1
 
-      - name: Sign Mini installer
+      - name: Sign Mini installers
         shell: pwsh
         env:
           WINSPARKLE_PRIVATE_KEY: ${{ secrets.WINSPARKLE_PRIVATE_KEY }}
           WINSPARKLE_PUBLIC_KEY: ${{ vars.WINSPARKLE_PUBLIC_KEY || 'GAmmGQQoLRtAPyTj3s2gtK9NfVnlcqPHaGJbDF3Zc9E=' }}
-          BUILD_VERSION: ${{ needs.build.outputs.version }}
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if ($env:RELEASE_TAG -cne "v$env:BUILD_VERSION") { throw 'Release tag and Cargo version differ.' }
-          ./scripts/sign-update.ps1 -Installer "release-assets/Weasel-RS-$env:BUILD_VERSION-x64-mini-setup.exe" -PublicKey $env:WINSPARKLE_PUBLIC_KEY
+          foreach ($architecture in @('x64', 'arm64')) {
+            ./scripts/sign-update.ps1 -Installer "release-assets/Weasel-RS-$env:BUILD_VERSION-$architecture-mini-setup.exe" -PublicKey $env:WINSPARKLE_PUBLIC_KEY
+          }
 
       - name: Attach installer to release
         shell: pwsh
@@ -91,12 +109,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-          BUILD_VERSION: ${{ needs.build.outputs.version }}
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $installer = "release-assets/Weasel-RS-$env:BUILD_VERSION-x64-setup.exe"
-          $mini = "release-assets/Weasel-RS-$env:BUILD_VERSION-x64-mini-setup.exe"
-          $assets = @($installer, "$installer.sha256", $mini, "$mini.sha256", "$mini.edSignature")
+          $assets = foreach ($architecture in @('x64', 'arm64')) {
+            $installer = "release-assets/Weasel-RS-$env:BUILD_VERSION-$architecture-setup.exe"
+            $mini = "release-assets/Weasel-RS-$env:BUILD_VERSION-$architecture-mini-setup.exe"
+            $installer
+            "$installer.sha256"
+            $mini
+            "$mini.sha256"
+            "$mini.edSignature"
+          }
           foreach ($file in $assets) {
             if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing release asset: $file" }
           }

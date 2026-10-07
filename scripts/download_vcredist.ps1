@@ -13,7 +13,7 @@ try {
     [Net.ServicePointManager]::SecurityProtocol =
         $previousSecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $null = New-Item -ItemType Directory -Path $destination -Force
-    foreach ($architecture in @('x86', 'x64')) {
+    foreach ($architecture in @('x86', 'x64', 'arm64')) {
         $filename = "vc_redist.$architecture.exe"
         $temporaryFile = Join-Path ([IO.Path]::GetTempPath()) (
             'weasel-rs-vcredist-{0}.exe' -f [Guid]::NewGuid().ToString('N')

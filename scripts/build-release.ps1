@@ -4,7 +4,9 @@ param(
     # Keep release outputs/optimizations, but enable Rust incremental compilation.
     [switch]$Dev,
     # Skip the native WASM backend and guest modules; retain existing artifacts.
-    [switch]$SkipThemeWasm
+    [switch]$SkipThemeWasm,
+    [ValidateSet('x64', 'arm64')]
+    [string]$Architecture = 'x64'
 )
 
 Set-StrictMode -Version Latest
@@ -27,12 +29,18 @@ function Resolve-Application {
 }
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'msvc-arm64.ps1')
+$previousProcessEnvironment = if ($Architecture -eq 'arm64') { Save-ProcessEnvironment } else { $null }
 $targetDirectory = Join-Path $projectRoot 'target'
-$buildTargets = @('x86_64-pc-windows-msvc', 'i686-pc-windows-msvc')
+$nativeTarget = if ($Architecture -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+$serverTarget = if ($Architecture -eq 'arm64') { 'arm64ec-pc-windows-msvc' } else { $nativeTarget }
+$buildTargets = @($nativeTarget, 'i686-pc-windows-msvc')
+if ($Architecture -eq 'arm64') { $buildTargets += 'arm64ec-pc-windows-msvc' }
 $previousCargoIncremental = [Environment]::GetEnvironmentVariable('CARGO_INCREMENTAL', 'Process')
 $previousUiAccess = [Environment]::GetEnvironmentVariable('WEASEL_RENDERER_UIACCESS', 'Process')
 $previousAppcastUrl = [Environment]::GetEnvironmentVariable('WINSPARKLE_APPCAST_URL', 'Process')
 $previousPublicKey = [Environment]::GetEnvironmentVariable('WINSPARKLE_PUBLIC_KEY', 'Process')
+$previousTipEntry = [Environment]::GetEnvironmentVariable('WEASEL_TIP_ENTRY_DLL', 'Process')
 
 Push-Location -LiteralPath $projectRoot
 try {
@@ -56,6 +64,10 @@ try {
     }
     $cargoCommand = Resolve-Application 'cargo'
     $rustupCommand = Resolve-Application 'rustup'
+    # Resolve JavaScript tools before importing VsDevCmd. Some version managers
+    # only expose Node through user PATH entries that VsDevCmd does not retain.
+    $nodeCommand = Resolve-Application 'node'
+    $npmCommand = if ($SkipThemeWasm) { $null } else { Resolve-Application 'npm.cmd' }
     $installedTargets = @(& $rustupCommand target list --installed)
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to list installed Rust targets (exit code $LASTEXITCODE)."
@@ -67,51 +79,83 @@ try {
         throw "Install the missing targets first: rustup target add $($missingTargets -join ' ')"
     }
 
-    foreach ($buildTarget in $buildTargets) {
-        $buildArguments = @(
-            'build', '--release', '--locked',
-            '--target', $buildTarget,
-            '--target-dir', $targetDirectory
-        )
-        if ($buildTarget -eq 'x86_64-pc-windows-msvc') {
-            # 包含独立设置应用 weasel-settings；x86 仍只构建 TIP。
-            $buildArguments += '--workspace'
-            if ($SkipThemeWasm) {
-                $buildArguments += @('--exclude', 'weasel-theme-wasm')
+    # Build the x86 in-process TIP before importing an ARM64 developer
+    # environment; otherwise LIB/INCLUDE would point at ARM64 libraries.
+    Remove-Item Env:\WEASEL_TIP_ENTRY_DLL -ErrorAction SilentlyContinue
+    Write-Host 'Building x86 TIP.'
+    & $cargoCommand build --release --locked -p weasel-tip `
+        --target i686-pc-windows-msvc --target-dir $targetDirectory
+    if ($LASTEXITCODE -ne 0) { throw 'x86 TIP build failed.' }
+
+    if ($Architecture -eq 'arm64') {
+        Import-MsvcArm64Environment
+        # VsDevCmd prepends the architecture-specific compiler and linker.
+        $cargoCommand = Resolve-Application 'cargo'
+        $rustupCommand = Resolve-Application 'rustup'
+        # npm-run launches `node` by name. Keep both resolved tool directories
+        # visible to child processes even when the ARM64 developer environment
+        # replaced the user portion of PATH.
+        $javascriptToolDirectories = @(
+            Split-Path -Parent $nodeCommand
+            if ($npmCommand) { Split-Path -Parent $npmCommand }
+        ) | Select-Object -Unique
+        $pathEntries = @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        foreach ($directory in $javascriptToolDirectories) {
+            if ($directory -notin $pathEntries) {
+                $pathEntries = @($directory) + $pathEntries
             }
-        } else {
-            # Only the in-process TIP needs x86 host compatibility.
-            $buildArguments += @('-p', 'weasel-tip')
         }
-        Write-Host "Building release: $buildTarget"
-        & $cargoCommand @buildArguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "Release build failed for $buildTarget (exit code $LASTEXITCODE)."
-        }
+        $env:Path = $pathEntries -join ';'
+    }
+    if ($Architecture -eq 'arm64') {
+        $env:WEASEL_TIP_ENTRY_DLL = 'weasel_tip.dll'
+    } else {
+        Remove-Item Env:\WEASEL_TIP_ENTRY_DLL -ErrorAction SilentlyContinue
+    }
+    $nativeArguments = @(
+        'build', '--release', '--locked', '--workspace',
+        '--target', $nativeTarget, '--target-dir', $targetDirectory
+    )
+    if ($Architecture -eq 'arm64') { $nativeArguments += @('--exclude', 'weasel-server') }
+    if ($SkipThemeWasm) { $nativeArguments += @('--exclude', 'weasel-theme-wasm') }
+    Write-Host "Building $Architecture native release: $nativeTarget"
+    & $cargoCommand @nativeArguments
+    if ($LASTEXITCODE -ne 0) { throw "Native release build failed for $nativeTarget (exit code $LASTEXITCODE)." }
+
+    if ($Architecture -eq 'arm64') {
+        Write-Host 'Building ARM64EC server and TIP.'
+        & $cargoCommand build --release --locked -p weasel-server -p weasel-tip `
+            --target $serverTarget --target-dir $targetDirectory
+        if ($LASTEXITCODE -ne 0) { throw 'ARM64EC build failed.' }
     }
 
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'weasel.json') -Destination (Join-Path $targetDirectory 'x86_64-pc-windows-msvc\release\weasel.json')
+    if ($Architecture -eq 'arm64') {
+        & (Join-Path $PSScriptRoot 'build-arm64x-tip.ps1') -TargetDirectory $targetDirectory `
+            -SkipRustBuild -UseCurrentMsvcEnvironment
+        if ($LASTEXITCODE -ne 0) { throw 'ARM64X TIP build failed.' }
+    }
+
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'weasel.json') -Destination (Join-Path $targetDirectory "$nativeTarget\release\weasel.json")
     # Match the installed/portable DLL layout next to the renderer.
-    $releaseDirectory = Join-Path $targetDirectory 'x86_64-pc-windows-msvc\release'
+    $releaseDirectory = Join-Path $targetDirectory "$nativeTarget\release"
     # Keep Cargo's primary output ordinary. Build the opt-in variant first, copy
     # its matching symbols, then rebuild ordinary so Cargo's cache stays honest.
     $uiAccessDirectory = Join-Path $releaseDirectory 'uiaccess'
     $null = New-Item -ItemType Directory -Path $uiAccessDirectory -Force
     try {
         $env:WEASEL_RENDERER_UIACCESS = '1'
-        & $cargoCommand build --release --locked -p weasel-renderer --target x86_64-pc-windows-msvc --target-dir $targetDirectory
+        & $cargoCommand build --release --locked -p weasel-renderer --target $nativeTarget --target-dir $targetDirectory
         if ($LASTEXITCODE -ne 0) { throw 'UIAccess renderer build failed.' }
         foreach ($file in @('weasel-renderer.exe', 'weasel_renderer.pdb')) {
             Copy-Item -LiteralPath (Join-Path $releaseDirectory $file) -Destination $uiAccessDirectory -Force
         }
     } finally {
         $env:WEASEL_RENDERER_UIACCESS = '0'
-        & $cargoCommand build --release --locked -p weasel-renderer --target x86_64-pc-windows-msvc --target-dir $targetDirectory
+        & $cargoCommand build --release --locked -p weasel-renderer --target $nativeTarget --target-dir $targetDirectory
         if ($LASTEXITCODE -ne 0) { throw 'Ordinary renderer rebuild failed; do not package these outputs.' }
     }
     $themeDirectory = Join-Path $releaseDirectory 'themes'
     $null = New-Item -ItemType Directory -Path $themeDirectory -Force
-    $nodeCommand = Resolve-Application 'node'
     $metadataPackager = Join-Path $PSScriptRoot 'package-theme-metadata.mjs'
     foreach ($theme in @('abc', 'eleven')) {
         & $nodeCommand $metadataPackager --native (Join-Path $projectRoot "themes\$theme\src\config.json") (Join-Path $themeDirectory "weasel_theme_$theme.settings.json")
@@ -149,7 +193,6 @@ try {
                     $moduleName = $libraries[0].name.Replace('-', '_') + '.wasm'
                     $output = Join-Path $guestTarget "wasm32-unknown-unknown\release\$moduleName"
                 } else {
-                    $npmCommand = Resolve-Application 'npm.cmd'
                     & $npmCommand ci --no-audit --no-fund
                     if ($LASTEXITCODE -ne 0) { throw "npm ci failed for $($guest.Name)." }
                     & $npmCommand run build
@@ -179,7 +222,8 @@ try {
         Write-Host "WASM modules: $wasmArtifacts"
     }
     Write-Host 'Release builds completed:'
-    Write-Host "  x64 components: $(Join-Path $targetDirectory 'x86_64-pc-windows-msvc\release')"
+    Write-Host "  $Architecture components: $releaseDirectory"
+    Write-Host "  server:          $(Join-Path $targetDirectory "$serverTarget\release\weasel-server.exe")"
     Write-Host "  x86 TIP:        $(Join-Path $targetDirectory 'i686-pc-windows-msvc\release\weasel_tip.dll')"
 } catch {
     Write-Error -ErrorRecord $_ -ErrorAction Continue
@@ -188,8 +232,12 @@ try {
     [Environment]::SetEnvironmentVariable('WINSPARKLE_APPCAST_URL', $previousAppcastUrl, 'Process')
     [Environment]::SetEnvironmentVariable('WINSPARKLE_PUBLIC_KEY', $previousPublicKey, 'Process')
     [Environment]::SetEnvironmentVariable('WEASEL_RENDERER_UIACCESS', $previousUiAccess, 'Process')
+    [Environment]::SetEnvironmentVariable('WEASEL_TIP_ENTRY_DLL', $previousTipEntry, 'Process')
     if ($Dev) {
         [Environment]::SetEnvironmentVariable('CARGO_INCREMENTAL', $previousCargoIncremental, 'Process')
+    }
+    if ($previousProcessEnvironment) {
+        Restore-ProcessEnvironment $previousProcessEnvironment
     }
     Pop-Location
 }
