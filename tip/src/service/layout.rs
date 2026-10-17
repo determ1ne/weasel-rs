@@ -59,13 +59,13 @@ fn composition_target_range(composition: &ITfComposition, ec: TfEditCookie) -> R
 pub(super) struct LayoutSchedule {
     /// 用于区分先后排队的只读会话。
     serial: u64,
-    /// 待执行票据及其用途。
+    /// 待执行 ticket 及其用途。
     pending: Option<(u64, LayoutPurpose)>,
     /// `GetTextExt` 暂时无布局时，等待下一次布局通知重试的提示。
     retry_indicator: Option<ModeIndicatorLayout>,
 }
 impl LayoutSchedule {
-    /// 组合布局优先；若提示查询尚未执行，则复用其票据并改为组合用途。
+    /// 组合布局优先；若提示查询尚未执行，则复用其 ticket 并改为组合用途。
     fn request_composition(&mut self, token: ContextToken) -> Option<u64> {
         self.retry_indicator = None;
         if let Some((_, purpose)) = &mut self.pending {
@@ -92,7 +92,7 @@ impl LayoutSchedule {
         Some(self.serial)
     }
 
-    /// 仅由对应票据取走最新用途，过期会话不能消费后续请求。
+    /// 仅由对应 ticket 取走最新用途，过期会话不能消费后续请求。
     fn take(&mut self, ticket: u64) -> Option<LayoutPurpose> {
         if self.pending.as_ref().is_some_and(|(id, _)| *id == ticket) {
             self.pending.take().map(|(_, purpose)| purpose)
@@ -208,7 +208,7 @@ impl TextService {
         Ok(())
     }
 
-    /// 将已登记票据提交给 TSF 的异步只读编辑会话。
+    /// 将已登记 ticket 提交给 TSF 的异步只读编辑会话。
     fn request_layout_probe(&self, state: &Arc<ContextState>, ticket: u64) -> Result<()> {
         let Some(tid) = *self.lock(&self.keystroke_client_id)? else {
             return Err(Error::from_hresult(boundary::E_FAIL));
@@ -233,11 +233,11 @@ impl TextService {
     }
 }
 #[implement(ITfEditSession)]
-/// 持有布局票据的 TSF 只读会话；回调只发送仍与当前编辑状态相符的结果。
+/// 持有布局 ticket 的 TSF 只读会话；回调只发送仍与当前编辑状态相符的结果。
 pub(super) struct LayoutProbe {
     /// 持有目标文档上下文，使异步会话可安全读取状态。
     state: Arc<ContextState>,
-    /// 本次只读会话在布局调度器中的票据。
+    /// 本次只读会话在布局调度器中的 ticket 。
     ticket: u64,
     /// 服务激活代次；与请求时的值不同时不发送布局结果。
     generation: Arc<AtomicU64>,

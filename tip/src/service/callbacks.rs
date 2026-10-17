@@ -1,7 +1,7 @@
 //! 实现 TIP 对 TSF 线程管理器、文本上下文、键盘、合成和显示属性接口的回调。
 //!
 //! 回调参数来自宿主 COM 边界，所有可能失败的业务处理都经 `boundary::guard` 隔离，避免
-//! Rust panic 或内部错误越过 ABI。回调只在对应 TSF 公寓中使用传入接口；键盘路径在故障态
+//! Rust panic 或内部错误越过 ABI。回调只在对应 TSF  compartment 中使用传入接口；键盘路径在故障态
 //! 直接将按键交还宿主，文档/焦点变化则更新上下文订阅与其生命周期。
 use super::*;
 
@@ -13,7 +13,7 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         })
     }
 
-    /// 停用 TIP；内部清理可因重入延后到公寓更新窗口重试。
+    /// 停用 TIP；内部清理可因重入延后到 compartment 更新窗口重试。
     fn Deactivate(&self) -> Result<()> {
         boundary::guard(None, || {
             self.deactivate_internal();

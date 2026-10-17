@@ -1,11 +1,11 @@
 //! 管理 TIP 与 TSF 线程管理器之间的激活、焦点订阅和停用清理。
 //!
 //! 注册过程按步骤建立 COM sink，并在中途失败时撤销已完成的订阅；清理过程先使回调失效，
-//! 再以可重入安全的方式提取资源。若锁正被同步回调占用，资源保持原位并由公寓更新窗口重试。
+//! 再以可重入安全的方式提取资源。若锁正被同步回调占用，资源保持原位并由 compartment 更新窗口重试。
 use super::*;
 
 impl TextService {
-    /// 完成 TSF 激活：建立基础订阅、启动公寓更新窗口、尽力注册语言栏并订阅焦点上下文。
+    /// 完成 TSF 激活：建立基础订阅、启动 compartment 更新窗口、尽力注册语言栏并订阅焦点上下文。
     ///
     /// 语言栏注册失败只记录警告，不阻止 TIP 输入；其他必要步骤失败则调用统一停用逻辑
     /// 回滚已建立的状态。`owner` 的 COM 引用用于保活服务对象及更新窗口回调目标。
@@ -46,7 +46,7 @@ impl TextService {
     /// 注册线程管理器、键盘和线程焦点 sink，并初始化本次激活的连接状态。
     ///
     /// 方法先清理旧激活，再依次订阅；任一后续注册失败都会撤销此前成功的订阅。只有资源
-    /// 和初始输入/显示属性加载成功后才发布 `activated`。调用方需在 TSF 所属公寓中执行。
+    /// 和初始输入/显示属性加载成功后才发布 `activated`。调用方需在 TSF 所属 compartment 中执行。
     pub(super) fn activate_with_thread_manager(
         &self,
         thread_mgr: Ref<'_, ITfThreadMgr>,
@@ -178,7 +178,7 @@ impl TextService {
             }
         }
         // 先取得全部服务锁再提取资源；重入导致锁不可用时，所有资源仍由服务持有，
-        // 后续由 TSF 公寓定时窗口重试。
+        // 后续由 TSF  compartment 定时窗口重试。
         let extracted = (|| {
             let mut bar = try_teardown(&self.language_bar)?;
             let mut rpc = try_teardown(&self.rpc)?;
@@ -253,15 +253,15 @@ impl TextService {
         cleanup(|| drop(window));
     }
 
-    /// 在 TSF 公寓创建维护窗口，并将其句柄发布给服务及各上下文 RPC。
+    /// 在 TSF  compartment 创建维护窗口，并将其句柄发布给服务及各上下文 RPC。
     ///
-    /// 窗口回调与创建、销毁均在同一公寓执行。闭包通过服务对象的原始地址访问状态，
+    /// 窗口回调与创建、销毁均在同一 compartment 执行。闭包通过服务对象的原始地址访问状态，
     /// 其有效期由捕获的 COM `session` 引用保证；停用必须先完成清理并销毁窗口，才能释放
     /// 其引用的服务状态。定时回调负责重试停用、清理失效上下文、同步安全字段及语言栏，
     /// 并安排 TSF 编辑事务；每轮错误由边界守卫隔离。
     pub(super) fn start_update_window(&self, session: IUnknown) -> Result<()> {
         let service = self as *const TextService;
-        // 捕获的 COM 引用保活服务分配；窗口在 TSF 公寓创建、派发和销毁，停用会在释放
+        // 捕获的 COM 引用保活服务分配；窗口在 TSF  compartment 创建、派发和销毁，停用会在释放
         // 服务状态前显式销毁窗口。
         let window = update_window::UpdateWindow::new(move || unsafe {
             let service = &*service;

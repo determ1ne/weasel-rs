@@ -1,6 +1,6 @@
 //! 执行提交给 TSF 的单个编辑任务，并隔离停用、重新激活前后的异步回调。
 //!
-//! 每个会话持有自己的待处理任务、票据和服务代次；迟到或重复的 COM 回调不能
+//! 每个会话持有自己的待处理任务、 ticket 和服务代次；迟到或重复的 COM 回调不能
 //! 消费其他请求，也不能在新一轮激活中使用旧上下文或编辑 cookie。
 use super::*;
 
@@ -13,7 +13,7 @@ pub(super) struct ResponseEdit {
     pending: Mutex<Option<PendingEdit>>,
     /// 创建本会话时的服务激活代次。
     generation: u64,
-    /// 调度器为此请求分配的编辑票据。
+    /// 调度器为此请求分配的编辑 ticket 。
     ticket: u64,
     // Keeps `service` alive even after its pending task has been consumed.
     _owner: IUnknown,

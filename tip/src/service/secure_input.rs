@@ -20,9 +20,9 @@ const MAX_INPUT_SCOPES: u32 = 64;
 #[derive(Default)]
 /// 合并同一上下文的密码字段探测，并使已被替代的回调失效。
 pub(super) struct SecureProbeSchedule {
-    /// 单调递增的本地序号；回绕不影响当前待处理票据的判等。
+    /// 单调递增的本地序号；回绕不影响当前待处理 ticket 的判等。
     serial: u64,
-    /// 唯一有效的待处理探测票据，以及它是否已提交给 TSF。
+    /// 唯一有效的待处理探测 ticket ，以及它是否已提交给 TSF。
     pending: Option<(u64, bool)>,
 }
 
@@ -203,13 +203,13 @@ fn context_rejects_tip(context: &ITfContext) -> bool {
 }
 
 #[implement(ITfEditSession)]
-/// 在 TSF 读会话中探测密码字段；回调只对创建时的票据和上下文代次生效。
+/// 在 TSF 读会话中探测密码字段；回调只对创建时的 ticket 和上下文代次生效。
 struct SecureFieldProbe {
     /// 由 `_owner` 保活的文本服务对象地址。
     service: *const TextService,
     /// 探测目标；回调前后均以该上下文状态核验存活和代次。
     state: Arc<ContextState>,
-    /// 本探测在调度器中的唯一票据。
+    /// 本探测在调度器中的唯一 ticket 。
     ticket: u64,
     /// 创建会话时记录的上下文代次，防止旧焦点探测写回新状态。
     generation: u64,
@@ -219,7 +219,7 @@ struct SecureFieldProbe {
 }
 
 impl Drop for SecureFieldProbe {
-    /// 若 TSF 丢弃会话而未执行，撤销仍属于本探测的待处理票据。
+    /// 若 TSF 丢弃会话而未执行，撤销仍属于本探测的待处理 ticket 。
     fn drop(&mut self) {
         if let Ok(mut schedule) = self.state.secure_probe.try_lock() {
             schedule.take(self.ticket);
