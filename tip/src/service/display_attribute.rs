@@ -120,7 +120,7 @@ impl IEnumTfDisplayAttributeInfo_Impl for DisplayAttributeEnumerator_Impl {
 
             if self
                 .index
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |index| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |index| {
                     (index == 0).then_some(1)
                 })
                 .is_ok()

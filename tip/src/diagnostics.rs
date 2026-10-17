@@ -203,7 +203,7 @@ impl Recorder {
         let dialog_guard = Dialog(dialog.is_some());
         // Separate fault record survives even if the ring is temporarily busy.
         if WRITERS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n < 2).then_some(n + 1)
             })
             .is_err()
