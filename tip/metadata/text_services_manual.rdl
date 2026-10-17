@@ -10,7 +10,11 @@ mod Windows {
         #[repr(i32)]
         enum InputScopeManual {
             IS_PASSWORD = 31,
+            IS_PRIVATE = 61,
             IS_NUMERIC_PASSWORD = 63,
+            IS_NUMERIC_PIN = 64,
+            IS_ALPHANUMERIC_PIN = 65,
+            IS_ALPHANUMERIC_PIN_SET = 66,
         }
 
         // InputScope.h is absent from the default Win32 metadata set.
@@ -73,6 +77,10 @@ mod Windows {
                     0x34b45670_7526_11d2_a147_00105a2799b5;
                 const GUID_PROP_INPUTSCOPE: GUID =
                     0x1713dd5a_68e7_4a5b_9af6_592a595c778d;
+                const GUID_COMPARTMENT_EMPTYCONTEXT: GUID =
+                    0xd7487dbf_804e_41c5_894d_ad96fd4eea13;
+                const GUID_COMPARTMENT_KEYBOARD_DISABLED: GUID =
+                    0x71a5b253_1951_466b_9fbc_9c8808fa84f2;
 
                 #[repr(i32)]
                 enum TfAnchorManual {

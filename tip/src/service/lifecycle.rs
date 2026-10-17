@@ -128,7 +128,7 @@ impl TextService {
         };
         self.focus_context(next.clone())?;
         if let Some(state) = next {
-            self.request_secure_field_probe(&state, edit_sink.cast()?, false)?;
+            self.queue_secure_field_probe(&state)?;
         }
         Ok(())
     }
@@ -288,6 +288,7 @@ impl TextService {
                     return Ok(());
                 }
                 service.drain_context_updates(&session)?;
+                service.dispatch_secure_field_probes(&session)?;
                 service.reconcile_secure_field()?;
                 service.refresh_language_bar()?;
                 service.schedule_edit()?;

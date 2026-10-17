@@ -28,7 +28,7 @@ impl TextService {
             .transpose()?
             .is_some_and(|changed| changed.as_bool());
         if selection_changed {
-            self.refresh_secure_field_from_cookie(&state, ec);
+            self.queue_secure_field_probe(&state)?;
         }
         // Start/Update/End are separate write sessions. Do not interpret the
         // temporary empty range between our own steps as a host cancellation.

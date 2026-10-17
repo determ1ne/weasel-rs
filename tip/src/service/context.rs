@@ -219,7 +219,7 @@ impl TextService {
             host_selection: Mutex::new(None),
             route: Mutex::new(ResponseRoute::default()),
             input_mode: Mutex::new(None),
-            secure_field: AtomicU8::new(secure_input::UNKNOWN),
+            secure_field: AtomicU8::new(secure_input::UNAVAILABLE),
             secure_probe: Mutex::default(),
             secure_bypass_active: AtomicBool::new(false),
             cookies: Mutex::new(Vec::new()),

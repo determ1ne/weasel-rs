@@ -73,12 +73,14 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
         })
     }
 
-    /// 新上下文压栈时建立会话状态、安排安全字段探测并重新解析当前焦点。
+    /// 新上下文压栈时建立会话状态并重新解析当前焦点。
+    ///
+    /// 刚压栈的 context 可能仍是宿主正在构造的临时对象；此处不读取它的
+    /// InputScope，后续只对真正取得焦点的栈顶 context 安排探测。
     fn OnPushContext(&self, pic: Ref<'_, ITfContext>) -> Result<()> {
         boundary::guard(Some(&self.faulted), || {
             if let Some(context) = pic.to_owned() {
-                let state = self.ensure_context(context, &self.to_interface())?;
-                self.request_secure_field_probe(&state, self.to_interface(), false)?;
+                self.ensure_context(context, &self.to_interface())?;
             }
             self.subscribe_to_focused_context(self.to_interface(), self.to_interface())
         })

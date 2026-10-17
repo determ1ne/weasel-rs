@@ -1,15 +1,15 @@
 //! 在 TSF 读编辑会话中检查当前选区的输入范围，并将密码字段状态保存在文档上下文中。
-//!
-//! 状态尚未探测或探测结果失效时按安全状态处理；探测只在有效的编辑 cookie
-//! 内访问文本存储，异步结果则通过票据和上下文代次避免覆盖更新状态。
 use super::*;
 use crate::bindings::{
-    CoTaskMemFree, GUID_PROP_INPUTSCOPE, IS_NUMERIC_PASSWORD, IS_PASSWORD, InputScopeManual,
-    TF_DEFAULT_SELECTION, TF_ES_SYNC, VariantClear,
+    CoTaskMemFree, GUID_COMPARTMENT_EMPTYCONTEXT, GUID_COMPARTMENT_KEYBOARD_DISABLED,
+    GUID_PROP_INPUTSCOPE, IS_ALPHANUMERIC_PIN, IS_ALPHANUMERIC_PIN_SET, IS_NUMERIC_PASSWORD,
+    IS_NUMERIC_PIN, IS_PASSWORD, IS_PRIVATE, ITfCompartmentMgr, InputScopeManual,
+    TF_DEFAULT_SELECTION, VariantClear,
 };
 use weasel_common::message::ContextAction;
 
-pub(super) const UNKNOWN: u8 = 0;
+/// 宿主未提供、尚未准备好或暂时无法读取 InputScope。
+pub(super) const UNAVAILABLE: u8 = 0;
 /// 已探测为普通文本字段。
 const NORMAL: u8 = 1;
 /// 已探测为密码或数字密码字段。
@@ -22,24 +22,34 @@ const MAX_INPUT_SCOPES: u32 = 64;
 pub(super) struct SecureProbeSchedule {
     /// 单调递增的本地序号；回绕不影响当前待处理票据的判等。
     serial: u64,
-    /// 唯一有效的待处理探测票据。
-    pending: Option<u64>,
+    /// 唯一有效的待处理探测票据，以及它是否已提交给 TSF。
+    pending: Option<(u64, bool)>,
 }
 
 impl SecureProbeSchedule {
-    /// 请求探测；`replace` 为真时以新票据取代旧请求。
-    fn request(&mut self, replace: bool) -> Option<u64> {
-        if self.pending.is_some() && !replace {
+    /// 将探测排入 TIP 消息窗口；已有请求尚未执行时合并本次请求。
+    fn queue(&mut self) -> Option<u64> {
+        if self.pending.is_some() {
             return None;
         }
         self.serial = self.serial.wrapping_add(1);
-        self.pending = Some(self.serial);
+        self.pending = Some((self.serial, false));
         Some(self.serial)
     }
 
-    /// 仅消费当前票据，防止迟到的旧会话清除新请求。
+    /// 取得尚未提交给 TSF 的 ticket ，并阻止同一请求被重复提交。
+    fn submit(&mut self) -> Option<u64> {
+        let (ticket, submitted) = self.pending.as_mut()?;
+        if *submitted {
+            return None;
+        }
+        *submitted = true;
+        Some(*ticket)
+    }
+
+    /// 仅消费当前 ticket ，防止迟到的旧会话清除新请求。
     fn take(&mut self, ticket: u64) -> bool {
-        if self.pending == Some(ticket) {
+        if self.pending.is_some_and(|pending| pending.0 == ticket) {
             self.pending = None;
             true
         } else {
@@ -85,50 +95,111 @@ fn input_scope_unknown(value: &mut VARIANT) -> Option<IUnknown> {
         }
         // Keep our own COM reference and let VariantClear release the one
         // owned by the VARIANT; never mutate an active union member by hand.
-        (&*inner.Anonymous.punkVal).clone()
+        (*inner.Anonymous.punkVal).clone()
     }
 }
 
-/// 读取当前选区的应用输入范围属性。缺少属性或不支持该接口视为普通文本；
-/// TSF 调用或返回数组越界等结构异常则作为错误交给编辑会话边界处理。
-fn query_secure_field(context: &ITfContext, ec: TfEditCookie) -> Result<bool> {
-    let Some(range) = selected_range(context, ec)? else {
-        return Ok(false);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SecureFieldState {
+    Unavailable,
+    Normal,
+    Secure,
+}
+
+impl SecureFieldState {
+    fn stored(self) -> u8 {
+        match self {
+            Self::Unavailable => UNAVAILABLE,
+            Self::Normal => NORMAL,
+            Self::Secure => SECURE,
+        }
+    }
+}
+
+/// 读取当前选区的应用输入范围属性。
+///
+/// 查询以选区 range 实际所属的 context 为准。
+fn query_secure_field(context: &ITfContext, ec: TfEditCookie) -> SecureFieldState {
+    let Ok(Some(range)) = selected_range(context, ec) else {
+        return SecureFieldState::Unavailable;
     };
-    // Missing app properties are normal for ordinary Win32 text stores.
+    let Ok(property_context) = (unsafe { range.GetContext() }) else {
+        return SecureFieldState::Unavailable;
+    };
     let Ok(property): Result<ITfReadOnlyProperty> =
-        (unsafe { context.GetAppProperty(&GUID_PROP_INPUTSCOPE) })
+        (unsafe { property_context.GetAppProperty(&GUID_PROP_INPUTSCOPE) })
     else {
-        return Ok(false);
+        return SecureFieldState::Unavailable;
     };
     let Ok(mut value) = (unsafe { property.GetValue(ec, &range) }) else {
-        return Ok(false);
+        return SecureFieldState::Unavailable;
     };
     let unknown = input_scope_unknown(&mut value);
     unsafe {
         let _ = VariantClear(&mut value);
     }
     let Some(unknown) = unknown else {
-        return Ok(false);
+        return SecureFieldState::Unavailable;
     };
     let Ok(input_scope) = unknown.cast::<ITfInputScope>() else {
-        return Ok(false);
+        return SecureFieldState::Unavailable;
     };
     let mut scopes = std::ptr::null_mut();
     let mut count = 0;
-    unsafe { input_scope.GetInputScopes(&mut scopes, &mut count).ok()? };
+    if unsafe { input_scope.GetInputScopes(&mut scopes, &mut count) }.is_err() {
+        return SecureFieldState::Unavailable;
+    }
     let scopes = ScopeBuffer(scopes);
     if count > MAX_INPUT_SCOPES || (count != 0 && scopes.0.is_null()) {
-        return Err(Error::from_hresult(boundary::E_FAIL));
+        return SecureFieldState::Unavailable;
     }
     let values = if count == 0 {
         &[][..]
     } else {
         unsafe { std::slice::from_raw_parts(scopes.0, count as usize) }
     };
-    Ok(values
-        .iter()
-        .any(|scope| matches!(*scope, IS_PASSWORD | IS_NUMERIC_PASSWORD)))
+    if values.iter().any(|scope| {
+        matches!(
+            *scope,
+            IS_PASSWORD
+                | IS_PRIVATE
+                | IS_NUMERIC_PASSWORD
+                | IS_NUMERIC_PIN
+                | IS_ALPHANUMERIC_PIN
+                | IS_ALPHANUMERIC_PIN_SET
+        )
+    }) {
+        SecureFieldState::Secure
+    } else {
+        SecureFieldState::Normal
+    }
+}
+
+/// 读取 context 级 TSF compartment 的布尔值；缺失和格式异常按未设置处理。
+fn context_compartment_flag(context: &ITfContext, guid: &GUID) -> bool {
+    let Ok(compartments) = context.cast::<ITfCompartmentMgr>() else {
+        return false;
+    };
+    let Ok(compartment) = (unsafe { compartments.GetCompartment(guid) }) else {
+        return false;
+    };
+    let Ok(mut value) = (unsafe { compartment.GetValue() }) else {
+        return false;
+    };
+    let enabled = unsafe {
+        let inner = &*value.Anonymous.Anonymous;
+        inner.vt == VARTYPE(VT_I4 as u16) && inner.Anonymous.lVal != 0
+    };
+    unsafe {
+        let _ = VariantClear(&mut value);
+    }
+    enabled
+}
+
+/// 宿主明确要求该 context 不接受键盘 TIP 时始终直通。
+fn context_rejects_tip(context: &ITfContext) -> bool {
+    context_compartment_flag(context, &GUID_COMPARTMENT_KEYBOARD_DISABLED)
+        || context_compartment_flag(context, &GUID_COMPARTMENT_EMPTYCONTEXT)
 }
 
 #[implement(ITfEditSession)]
@@ -172,7 +243,7 @@ impl ITfEditSession_Impl for SecureFieldProbe_Impl {
             {
                 return Ok(());
             }
-            let secure = query_secure_field(&self.state.context, ec)?;
+            let secure = query_secure_field(&self.state.context, ec);
             let service = unsafe { &*self.service };
             service.set_secure_field(&self.state, secure);
             Ok(())
@@ -181,60 +252,78 @@ impl ITfEditSession_Impl for SecureFieldProbe_Impl {
 }
 
 impl TextService {
-    /// 安排密码字段读取。键盘边界可用同步读会话替代先前的异步焦点探测，
-    /// 避免按键决策依赖尚未执行的旧回调。
-    pub(super) fn request_secure_field_probe(
-        &self,
-        state: &Arc<ContextState>,
-        owner: IUnknown,
-        synchronous: bool,
-    ) -> Result<()> {
+    /// 将密码字段探测投递到 TIP 消息窗口。
+    ///
+    /// `TF_ES_ASYNCDONTCARE` 仍允许 TSF 当场执行编辑会话，因此不能直接从
+    /// `OnPushContext`、`OnSetFocus` 或 `OnEndEdit` 等宿主回调中调用
+    /// `RequestEditSession`。先经过窗口消息队列，保证读取应用属性时原回调已经返回。
+    pub(super) fn queue_secure_field_probe(&self, state: &Arc<ContextState>) -> Result<()> {
         if !self.activated.load(Ordering::Acquire)
             || !state.alive.load(Ordering::Acquire)
             || state.suspended.load(Ordering::Acquire)
         {
             return Ok(());
         }
+        let Some(ticket) = self.lock(&state.secure_probe)?.queue() else {
+            return Ok(());
+        };
+        let hwnd = self
+            .lock(&self.update_window)?
+            .as_ref()
+            .map(|window| window.hwnd);
+        let posted = hwnd.is_some_and(|hwnd| unsafe {
+            bindings::PostMessageW(
+                Some(hwnd),
+                update_window::UPDATE_MESSAGE,
+                WPARAM(0),
+                LPARAM(0),
+            )
+            .as_bool()
+        });
+        if !posted {
+            self.lock(&state.secure_probe)?.take(ticket);
+        }
+        Ok(())
+    }
+
+    /// 在 TIP 自有窗口消息中把已排队的探测提交给 TSF。
+    pub(super) fn dispatch_secure_field_probes(&self, owner: &IUnknown) -> Result<()> {
         let Some(tid) = *self.lock(&self.keystroke_client_id)? else {
             return Ok(());
         };
-        // A key callback must not wait for an older asynchronous focus probe:
-        // supersede it with a synchronous read and let the old callback no-op.
-        let Some(ticket) = self.lock(&state.secure_probe)?.request(synchronous) else {
-            return Ok(());
-        };
-        let probe: ITfEditSession = SecureFieldProbe {
-            service: self,
-            state: state.clone(),
-            ticket,
-            generation: state.generation.load(Ordering::Acquire),
-            _owner: owner,
-            _module: ModuleLease::new(),
-        }
-        .into();
-        let flags = if synchronous {
-            TF_ES_SYNC | TF_ES_READ
-        } else {
-            TF_ES_ASYNCDONTCARE | TF_ES_READ
-        };
-        let result = unsafe { state.context.RequestEditSession(tid, &probe, flags) }
+        let states = self.lock(&self.contexts)?.clone();
+        for state in states {
+            if !state.alive.load(Ordering::Acquire) || state.suspended.load(Ordering::Acquire) {
+                continue;
+            }
+            let Some(ticket) = self.lock(&state.secure_probe)?.submit() else {
+                continue;
+            };
+            let probe: ITfEditSession = SecureFieldProbe {
+                service: self,
+                state: state.clone(),
+                ticket,
+                generation: state.generation.load(Ordering::Acquire),
+                _owner: owner.clone(),
+                _module: ModuleLease::new(),
+            }
+            .into();
+            let result = unsafe {
+                state
+                    .context
+                    .RequestEditSession(tid, &probe, TF_ES_ASYNCDONTCARE | TF_ES_READ)
+            }
             .and_then(|session| session.ok());
-        if result.is_err() {
-            self.lock(&state.secure_probe)?.take(ticket);
+            if result.is_err() {
+                self.lock(&state.secure_probe)?.take(ticket);
+            }
         }
-        result
-    }
-
-    /// 在已有编辑 cookie 中刷新密码字段状态；探测失败时保留原状态。
-    pub(super) fn refresh_secure_field_from_cookie(&self, state: &ContextState, ec: TfEditCookie) {
-        if let Ok(secure) = query_secure_field(&state.context, ec) {
-            self.set_secure_field(state, secure);
-        }
+        Ok(())
     }
 
     /// 原子更新字段状态；只有状态实际变化时才通知更新窗口重新协调输入。
-    fn set_secure_field(&self, state: &ContextState, secure: bool) {
-        let next = if secure { SECURE } else { NORMAL };
+    fn set_secure_field(&self, state: &ContextState, secure: SecureFieldState) {
+        let next = secure.stored();
         if state.secure_field.swap(next, Ordering::AcqRel) == next {
             return;
         }
@@ -264,21 +353,36 @@ impl TextService {
     pub(super) fn secure_field_visible(&self, state: &ContextState) -> bool {
         self.secure_mode.load(Ordering::Acquire)
             || state.secure_field.load(Ordering::Acquire) == SECURE
+            || context_rejects_tip(&state.context)
     }
 
-    /// 只有当前 RPC 连接代次明确允许时，才允许在密码字段中使用 Rime。
-    pub(super) fn allow_rime_for_secure_field(&self, state: &ContextState) -> Result<bool> {
+    /// 读取当前 RPC 连接代次对应的用户安全字段策略。
+    fn secure_policy_allows_rime(&self, state: &ContextState) -> Result<bool> {
         let epoch = self.lock(&state.rpc)?.connection_epoch();
         Ok(epoch != 0
             && self.secure_policy_epoch.load(Ordering::Acquire) == epoch
             && self.allow_rime_in_secure_fields.load(Ordering::Acquire))
     }
 
-    /// 判断安全策略是否要求绕过 Rime；尚未知晓的字段状态同样采取保守处理。
+    /// 只有宿主未禁用 TIP 且当前连接明确允许时，才允许在安全字段中使用 Rime。
+    pub(super) fn allow_rime_for_secure_field(&self, state: &ContextState) -> Result<bool> {
+        if context_rejects_tip(&state.context) {
+            return Ok(false);
+        }
+        self.secure_policy_allows_rime(state)
+    }
+
+    /// 判断安全策略是否要求绕过 Rime。
+    ///
+    /// context 禁用 compartment 不受用户密码字段选项覆盖；InputScope 不可用
+    /// 则不阻断输入，等待后续焦点或编辑通知重新探测。
     pub(super) fn should_bypass_secure_field(&self, state: &ContextState) -> Result<bool> {
-        Ok(!self.allow_rime_for_secure_field(state)?
+        if context_rejects_tip(&state.context) {
+            return Ok(true);
+        }
+        Ok(!self.secure_policy_allows_rime(state)?
             && (self.secure_mode.load(Ordering::Acquire)
-                || state.secure_field.load(Ordering::Acquire) != NORMAL))
+                || state.secure_field.load(Ordering::Acquire) == SECURE))
     }
 
     /// 将焦点上下文与安全策略对齐；首次进入绕过状态时取消远端组合，且只取消一次。
@@ -292,10 +396,13 @@ impl TextService {
         let Some(state) = state else {
             return Ok(());
         };
-        // Unknown is fail-closed only at the key boundary. Do not invalidate
-        // the context while its asynchronous focus probe is still pending.
-        let secure = self.secure_field_visible(&state);
-        let bypass = secure && !self.allow_rime_for_secure_field(&state)?;
+        // InputScope 不可用时不影响普通输入；仅已确认的安全字段或宿主明确
+        // 禁用 TIP 时才进入绕过状态。
+        let rejected = context_rejects_tip(&state.context);
+        let secure = rejected
+            || self.secure_mode.load(Ordering::Acquire)
+            || state.secure_field.load(Ordering::Acquire) == SECURE;
+        let bypass = secure && (rejected || !self.secure_policy_allows_rime(&state)?);
         if !bypass {
             state.secure_bypass_active.store(false, Ordering::Release);
             return Ok(());

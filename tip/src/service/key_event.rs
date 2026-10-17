@@ -181,11 +181,6 @@ impl TextService {
             self.lock(&self.tested_key)?.take();
             return Ok(BOOL(0));
         }
-        if state.secure_field.load(Ordering::Acquire) == secure_input::UNKNOWN {
-            // Resolve the first key synchronously. If the host refuses a read
-            // session, fail closed for this key and retry on the next callback.
-            let _ = self.request_secure_field_probe(&state, session.clone(), true);
-        }
         if self.should_bypass_secure_field(&state)? {
             self.lock(&self.tested_key)?.take();
             self.reconcile_secure_field()?;
