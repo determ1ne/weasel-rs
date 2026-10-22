@@ -180,26 +180,6 @@ $releaseBodyHtml = if ([string]::IsNullOrWhiteSpace($releaseBody)) {
         -ContentType 'application/json; charset=utf-8' -Body $markdownRequest)
 }
 
-$downloadCards = foreach ($download in $downloads) {
-    $asset = $download.Asset
-    $architecture = ConvertTo-HtmlText $download.Architecture.ToUpperInvariant()
-    $kind = ConvertTo-HtmlText $download.Kind
-    $description = ConvertTo-HtmlText $download.Description
-    $assetName = ConvertTo-HtmlText $asset.name
-    $downloadUrl = ConvertTo-HtmlText $asset.browser_download_url
-    $size = ConvertTo-HtmlText (Format-FileSize $asset.size)
-    @"
-        <article class="download-card">
-          <div>
-            <h3>$architecture · $kind</h3>
-            <p>$description</p>
-            <small>$assetName · $size</small>
-          </div>
-          <a class="download-button" href="$downloadUrl">下载安装包</a>
-        </article>
-"@
-}
-$downloadCardsHtml = $downloadCards -join "`n"
 $releaseTitle = if ([string]::IsNullOrWhiteSpace([string]$release.name)) {
     "小狼毫RS $version"
 } else {
@@ -267,12 +247,6 @@ $releaseNotesPage = @"
       <h1>$releaseTitleHtml</h1>
       <p class="meta">版本 $tagHtml · 发布于 $publishedAtHtml</p>
     </header>
-    <section>
-      <h2>下载</h2>
-      <div class="downloads">
-$downloadCardsHtml
-      </div>
-    </section>
     <section class="release-body">
       <h2>更新说明</h2>
 $releaseBodyHtml
