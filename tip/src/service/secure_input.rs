@@ -349,27 +349,12 @@ impl TextService {
         }
     }
 
-    /// 返回当前字段是否应按密码字段对外呈现，包含全局安全模式。
-    pub(super) fn secure_field_visible(&self, state: &ContextState) -> bool {
-        self.secure_mode.load(Ordering::Acquire)
-            || state.secure_field.load(Ordering::Acquire) == SECURE
-            || context_rejects_tip(&state.context)
-    }
-
     /// 读取当前 RPC 连接代次对应的用户安全字段策略。
     fn secure_policy_allows_rime(&self, state: &ContextState) -> Result<bool> {
         let epoch = self.lock(&state.rpc)?.connection_epoch();
         Ok(epoch != 0
             && self.secure_policy_epoch.load(Ordering::Acquire) == epoch
             && self.allow_rime_in_secure_fields.load(Ordering::Acquire))
-    }
-
-    /// 只有宿主未禁用 TIP 且当前连接明确允许时，才允许在安全字段中使用 Rime。
-    pub(super) fn allow_rime_for_secure_field(&self, state: &ContextState) -> Result<bool> {
-        if context_rejects_tip(&state.context) {
-            return Ok(false);
-        }
-        self.secure_policy_allows_rime(state)
     }
 
     /// 判断安全策略是否要求绕过 Rime。

@@ -116,8 +116,7 @@ impl LanguageBar {
             connected: AtomicBool::new(true),
             available: AtomicBool::new(false),
             suspended: AtomicBool::new(false),
-            secure_field: AtomicBool::new(false),
-            allow_rime_in_secure_fields: AtomicBool::new(false),
+            bypass_rime: AtomicBool::new(false),
             light_background: AtomicBool::new(taskbar_is_light()),
             _module: ModuleLease::new(),
         });
@@ -137,21 +136,12 @@ impl LanguageBar {
         ascii: Option<bool>,
         connection_failed: bool,
         suspended: bool,
-        secure_field: bool,
-        allow_rime_in_secure_fields: bool,
+        bypass_rime: bool,
     ) -> Result<()> {
         let suspended_changed =
             self.button.suspended.swap(suspended, Ordering::AcqRel) != suspended;
-        let secure_changed = self
-            .button
-            .secure_field
-            .swap(secure_field, Ordering::AcqRel)
-            != secure_field;
-        let secure_policy_changed = self
-            .button
-            .allow_rime_in_secure_fields
-            .swap(allow_rime_in_secure_fields, Ordering::AcqRel)
-            != allow_rime_in_secure_fields;
+        let bypass_changed =
+            self.button.bypass_rime.swap(bypass_rime, Ordering::AcqRel) != bypass_rime;
         {
             let mut target = self
                 .button
@@ -184,8 +174,7 @@ impl LanguageBar {
             || connection_changed
             || availability_changed
             || theme_changed
-            || secure_changed
-            || secure_policy_changed;
+            || bypass_changed;
         if !changed {
             return Ok(());
         }
@@ -209,7 +198,7 @@ impl LanguageBar {
 impl LanguageBar {
     /// 将按钮切换为暂停展示态，同时清除可操作上下文。
     fn suspend(&self) -> Result<()> {
-        self.update(None, None, true, true, false, false)
+        self.update(None, None, true, true, false)
     }
 }
 
@@ -245,10 +234,8 @@ struct ModeButton {
     available: AtomicBool,
     /// 服务暂停状态；暂停时保留语言栏可见性以供诊断入口使用。
     suspended: AtomicBool,
-    /// 当前焦点是否位于安全输入字段。
-    secure_field: AtomicBool,
-    /// 用户是否允许 Rime 处理安全输入字段；用于明确提示风险。
-    allow_rime_in_secure_fields: AtomicBool,
+    /// 当前焦点是否按输入策略绕过 Rime；绕过时展示英文且禁止模式切换。
+    bypass_rime: AtomicBool,
     /// 最近读取的任务栏背景主题，用于选择对比度合适的资源图标。
     light_background: AtomicBool,
     /// 保证 COM 对象存活期间 TIP DLL 不会被卸载。
@@ -256,12 +243,12 @@ struct ModeButton {
 }
 
 impl ModeButton {
-    /// 按暂停、安全字段、未知模式和已知模式的优先级生成紧凑按钮文字。
+    /// 按暂停、直通输入、未知模式和已知模式的优先级生成紧凑按钮文字。
     fn text(&self) -> &'static str {
         if self.suspended.load(Ordering::Acquire) {
             "!"
-        } else if self.secure_field.load(Ordering::Acquire) {
-            "密"
+        } else if self.bypass_rime.load(Ordering::Acquire) {
+            "英"
         } else if !self.mode_known.load(Ordering::Acquire) {
             "…"
         } else if self.ascii.load(Ordering::Acquire) {
@@ -313,17 +300,13 @@ impl ITfLangBarItem_Impl for ModeButton_Impl {
         boundary::guard(None, || Err(Error::from_hresult(E_NOTIMPL)))
     }
 
-    /// 根据连接、输入模式和安全字段策略生成面向用户的状态提示。
+    /// 根据连接和输入模式生成状态提示；直通输入使用英文模式提示。
     fn GetTooltipString(&self) -> Result<BSTR> {
         boundary::guard(None, || {
             Ok(BSTR::from(if self.suspended.load(Ordering::Acquire) {
                 "输入服务已暂停；Shift＋右键可查看诊断信息"
-            } else if self.secure_field.load(Ordering::Acquire) {
-                if self.allow_rime_in_secure_fields.load(Ordering::Acquire) {
-                    "您选择让 Rime 处理密码输入。如果没有特殊需求，您应该关闭此选项。在设置中了解详情。"
-                } else {
-                    "正在输入密码"
-                }
+            } else if self.bypass_rime.load(Ordering::Acquire) {
+                "英文模式"
             } else if !self.connected.load(Ordering::Acquire) {
                 "无法连接到 Rime"
             } else if !self.mode_known.load(Ordering::Acquire) {
@@ -338,10 +321,10 @@ impl ITfLangBarItem_Impl for ModeButton_Impl {
 }
 
 impl ITfLangBarItemButton_Impl for ModeButton_Impl {
-    /// 右键打开命令菜单；左键仅对存活的普通焦点上下文异步发出模式切换。
+    /// 右键打开命令菜单；左键对允许 Rime 处理的存活焦点上下文异步发出模式切换。
     ///
     /// 该方法处于 TSF/COM 调用边界，绝不等待 RPC 响应；锁采用 `try_lock`，锁冲突以
-    /// HRESULT 错误返回。安全字段、暂停态、失效上下文均禁止切换。
+    /// HRESULT 错误返回。直通输入、暂停态、失效上下文均禁止切换。
     fn OnClick(&self, click: TfLBIClick, point: &POINT, _area: *const RECT) -> Result<()> {
         boundary::guard(None, || {
             if click == TF_LBI_CLK_RIGHT {
@@ -350,7 +333,7 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
             if click != TF_LBI_CLK_LEFT
                 || !self.available.load(Ordering::Acquire)
                 || self.suspended.load(Ordering::Acquire)
-                || self.secure_field.load(Ordering::Acquire)
+                || self.bypass_rime.load(Ordering::Acquire)
             {
                 return Ok(());
             }
@@ -409,8 +392,7 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
                 self.ascii.load(Ordering::Acquire),
                 light_background,
                 self.mode_known.load(Ordering::Acquire),
-                self.secure_field.load(Ordering::Acquire),
-                self.allow_rime_in_secure_fields.load(Ordering::Acquire),
+                self.bypass_rime.load(Ordering::Acquire),
             )
         })
     }
@@ -476,22 +458,16 @@ fn icon_name(connected: bool, ascii: bool, light_background: bool) -> PCWSTR {
     }
 }
 
-/// 在普通图标规则上优先处理安全字段，并区分尚未同步的输入模式。
+/// 直通输入优先使用英文图标，其余情况区分尚未同步与已知的输入模式。
 fn mode_icon_name(
     connected: bool,
     ascii: bool,
     light_background: bool,
     known: bool,
-    secure_field: bool,
-    allow_rime_in_secure_fields: bool,
+    bypass_rime: bool,
 ) -> PCWSTR {
-    if secure_field {
-        return match (allow_rime_in_secure_fields, light_background) {
-            (false, true) => w!("KEY_DARK"),
-            (false, false) => w!("KEY_LIGHT"),
-            (true, true) => w!("KEY_ALERT_DARK"),
-            (true, false) => w!("KEY_ALERT_LIGHT"),
-        };
+    if bypass_rime {
+        return icon_name(true, true, light_background);
     }
     if connected && !known {
         w!("BRAND")
@@ -509,8 +485,7 @@ fn load_mode_icon(
     ascii: bool,
     light_background: bool,
     known: bool,
-    secure_field: bool,
-    allow_rime_in_secure_fields: bool,
+    bypass_rime: bool,
 ) -> Result<HICON> {
     let mut module = HMODULE::default();
     // GetModuleHandleW(None) would look in the host EXE, not our TIP DLL.
@@ -527,14 +502,7 @@ fn load_mode_icon(
     let handle = unsafe {
         LoadImageW(
             Some(module),
-            mode_icon_name(
-                connected,
-                ascii,
-                light_background,
-                known,
-                secure_field,
-                allow_rime_in_secure_fields,
-            ),
+            mode_icon_name(connected, ascii, light_background, known, bypass_rime),
             IMAGE_ICON as u32,
             GetSystemMetrics(SM_CXSMICON).max(1),
             GetSystemMetrics(SM_CYSMICON).max(1),
@@ -560,8 +528,7 @@ mod tests {
             connected: AtomicBool::new(true),
             available: AtomicBool::new(false),
             suspended: AtomicBool::new(false),
-            secure_field: AtomicBool::new(false),
-            allow_rime_in_secure_fields: AtomicBool::new(false),
+            bypass_rime: AtomicBool::new(false),
             light_background: AtomicBool::new(taskbar_is_light()),
             _module: ModuleLease::new(),
         })
@@ -679,31 +646,16 @@ mod tests {
                 BSTR::from(expected)
             );
         }
-        button.secure_field.store(true, Ordering::Release);
-        button
-            .allow_rime_in_secure_fields
-            .store(false, Ordering::Release);
-        assert_eq!(unsafe { item.GetText().unwrap() }, BSTR::from("密"));
+        button.bypass_rime.store(true, Ordering::Release);
+        assert_eq!(unsafe { item.GetText().unwrap() }, BSTR::from("英"));
         assert_eq!(
             unsafe { item.GetTooltipString().unwrap() },
-            BSTR::from("正在输入密码")
+            BSTR::from("英文模式")
         );
-        button
-            .allow_rime_in_secure_fields
-            .store(true, Ordering::Release);
-        assert!(
-            String::from_utf16_lossy(&unsafe { item.GetTooltipString().unwrap() })
-                .contains("应该关闭此选项")
-        );
-        for (allow, light, expected) in [
-            (false, true, "KEY_DARK"),
-            (false, false, "KEY_LIGHT"),
-            (true, true, "KEY_ALERT_DARK"),
-            (true, false, "KEY_ALERT_LIGHT"),
-        ] {
+        for (light, expected) in [(true, "EN_DARK"), (false, "EN_LIGHT")] {
             assert_eq!(
                 unsafe {
-                    mode_icon_name(true, false, light, true, true, allow)
+                    mode_icon_name(false, false, light, false, true)
                         .to_string()
                         .unwrap()
                 },
@@ -711,6 +663,21 @@ mod tests {
             );
             assert!(include_str!("../../icons.rc").contains(&format!("{expected} ICON ")));
         }
+        button.bypass_rime.store(false, Ordering::Release);
+        button.connected.store(true, Ordering::Release);
+        assert_eq!(unsafe { item.GetText().unwrap() }, BSTR::from("中"));
+        assert_eq!(
+            unsafe { item.GetTooltipString().unwrap() },
+            BSTR::from("中文模式")
+        );
+        assert_eq!(
+            unsafe {
+                mode_icon_name(true, false, true, true, false)
+                    .to_string()
+                    .unwrap()
+            },
+            "ZH_DARK"
+        );
     }
 
     #[test]
@@ -726,7 +693,7 @@ mod tests {
         for ascii in [false, true] {
             assert_eq!(
                 unsafe {
-                    mode_icon_name(true, ascii, true, false, false, false)
+                    mode_icon_name(true, ascii, true, false, false)
                         .to_string()
                         .unwrap()
                 },
@@ -734,7 +701,7 @@ mod tests {
             );
             assert_eq!(
                 unsafe {
-                    mode_icon_name(false, ascii, true, false, false, false)
+                    mode_icon_name(false, ascii, true, false, false)
                         .to_string()
                         .unwrap()
                 },
@@ -780,22 +747,19 @@ impl TextService {
         let suspended = state
             .as_ref()
             .is_some_and(|state| state.suspended.load(Ordering::Acquire));
-        let secure_field = state
-            .as_ref()
-            .is_some_and(|state| self.secure_field_visible(state));
-        let allow_rime_in_secure_fields = state
-            .as_ref()
-            .map(|state| self.allow_rime_for_secure_field(state))
-            .transpose()?
-            .unwrap_or(false);
-        if let Err(error) = bar.update(
-            state.as_ref(),
-            ascii,
-            connection_failed,
-            suspended,
-            secure_field,
-            allow_rime_in_secure_fields,
-        ) {
+        let bypass_rime = match &state {
+            Some(state) => self.should_bypass_secure_field(state),
+            None => Ok(false),
+        };
+        if let Err(error) = bypass_rime.and_then(|bypass_rime| {
+            bar.update(
+                state.as_ref(),
+                ascii,
+                connection_failed,
+                suspended,
+                bypass_rime,
+            )
+        }) {
             self.lock(&self.rpc)?
                 .log("warn", format!("language bar update failed: {error}"));
         }

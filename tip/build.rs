@@ -360,10 +360,6 @@ fn embed_icons() {
         ("EN_LIGHT_PATH", "en-light.ico"),
         ("ERROR_DARK_PATH", "error-dark.ico"),
         ("ERROR_LIGHT_PATH", "error-light.ico"),
-        ("KEY_ALERT_DARK_PATH", "key-alert-dark.ico"),
-        ("KEY_ALERT_LIGHT_PATH", "key-alert-light.ico"),
-        ("KEY_DARK_PATH", "key-dark.ico"),
-        ("KEY_LIGHT_PATH", "key-light.ico"),
         ("ZH_DARK_PATH", "zh-dark.ico"),
         ("ZH_LIGHT_PATH", "zh-light.ico"),
     ]
