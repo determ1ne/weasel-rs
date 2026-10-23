@@ -118,7 +118,7 @@ mod tests {
         let path = paths.user_data.join("weasel.custom.json");
         fs::write(
             &path,
-            br#"{"themeSettings":{"future":{"value":42}},"ascii_mode":true}"#,
+            br#"{"themeSettings":{"future":{"value":42}},"ascii_mode":true,"legacy":{"custom":7},"app_options":{"a.exe":{"custom":false}}}"#,
         )
         .unwrap();
         let mut doc = Document::load(&paths).unwrap();
@@ -126,6 +126,8 @@ mod tests {
         doc.save().unwrap();
         let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["themeSettings"]["future"]["value"], 42);
+        assert_eq!(saved["legacy"]["custom"], 7);
+        assert_eq!(saved["app_options"]["a.exe"]["custom"], false);
         assert!(saved.get("ascii_mode").is_none());
         fs::write(&path, b"{}").unwrap();
         assert!(doc.save().is_err());

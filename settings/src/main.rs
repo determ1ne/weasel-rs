@@ -17,6 +17,9 @@ use std::{cell::RefCell, collections::HashSet, rc::Rc};
 use weasel_common::process::RuntimePaths;
 slint::include_modules!();
 
+/// 状态区最多展开的配置警告条数，其余仅显示计数。
+const MAX_WARNING_DETAILS: usize = 5;
+
 /// 设置窗口的运行时模型；仅在 Slint 事件循环线程内访问。
 ///
 /// `document` 保存基础配置与用户覆盖，`fields`/`owners` 将 UI 行映射回目录分区；
@@ -327,14 +330,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !state.invalid.is_empty() || !state.module_errors.is_empty() {
                 return;
             }
-            for &index in &state.changed {
-                let section = &state.catalog.sections[index];
-                if let Err(error) = section
+            let mut warnings = Vec::new();
+            // 所有分区都报告未知字段，已知值错误仍只阻止本次修改的分区保存。
+            for (index, section) in state.catalog.sections.iter().enumerate() {
+                match section
                     .metadata
                     .validate(&form::effective(section, &state.document))
                 {
-                    ui.set_status(format!("{}：{error}", section.title).into());
-                    return;
+                    Ok(notices) => warnings.extend(
+                        notices
+                            .into_iter()
+                            .map(|notice| format!("{}：{notice}", section.title)),
+                    ),
+                    Err(error) if state.changed.contains(&index) => {
+                        ui.set_status(format!("{}：{error}", section.title).into());
+                        return;
+                    }
+                    Err(_) => {}
                 }
             }
             let config_changed = !state.changed.is_empty();
@@ -379,6 +391,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if messages.is_empty() {
                 messages.push("没有需要保存的修改。".to_owned());
+            }
+            if !warnings.is_empty() {
+                warnings.sort();
+                warnings.dedup();
+                let count = warnings.len();
+                messages.push(format!("警告：{count} 个未声明字段已保留，不影响保存。"));
+                messages.extend(warnings.into_iter().take(MAX_WARNING_DETAILS));
+                if count > MAX_WARNING_DETAILS {
+                    messages.push(format!("另有 {} 项未列出。", count - MAX_WARNING_DETAILS));
+                }
             }
             ui.set_status(messages.join("\n").into());
         });

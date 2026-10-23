@@ -103,14 +103,26 @@ impl Metadata {
         Ok(metadata)
     }
 
-    /// 检查配置值是否满足当前元数据中的 Schema。
+    /// 校验待保存配置，返回未声明字段的非阻断警告。
     ///
-    /// 每次调用都会重新检查公开元数据字段及输入值的边界，再执行校验；普通
-    /// 不匹配和资源/Schema 错误均返回 `Err`，其中错误文本包含失败位置或原因。
-    pub fn validate(&self, value: &Value) -> Result<(), String> {
+    /// 每次调用都会重新检查公开元数据字段及输入值的边界，再执行校验；
+    /// 已知字段不匹配和资源/Schema 错误均返回 `Err`。未声明字段保留原值，
+    /// 即使 `additionalProperties: false` 也仅警告；动态映射的值仍按其 Schema 校验。
+    pub fn validate(&self, value: &Value) -> Result<Vec<String>, String> {
         bounded(value)?;
         // 公共字段可能被调用者修改，每次验证都重新检查元数据。
-        self.engine()?.validate(value)
+        let engine = self.engine()?;
+        let mut warnings = Some(Vec::new());
+        let mut work = MAX_WORK;
+        match engine.check(engine.root, value, "$", 0, &mut work, &mut warnings)? {
+            Some(error) => Err(error),
+            None => {
+                let mut warnings = warnings.unwrap_or_default();
+                warnings.sort();
+                warnings.dedup();
+                Ok(warnings)
+            }
+        }
     }
 
     /// 用指定 Schema 探测值是否可接受，复用与配置校验相同的受限语义。
@@ -122,7 +134,7 @@ impl Metadata {
         let mut work = MAX_WORK;
         Ok(self
             .engine()?
-            .check(schema, value, "$", 0, &mut work)?
+            .check(schema, value, "$", 0, &mut work, &mut None)?
             .is_none())
     }
 
@@ -438,7 +450,7 @@ impl<'a> Engine<'a> {
     /// 使用独立工作量预算校验根 Schema；将普通不匹配转换为错误文本。
     fn validate(&self, value: &Value) -> Result<(), String> {
         let mut work = MAX_WORK;
-        match self.check(self.root, value, "$", 0, &mut work)? {
+        match self.check(self.root, value, "$", 0, &mut work, &mut None)? {
             None => Ok(()),
             Some(message) => Err(message),
         }
@@ -449,6 +461,7 @@ impl<'a> Engine<'a> {
     /// `Ok(None)` 表示匹配，`Ok(Some(...))` 表示普通不匹配；`Err` 专用于无效
     /// Schema、深度或工作量超限。组合分支会继续检查各分支，但任何 `Err` 都会
     /// 立即传播，不能因另一个分支匹配而被掩盖。`path` 使用 JSON Pointer 风格路径。
+    /// `warnings` 为 `None` 时严格校验，否则将未声明字段降为警告。
     fn check(
         &self,
         schema: &Value,
@@ -456,6 +469,7 @@ impl<'a> Engine<'a> {
         path: &str,
         depth: usize,
         work: &mut usize,
+        warnings: &mut Option<Vec<String>>,
     ) -> Result<Option<String>, String> {
         spend(work, 1)?;
         if depth > MAX_DEPTH {
@@ -471,7 +485,7 @@ impl<'a> Engine<'a> {
         }
         let obj = schema.as_object().ok_or("invalid schema")?;
         if let Some(r) = obj.get("$ref") {
-            if let Some(e) = self.check(self.resolve(r)?, value, path, depth + 1, work)? {
+            if let Some(e) = self.check(self.resolve(r)?, value, path, depth + 1, work, warnings)? {
                 return Ok(Some(e));
             }
         }
@@ -558,6 +572,7 @@ impl<'a> Engine<'a> {
                         &child_path,
                         depth + 1,
                         work,
+                        warnings,
                     )? {
                         return Ok(Some(e));
                     }
@@ -565,7 +580,9 @@ impl<'a> Engine<'a> {
                 let mut covered = false;
                 if let Some(property) = obj.get("properties").and_then(|p| p.get(key)) {
                     covered = true;
-                    if let Some(e) = self.check(property, child, &child_path, depth + 1, work)? {
+                    if let Some(e) =
+                        self.check(property, child, &child_path, depth + 1, work, warnings)?
+                    {
                         return Ok(Some(e));
                     }
                 }
@@ -574,7 +591,7 @@ impl<'a> Engine<'a> {
                         if self.matches(pattern, key, work)? {
                             covered = true;
                             if let Some(e) =
-                                self.check(property, child, &child_path, depth + 1, work)?
+                                self.check(property, child, &child_path, depth + 1, work, warnings)?
                             {
                                 return Ok(Some(e));
                             }
@@ -583,9 +600,22 @@ impl<'a> Engine<'a> {
                 }
                 // 旧版原生主题 schema 未声明根级编辑器提示，也允许保留它。
                 if !covered && !(path == "$" && key == "$schema" && child.is_string()) {
-                    if let Some(additional) = obj.get("additionalProperties") {
+                    let additional = obj.get("additionalProperties");
+                    let untyped = additional.is_none_or(Value::is_boolean);
+                    if untyped && warnings.is_some() {
+                        // 开放的无结构对象不声明字段清单，不将其中的任意键视为拼写错误。
+                        if obj.contains_key("properties")
+                            || obj.contains_key("patternProperties")
+                            || additional == Some(&Value::Bool(false))
+                        {
+                            if let Some(warnings) = warnings {
+                                warnings
+                                    .push(format!("{child_path}：Schema 未声明此字段，已保留。"));
+                            }
+                        }
+                    } else if let Some(additional) = additional {
                         if let Some(e) =
-                            self.check(additional, child, &child_path, depth + 1, work)?
+                            self.check(additional, child, &child_path, depth + 1, work, warnings)?
                         {
                             return Ok(Some(e));
                         }
@@ -597,15 +627,48 @@ impl<'a> Engine<'a> {
             if let Some(branches) = obj.get(key).and_then(Value::as_array) {
                 let mut count = 0;
                 let mut first_error = None;
+                let mut accepted_warnings: Option<Vec<String>> = None;
+                let mut strict_count = 0;
+                let mut strict_warnings = None;
                 for branch in branches {
-                    match self.check(branch, value, path, depth + 1, work)? {
-                        None => count += 1,
+                    // oneOf 已有严格匹配时优先保留其分支选择，避免宽容未知字段后
+                    // 其他分支也匹配而使原本有效的配置变为多重匹配。
+                    let strict_match = key == "oneOf"
+                        && warnings.is_some()
+                        && self
+                            .check(branch, value, path, depth + 1, work, &mut None)?
+                            .is_none();
+                    let mut branch_warnings = warnings.as_ref().map(|_| Vec::new());
+                    match self.check(branch, value, path, depth + 1, work, &mut branch_warnings)? {
+                        None => {
+                            count += 1;
+                            if strict_match {
+                                strict_count += 1;
+                                strict_warnings = branch_warnings.clone();
+                            }
+                            if let Some(branch_warnings) = branch_warnings {
+                                if key == "allOf" {
+                                    accepted_warnings
+                                        .get_or_insert_default()
+                                        .extend(branch_warnings);
+                                } else if accepted_warnings
+                                    .as_ref()
+                                    .is_none_or(|old| branch_warnings.len() < old.len())
+                                {
+                                    accepted_warnings = Some(branch_warnings);
+                                }
+                            }
+                        }
                         Some(e) => {
                             if first_error.is_none() {
                                 first_error = Some(e);
                             }
                         }
                     }
+                }
+                if strict_count > 0 {
+                    count = strict_count;
+                    accepted_warnings = strict_warnings;
                 }
                 let valid = match key {
                     "allOf" => count == branches.len(),
@@ -618,6 +681,10 @@ impl<'a> Engine<'a> {
                         branches.len(),
                         first_error.unwrap_or_else(|| "expected exactly one match".into())
                     ));
+                }
+                // 只呈现匹配分支的警告；anyOf 优先采用未知字段最少的分支。
+                if let (Some(warnings), Some(accepted)) = (warnings.as_mut(), accepted_warnings) {
+                    warnings.extend(accepted);
                 }
             }
         }
@@ -722,14 +789,64 @@ mod tests {
             "properties":{"color":{"$ref":"#/$defs/color"},"size":{"type":"integer","minimum":1,"maximum":20}},
             "propertyNames":{"pattern":"^[a-z$]+$"},"additionalProperties":false})).unwrap();
         assert!(m.validate(&json!({"color":"#abcdef","size":12})).is_ok());
+        let extra = json!({"color":"#abcdef","extra":true});
+        assert_eq!(m.validate(&extra).unwrap().len(), 1);
+        assert!(m.engine().unwrap().validate(&extra).is_err());
         for value in [
             json!({}),
             json!({"color":"red"}),
             json!({"color":"#abcdef","size":21}),
-            json!({"color":"#abcdef","extra":true}),
         ] {
             assert!(m.validate(&value).is_err());
         }
+    }
+
+    #[test]
+    fn preserves_unknown_nested_fields_without_relaxing_known_values() {
+        let m = metadata(json!({"type":"object", "properties":{
+            "apps":{"type":"object","additionalProperties":{"$ref":"#/$defs/options"}},
+            "theme":{"$ref":"#/$defs/options"}
+        }, "$defs":{"options":{"type":"object","properties":{
+            "enabled":{"type":"boolean"}
+        },"additionalProperties":false}}, "additionalProperties":false}))
+        .unwrap();
+        let value = json!({"custom":{"data":[1,2]},
+            "apps":{"a.exe":{"enabled":true,"legacy":42}},
+            "theme":{"enabled":false,"custom":{}}});
+        let warnings = m.validate(&value).unwrap();
+        assert_eq!(warnings.len(), 3);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.starts_with("$/apps/a.exe/legacy："))
+        );
+        for invalid in [
+            json!({"theme":{"enabled":"yes","custom":42}}),
+            json!({"apps":{"a.exe":false}}),
+        ] {
+            assert!(m.validate(&invalid).is_err());
+        }
+        assert!(Metadata::from_parts(value, m.richschema.clone()).is_err());
+    }
+
+    #[test]
+    fn warnings_only_come_from_matching_schema_branches() {
+        let m = metadata(json!({"anyOf":[
+            {"type":"object","properties":{"a":{"type":"boolean"}},"additionalProperties":false},
+            {"type":"object","properties":{"b":{"type":"boolean"}},"additionalProperties":false}
+        ]}))
+        .unwrap();
+        assert!(m.validate(&json!({"b":true})).unwrap().is_empty());
+        let warnings = m.validate(&json!({"b":true,"extra":42})).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].starts_with("$/extra："));
+        let m = metadata(json!({"oneOf":[
+            {"type":"object","properties":{"a":{"type":"boolean"}},"additionalProperties":false},
+            {"type":"object","properties":{"b":{"type":"boolean"}},"additionalProperties":false}
+        ]}))
+        .unwrap();
+        assert!(m.validate(&json!({"b":true})).unwrap().is_empty());
+        assert!(m.validate(&json!({})).is_err());
     }
 
     #[test]
