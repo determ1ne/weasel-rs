@@ -50,7 +50,7 @@ impl Gate {
     pub fn start(self: &Arc<Self>, id: u64) -> Option<Admission> {
         use std::sync::atomic::Ordering;
         self.pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n < PENDING_LIMIT).then_some(n + 1)
             })
             .ok()?;

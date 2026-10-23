@@ -68,7 +68,7 @@ impl RendererPublisher {
         self.snapshots.send_modify(|latest| {
             snapshot.sequence = self
                 .sequence
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                     value.checked_add(1)
                 })
                 .expect("renderer publication sequence exhausted")
