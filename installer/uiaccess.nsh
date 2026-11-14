@@ -20,7 +20,7 @@ Var UseUiAccess
 
 Function PrepareUiAccessRenderer
   StrCpy $UseUiAccess 0
-  MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "是否为 renderer 创建并信任本机自签名证书？$\r$\n$\r$\n选择“是”可改善开始菜单等系统界面的候选框显示。安装器将向本机的受信任根证书和受信任发布者证书库添加专用测试证书，并启用 renderer 的 UIAccess权限（可跨权限级别访问界面）。$\r$\n$\r$\n选择“否”安装普通版本，不更改证书信任，但部分系统界面可能无法显示候选框。" /SD IDNO IDYES sign_renderer IDNO uiaccess_done
+  MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "是否为 renderer 创建并信任本机自签名证书？$\r$\n$\r$\n选择“是”可改善开始菜单等系统界面的候选框显示。安装器将向本机的受信任根证书库添加专用测试证书，并启用 renderer 的 UIAccess 权限（可跨权限级别访问界面）。签名后立即删除私钥，只保留公钥证书。$\r$\n$\r$\n选择“否”安装普通版本，不更改证书信任，但部分系统界面可能无法显示候选框。" /SD IDNO IDYES sign_renderer IDNO uiaccess_done
   sign_renderer:
   SetOutPath "$PLUGINSDIR"
   ClearErrors

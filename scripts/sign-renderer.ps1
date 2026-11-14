@@ -21,7 +21,7 @@ function Remove-LocalTrust {
         if ($cert.Subject -notmatch '^CN=Weasel-RS Local UIAccess [0-9a-f-]{36}$' -or $cert.Subject -ne $cert.Issuer) {
             throw 'Refusing to remove a certificate not issued by this installer.'
         }
-        foreach ($store in @('My', 'TrustedPublisher', 'Root')) {
+        foreach ($store in @('My', 'Root')) {
             $path = "Cert:\LocalMachine\$store\$($cert.Thumbprint)"
             if (Test-Path -LiteralPath $path) {
                 if ($store -eq 'My') { Remove-Item -Path $path -DeleteKey -Force }
@@ -48,7 +48,6 @@ try {
             -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(1)
         $null = Export-Certificate -Cert $cert -FilePath $CertificatePath
         $null = Import-Certificate -FilePath $CertificatePath -CertStoreLocation Cert:\LocalMachine\Root
-        $null = Import-Certificate -FilePath $CertificatePath -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
         $result = Set-AuthenticodeSignature -LiteralPath $RendererPath -Certificate $cert -HashAlgorithm SHA256
         if ($result.Status -ne 'Valid') { throw "Signing failed: $($result.StatusMessage)" }
     } finally {
