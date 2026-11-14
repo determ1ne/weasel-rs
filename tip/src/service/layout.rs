@@ -57,6 +57,8 @@ fn composition_target_range(composition: &ITfComposition, ec: TfEditCookie) -> R
 /// 合并待执行的 TSF 只读会话；执行前到达的通知只刷新其上下文令牌。
 #[derive(Default)]
 pub(super) struct LayoutSchedule {
+    /// 已验证点状锚点所属的 token；本次 composition 或焦点结束时清除。
+    point_anchor: Option<ContextToken>,
     /// 用于区分先后排队的只读会话。
     serial: u64,
     /// 待执行 ticket 及其用途。
@@ -65,6 +67,10 @@ pub(super) struct LayoutSchedule {
     retry_indicator: Option<ModeIndicatorLayout>,
 }
 impl LayoutSchedule {
+    /// 清除本次 composition 的点状锚点保留资格。
+    pub(super) fn clear_point_anchor(&mut self) {
+        self.point_anchor = None;
+    }
     /// 组合布局优先；若提示查询尚未执行，则复用其 ticket 并改为组合用途。
     fn request_composition(&mut self, token: ContextToken) -> Option<u64> {
         self.retry_indicator = None;
@@ -299,7 +305,36 @@ impl ITfEditSession_Impl for LayoutProbe_Impl {
                 // Transient geometry failure must not flood the key/log queue.
                 return Ok(());
             }
-            let rect = physical_text_rect(&view, rect);
+            // 腾讯文档微信小程序的文档编辑区会返回 S_OK + 零尺寸文本点，且
+            // GetScreenExt 的小矩形可能先于文本点移动。
+            // 因此先校验并接受点状锚点，同一 composition 内暂时不匹配时保留已验证位置，
+            // 避免候选框闪烁或者消失。
+            let is_point = !clipped.as_bool() && rect.left == rect.right && rect.top == rect.bottom;
+            let mut document_valid = false;
+            let point_document = if is_point {
+                let document = unsafe { view.GetScreenExt() };
+                document_valid = document
+                    .as_ref()
+                    .is_ok_and(|area| area.right > area.left && area.bottom > area.top);
+                document.as_ref().is_ok_and(|area| {
+                    area.right > area.left
+                        && area.bottom > area.top
+                        && rect.left >= area.left
+                        && rect.left < area.right
+                        && rect.top >= area.top
+                        && rect.top < area.bottom
+                })
+            } else {
+                false
+            };
+            let mut rect = physical_text_rect(&view, rect);
+            if point_document {
+                // 在 DPI 转换后补物理像素，计算真实行高。
+                const POINT_ANCHOR_HEIGHT_PX: i32 = 1;
+                if let Some(bottom) = rect.top.checked_add(POINT_ANCHOR_HEIGHT_PX) {
+                    rect.bottom = bottom;
+                }
+            }
             if self.generation.load(Ordering::Acquire) != self.requested_generation
                 || self.state.applied_layout_revision.load(Ordering::Acquire) != applied_revision
                 || !self.state.matches(Some(token))?
@@ -311,6 +346,28 @@ impl ITfEditSession_Impl for LayoutProbe_Impl {
                     .as_ref()
                     != Some(&composition)
             {
+                return Ok(());
+            }
+            let mut retain = false;
+            {
+                let mut layout = self
+                    .state
+                    .layout
+                    .try_lock()
+                    .map_err(|_| Error::from_hresult(boundary::E_FAIL))?;
+                if point_document && rect.bottom > rect.top {
+                    layout.point_anchor = Some(token.clone());
+                } else if is_point && document_valid {
+                    // 保持现有位置而不是隐藏，防止闪烁。
+                    retain = layout.point_anchor.as_ref() == Some(token);
+                    if !retain {
+                        layout.clear_point_anchor();
+                    }
+                } else {
+                    layout.clear_point_anchor();
+                }
+            }
+            if retain {
                 return Ok(());
             }
             self.state

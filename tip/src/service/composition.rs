@@ -239,6 +239,7 @@ impl TextService {
         self.edit_mutated.store(true, Ordering::Release);
         let composition = unsafe { context_composition.StartComposition(ec, &range, sink)? };
         let previous = self.lock(&state.composition)?.replace(composition);
+        self.lock(&state.layout)?.clear_point_anchor();
         *self.lock(&state.composition_content)? = CompositionContent::preedit(
             response
                 .commit_text
@@ -434,6 +435,7 @@ impl TextService {
         }
 
         let active = self.lock(&state.composition)?.take();
+        self.lock(&state.layout)?.clear_point_anchor();
         let _ = self.lock(&state.composition_content)?.finish();
         if let Some(active) = active {
             let range = unsafe { active.GetRange()? };
@@ -543,6 +545,7 @@ impl TextService {
                 if let Some(active) = active {
                     let range = unsafe { active.GetRange()? };
                     let owned = self.lock(&state.composition)?.take();
+                    self.lock(&state.layout)?.clear_point_anchor();
                     let _ = self.lock(&state.composition_content)?.finish();
                     drop(owned);
                     self.clear_display_attribute_best_effort(&context, ec, &range);

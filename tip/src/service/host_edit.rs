@@ -139,6 +139,7 @@ impl TextService {
         host_terminated: bool,
     ) -> Result<()> {
         let active = self.lock(&state.composition)?.take();
+        self.lock(&state.layout)?.clear_point_anchor();
         let Some(active) = active else {
             return Ok(());
         };

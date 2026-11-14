@@ -271,6 +271,7 @@ impl TextService {
         let states = self.lock(&self.contexts)?.clone();
         for state in states {
             if Some(state.id) == previous {
+                self.lock(&state.layout)?.clear_point_anchor();
                 self.lock(&state.layout)?.cancel_indicator();
                 self.send_context_action(&state, ContextAction::Blur, false)?;
             }
