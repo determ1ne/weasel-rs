@@ -62,6 +62,8 @@ pub(super) struct ContextState {
     pub secure_probe: Mutex<secure_input::SecureProbeSchedule>,
     /// 当前是否已启用安全输入绕过策略。
     pub secure_bypass_active: AtomicBool,
+    /// 用户是否已解除当前密码范围的默认直通；焦点或范围变化时重置。
+    pub secure_user_override: AtomicBool,
     /// 在 TSF 事件源注册的 Sink cookie；停止时解除订阅。
     cookies: Mutex<Vec<u32>>,
 }
@@ -222,6 +224,7 @@ impl TextService {
             secure_field: AtomicU8::new(secure_input::UNAVAILABLE),
             secure_probe: Mutex::default(),
             secure_bypass_active: AtomicBool::new(false),
+            secure_user_override: AtomicBool::new(false),
             cookies: Mutex::new(Vec::new()),
         });
         let source: ITfSource = state.context.cast()?;
@@ -273,6 +276,7 @@ impl TextService {
             }
         }
         if let Some(state) = next {
+            state.secure_user_override.store(false, Ordering::Release);
             self.send_context_action(&state, ContextAction::Focus, false)?;
         }
         self.refresh_language_bar()?;

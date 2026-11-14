@@ -117,6 +117,7 @@ impl LanguageBar {
             available: AtomicBool::new(false),
             suspended: AtomicBool::new(false),
             bypass_rime: AtomicBool::new(false),
+            can_override_bypass: AtomicBool::new(false),
             light_background: AtomicBool::new(taskbar_is_light()),
             _module: ModuleLease::new(),
         });
@@ -137,11 +138,17 @@ impl LanguageBar {
         connection_failed: bool,
         suspended: bool,
         bypass_rime: bool,
+        can_override_bypass: bool,
     ) -> Result<()> {
         let suspended_changed =
             self.button.suspended.swap(suspended, Ordering::AcqRel) != suspended;
         let bypass_changed =
             self.button.bypass_rime.swap(bypass_rime, Ordering::AcqRel) != bypass_rime;
+        let override_changed = self
+            .button
+            .can_override_bypass
+            .swap(can_override_bypass, Ordering::AcqRel)
+            != can_override_bypass;
         {
             let mut target = self
                 .button
@@ -174,7 +181,8 @@ impl LanguageBar {
             || connection_changed
             || availability_changed
             || theme_changed
-            || bypass_changed;
+            || bypass_changed
+            || override_changed;
         if !changed {
             return Ok(());
         }
@@ -198,7 +206,7 @@ impl LanguageBar {
 impl LanguageBar {
     /// 将按钮切换为暂停展示态，同时清除可操作上下文。
     fn suspend(&self) -> Result<()> {
-        self.update(None, None, true, true, false)
+        self.update(None, None, true, true, false, false)
     }
 }
 
@@ -234,8 +242,10 @@ struct ModeButton {
     available: AtomicBool,
     /// 服务暂停状态；暂停时保留语言栏可见性以供诊断入口使用。
     suspended: AtomicBool,
-    /// 当前焦点是否按输入策略绕过 Rime；绕过时展示英文且禁止模式切换。
+    /// 当前焦点是否按输入策略绕过 Rime；绕过时展示英文。
     bypass_rime: AtomicBool,
+    /// 当前直通是否仅来自可由用户解除的密码范围默认值。
+    can_override_bypass: AtomicBool,
     /// 最近读取的任务栏背景主题，用于选择对比度合适的资源图标。
     light_background: AtomicBool,
     /// 保证 COM 对象存活期间 TIP DLL 不会被卸载。
@@ -324,7 +334,7 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
     /// 右键打开命令菜单；左键对允许 Rime 处理的存活焦点上下文异步发出模式切换。
     ///
     /// 该方法处于 TSF/COM 调用边界，绝不等待 RPC 响应；锁采用 `try_lock`，锁冲突以
-    /// HRESULT 错误返回。直通输入、暂停态、失效上下文均禁止切换。
+    /// HRESULT 错误返回。宿主禁用、暂停态、失效上下文均禁止切换。
     fn OnClick(&self, click: TfLBIClick, point: &POINT, _area: *const RECT) -> Result<()> {
         boundary::guard(None, || {
             if click == TF_LBI_CLK_RIGHT {
@@ -333,7 +343,8 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
             if click != TF_LBI_CLK_LEFT
                 || !self.available.load(Ordering::Acquire)
                 || self.suspended.load(Ordering::Acquire)
-                || self.bypass_rime.load(Ordering::Acquire)
+                || (self.bypass_rime.load(Ordering::Acquire)
+                    && !self.can_override_bypass.load(Ordering::Acquire))
             {
                 return Ok(());
             }
@@ -349,10 +360,20 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
             if !target.alive.load(Ordering::Acquire) {
                 return Ok(());
             }
+            let override_bypass = self.bypass_rime.load(Ordering::Acquire);
+            if override_bypass && !self.mode_known.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            // 显示的英文可能只是局部直通，不能盲目翻转底层已经开启的中文模式。
+            let set_chinese = override_bypass && !self.ascii.load(Ordering::Acquire);
             let command = ContextCommand {
                 token: Some(target.token()?),
-                action: ContextAction::ToggleAscii as i32,
-                ascii_mode: None,
+                action: if set_chinese {
+                    ContextAction::SetAscii
+                } else {
+                    ContextAction::ToggleAscii
+                } as i32,
+                ascii_mode: set_chinese.then_some(false),
             };
             // Never wait for a pipe response from a language-bar COM callback.
             let rpc = target
@@ -361,6 +382,9 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
                 .map_err(|_| Error::from_hresult(E_FAIL))?;
             if rpc.context_command(command).is_err() {
                 return Err(Error::from_hresult(E_FAIL));
+            }
+            if override_bypass {
+                target.secure_user_override.store(true, Ordering::Release);
             }
             Ok(())
         })
@@ -529,6 +553,7 @@ mod tests {
             available: AtomicBool::new(false),
             suspended: AtomicBool::new(false),
             bypass_rime: AtomicBool::new(false),
+            can_override_bypass: AtomicBool::new(false),
             light_background: AtomicBool::new(taskbar_is_light()),
             _module: ModuleLease::new(),
         })
@@ -758,6 +783,9 @@ impl TextService {
                 connection_failed,
                 suspended,
                 bypass_rime,
+                state
+                    .as_ref()
+                    .is_some_and(|state| self.can_override_secure_field(state)),
             )
         }) {
             self.lock(&self.rpc)?

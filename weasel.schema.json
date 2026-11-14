@@ -55,7 +55,7 @@
       "default": 800
     },
     "allow_rime_in_secure_fields": {
-      "description": "关闭时，密码等安全输入区域将绕过 Rime 并直接交给应用。仅当密码包含必须通过输入法转换的内容（例如中文）时才建议开启。",
+      "description": "关闭时，密码字段默认绕过 Rime，仍可通过语言栏手动切换到中文；重新进入字段时恢复默认直通。开启后，密码字段默认沿用当前输入模式。宿主明确禁用输入法的区域不受此选项影响。",
       "type": "boolean",
       "title": "允许 Rime 处理安全输入区域",
       "default": false

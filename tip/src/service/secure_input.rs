@@ -3,8 +3,8 @@ use super::*;
 use crate::bindings::{
     CoTaskMemFree, GUID_COMPARTMENT_EMPTYCONTEXT, GUID_COMPARTMENT_KEYBOARD_DISABLED,
     GUID_PROP_INPUTSCOPE, IS_ALPHANUMERIC_PIN, IS_ALPHANUMERIC_PIN_SET, IS_NUMERIC_PASSWORD,
-    IS_NUMERIC_PIN, IS_PASSWORD, IS_PRIVATE, ITfCompartmentMgr, InputScopeManual,
-    TF_DEFAULT_SELECTION, VariantClear,
+    IS_NUMERIC_PIN, IS_PASSWORD, ITfCompartmentMgr, InputScopeManual, TF_DEFAULT_SELECTION,
+    VariantClear,
 };
 use weasel_common::message::ContextAction;
 
@@ -158,21 +158,23 @@ fn query_secure_field(context: &ITfContext, ec: TfEditCookie) -> SecureFieldStat
     } else {
         unsafe { std::slice::from_raw_parts(scopes.0, count as usize) }
     };
-    if values.iter().any(|scope| {
-        matches!(
-            *scope,
-            IS_PASSWORD
-                | IS_PRIVATE
-                | IS_NUMERIC_PASSWORD
-                | IS_NUMERIC_PIN
-                | IS_ALPHANUMERIC_PIN
-                | IS_ALPHANUMERIC_PIN_SET
-        )
-    }) {
+    if values.iter().copied().any(is_password_scope) {
         SecureFieldState::Secure
     } else {
         SecureFieldState::Normal
     }
+}
+
+/// 仅密码和 PIN 范围默认使用直通模式；隐私范围不改变输入模式。
+fn is_password_scope(scope: InputScopeManual) -> bool {
+    matches!(
+        scope,
+        IS_PASSWORD
+            | IS_NUMERIC_PASSWORD
+            | IS_NUMERIC_PIN
+            | IS_ALPHANUMERIC_PIN
+            | IS_ALPHANUMERIC_PIN_SET
+    )
 }
 
 /// 读取 context 级 TSF compartment 的布尔值；缺失和格式异常按未设置处理。
@@ -327,6 +329,7 @@ impl TextService {
         if state.secure_field.swap(next, Ordering::AcqRel) == next {
             return;
         }
+        state.secure_user_override.store(false, Ordering::Release);
         self.wake_for_secure_update();
     }
 
@@ -367,7 +370,15 @@ impl TextService {
         }
         Ok(!self.secure_policy_allows_rime(state)?
             && (self.secure_mode.load(Ordering::Acquire)
-                || state.secure_field.load(Ordering::Acquire) == SECURE))
+                || (state.secure_field.load(Ordering::Acquire) == SECURE
+                    && !state.secure_user_override.load(Ordering::Acquire))))
+    }
+
+    /// 密码范围的默认直通允许用户解除；宿主禁用及全局安全模式不可解除。
+    pub(super) fn can_override_secure_field(&self, state: &ContextState) -> bool {
+        state.secure_field.load(Ordering::Acquire) == SECURE
+            && !self.secure_mode.load(Ordering::Acquire)
+            && !context_rejects_tip(&state.context)
     }
 
     /// 将焦点上下文与安全策略对齐；首次进入绕过状态时取消远端组合，且只取消一次。
@@ -381,13 +392,7 @@ impl TextService {
         let Some(state) = state else {
             return Ok(());
         };
-        // InputScope 不可用时不影响普通输入；仅已确认的安全字段或宿主明确
-        // 禁用 TIP 时才进入绕过状态。
-        let rejected = context_rejects_tip(&state.context);
-        let secure = rejected
-            || self.secure_mode.load(Ordering::Acquire)
-            || state.secure_field.load(Ordering::Acquire) == SECURE;
-        let bypass = secure && (rejected || !self.secure_policy_allows_rime(&state)?);
+        let bypass = self.should_bypass_secure_field(&state)?;
         if !bypass {
             state.secure_bypass_active.store(false, Ordering::Release);
             return Ok(());
@@ -415,5 +420,17 @@ impl TextService {
         if changed || epoch_changed {
             self.wake_for_secure_update();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_scope_does_not_request_password_mode() {
+        assert!(!is_password_scope(crate::bindings::IS_PRIVATE));
+        assert!(is_password_scope(IS_PASSWORD));
+        assert!(is_password_scope(IS_NUMERIC_PIN));
     }
 }
